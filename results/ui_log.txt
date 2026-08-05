@@ -730,3 +730,29 @@
 2026-08-05T10:49:23.1358993Z Manual input required for 3.1.1: Consistent formatting and naming conventions across objects
 2026-08-05T10:49:23.1652609Z Evaluation complete. 2 items evaluated. Results in results/ folder.
 2026-08-05T10:49:23.2399686Z Rendered report saved to results/final_report.md
+2026-08-05T12:05:51.7591385Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-05T12:05:51.7660731Z Opened on Login view.
+2026-08-05T12:06:25.5246944Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-05T12:06:42.5928086Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-05T12:06:59.6695345Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-05T12:07:16.3554319Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-05T12:07:31.0187668Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-05T12:07:48.0913867Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-05T12:08:05.1545083Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-05T12:08:05.2426750Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-05T12:08:05.2498605Z Connection to localhost verified.
+2026-08-05T12:08:05.3609905Z Checklist auto-loaded after verification.
+2026-08-05T12:08:18.8952138Z Loading checklist structure...
+2026-08-05T12:08:18.9457132Z Selected 2 checklist item(s) loaded into memory.
+2026-08-05T12:08:19.0030651Z Checklist loaded.
+2026-08-05T12:08:19.9892632Z Starting evaluation...
+2026-08-05T12:08:20.0290963Z [3.1.2] Evaluating (Script)
+2026-08-05T12:08:20.0807716Z [3.1.1] Evaluating (AI-MCP)
+2026-08-05T12:08:23.5334199Z [3.1.2] Passed (Script)
+2026-08-05T12:09:00.2211605Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-05T12:11:00.6094486Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-05T12:11:00.6316962Z Manual input required for 3.1.1: Consistent formatting and naming conventions across objects
+2026-08-05T12:11:00.6522884Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-05T12:11:00.6828764Z Rendered report saved to results/final_report.md
+2026-08-05T12:11:07.9798117Z Marked 3.1.1 as Pass.
+2026-08-05T12:11:10.3260188Z Rendered report saved to results/final_report.md
