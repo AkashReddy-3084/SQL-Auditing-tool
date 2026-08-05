@@ -25,8 +25,8 @@ internal static class EvaluationDecisionService
         }
         sb.AppendLine("Objective: Confirm that this control is correctly implemented on the audited SQL Server instance.");
         sb.AppendLine();
-        sb.AppendLine("> Detailed guidance could not be generated automatically (the language model was unreachable).");
-        sb.AppendLine("> See results/ui_log.txt for the underlying error, then follow the generic steps below.");
+        sb.AppendLine("Note: Detailed guidance could not be generated automatically (the language model was unreachable).");
+        sb.AppendLine("See results/ui_log.txt for the underlying error, then follow the generic steps below.");
         sb.AppendLine();
         sb.AppendLine("## Manual Verification Steps:");
         sb.AppendLine("1. Connect to the audited SQL Server instance in SQL Server Management Studio (SSMS) with an account that has at least the VIEW SERVER STATE permission.");

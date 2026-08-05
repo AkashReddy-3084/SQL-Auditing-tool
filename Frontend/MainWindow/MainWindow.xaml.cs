@@ -722,11 +722,36 @@ namespace SQLAuditor.Wpf
             var it = _manualQueue[_manualIndex];
             var state = EnsureManualState(it.Id);
             ManualTitle.Text = $"Manual evaluation for {it.Id}";
-            ManualStepsText.Text = state.Instructions;
+            ManualStepsText.Text = ToPlainText(state.Instructions);
             _isHydratingManualUi = true;
             ManualOutputBox.Text = state.Remarks;
             _isHydratingManualUi = false;
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+        }
+
+        // ManualStepsText is a TextBlock, so Markdown from the model would otherwise render as literal characters.
+        private static string ToPlainText(string? markdown)
+        {
+            if (string.IsNullOrWhiteSpace(markdown)) return string.Empty;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var rawLine in markdown.Replace("\r\n", "\n").Split('\n'))
+            {
+                var line = rawLine.TrimEnd();
+                if (line.TrimStart().StartsWith("```", StringComparison.Ordinal)) continue;
+
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"^\s*>\s?", string.Empty);
+                if (System.Text.RegularExpressions.Regex.IsMatch(line, @"^\s*([-*_])\1{2,}\s*$")) continue;
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"^\s*#{1,6}\s*", string.Empty);
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"^(\s*)[-*+]\s+", "$1\u2022 ");
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"\*\*(.+?)\*\*", "$1");
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"__(.+?)__", "$1");
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"`([^`]+)`", "$1");
+
+                sb.AppendLine(line);
+            }
+
+            return sb.ToString().Trim();
         }
 
         private bool HasPendingManualResponses()
