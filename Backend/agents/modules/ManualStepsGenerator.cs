@@ -16,16 +16,17 @@ internal sealed class ManualStepsGenerator
     private const string DefaultBaseUrl = "https://llm.maqsoftware.net/v1";
     private const string DefaultApiKey = "sk-jlQlxi3zFjCNOYyeSqLDwQ";
     private const string DefaultModel = "qwen-3.6-27b";
+    private const int DefaultTimeoutSeconds = 240;
 
     private readonly string _baseUrl;
     private readonly string _model;
     private readonly HttpClient _http;
 
-    private ManualStepsGenerator(string baseUrl, string apiKey, string model)
+    private ManualStepsGenerator(string baseUrl, string apiKey, string model, TimeSpan timeout)
     {
         _baseUrl = baseUrl;
         _model = model;
-        _http = new HttpClient();
+        _http = new HttpClient { Timeout = timeout };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
 
@@ -34,11 +35,17 @@ internal sealed class ManualStepsGenerator
         var baseUrl = Environment.GetEnvironmentVariable("PROVIDER_BASE_URL");
         var apiKey = Environment.GetEnvironmentVariable("PROVIDER_API_KEY");
         var model = Environment.GetEnvironmentVariable("MODEL");
+        var timeoutRaw = Environment.GetEnvironmentVariable("PROVIDER_TIMEOUT_SECONDS");
+
+        var timeoutSeconds = int.TryParse(timeoutRaw, out var parsedTimeout) && parsedTimeout > 0
+            ? parsedTimeout
+            : DefaultTimeoutSeconds;
 
         return new ManualStepsGenerator(
             string.IsNullOrWhiteSpace(baseUrl) ? DefaultBaseUrl : baseUrl.TrimEnd('/'),
             string.IsNullOrWhiteSpace(apiKey) ? DefaultApiKey : apiKey,
-            string.IsNullOrWhiteSpace(model) ? DefaultModel : model);
+            string.IsNullOrWhiteSpace(model) ? DefaultModel : model,
+            TimeSpan.FromSeconds(timeoutSeconds));
     }
 
     public async Task<string> GenerateAsync(ChecklistItem item, CancellationToken cancellationToken = default)
@@ -49,40 +56,82 @@ internal sealed class ManualStepsGenerator
 
     public async Task<ManualStepsGenerationResult> GenerateWithMetadataAsync(ChecklistItem item, CancellationToken cancellationToken = default)
     {
-        var checklistItem = $"ID: {item.Id}\nDescription: {item.Description}\nVerification: {item.Verification}";
         var systemPrompt = PromptTemplateStore.Render(
             "manual_steps_prompt.txt",
             new Dictionary<string, string>
             {
-                ["CHECKLIST_ITEM"] = "The checklist item will be provided in the user message."
+                ["CHECKLIST_ITEM"] = "(supplied in the user message)"
             });
-        var userPrompt = checklistItem;
 
         var body = new
         {
             model = _model,
+            temperature = 0.2,
             messages = new[]
             {
                 new { role = "system", content = systemPrompt },
-                new { role = "user", content = userPrompt }
+                new { role = "user", content = BuildChecklistItemPrompt(item) }
             }
         };
 
         using var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         using var response = await _http.PostAsync(_baseUrl + "/chat/completions", content, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
         var txt = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"HTTP {(int)response.StatusCode} {response.ReasonPhrase} from {_baseUrl}/chat/completions (model '{_model}'): {Truncate(txt, 500)}");
+        }
+
         using var doc = JsonDocument.Parse(txt);
         var totalTokens = TryExtractTotalTokens(doc.RootElement);
-        if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+        if (!doc.RootElement.TryGetProperty("choices", out var choices)
+            || choices.GetArrayLength() == 0
+            || !choices[0].TryGetProperty("message", out var message))
         {
             return new ManualStepsGenerationResult(string.Empty, txt, totalTokens);
         }
 
-        var output = choices[0].GetProperty("message").GetProperty("content").GetString();
+        // Reasoning models leave "content" empty and put the answer in "reasoning_content".
+        var output = ReadStringProperty(message, "content");
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            output = ReadStringProperty(message, "reasoning_content");
+        }
+
         var instructions = string.IsNullOrWhiteSpace(output) ? string.Empty : output.Trim();
         return new ManualStepsGenerationResult(instructions, txt, totalTokens);
+    }
+
+    private static string BuildChecklistItemPrompt(ChecklistItem item)
+    {
+        var sb = new StringBuilder();
+        sb.Append("ID: ").AppendLine(item.Id);
+        sb.Append("Description: ").AppendLine(item.Description);
+        if (!string.IsNullOrWhiteSpace(item.Category))
+        {
+            sb.Append("Audit area: ").AppendLine(item.Category);
+        }
+        if (!string.IsNullOrWhiteSpace(item.Verification))
+        {
+            sb.Append("Verification: ").AppendLine(item.Verification);
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static string? ReadStringProperty(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static string Truncate(string value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= maxLength) return value;
+        return value.Substring(0, maxLength) + "...";
     }
 
     private static int TryExtractTotalTokens(JsonElement root)
