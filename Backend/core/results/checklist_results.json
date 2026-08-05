@@ -1,0 +1,2954 @@
+[
+  {
+    "Id": "1.3.1",
+    "Description": "HA approach defined and matches SLA (Always On AG / failover cluster / zone-redundant / failover groups)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/1.3.1_HA_approach_defined_and_matches_SLA_Always_On_AG_failover_cluster_zone_redundant_failover_groups.sql ---\r\n--- Batch 1 ---\r\nFailed\r\n(rows: 1)\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.1_HA_approach_defined_and_matches_SLA_Always_On_AG_failover_cluster_zone_redundant_failover_groups.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.4.3",
+    "Description": "Job duration trends monitored",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.4.3_Job_duration_trends_monitored.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.4.3_Job_duration_trends_monitored.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.4.2",
+    "Description": "tempdb contention monitored and mitigated",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.4.2_tempdb_contention_monitored_and_mitigated.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.4.2_tempdb_contention_monitored_and_mitigated.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.4.5",
+    "Description": "Memory grants monitored (no excessive spills to tempdb)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.4.5_Memory_grants_monitored_no_excessive_spills_to_tempdb.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.4.5_Memory_grants_monitored_no_excessive_spills_to_tempdb.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.5.1",
+    "Description": "Statistics kept current (auto-update on, plus manual updates after large loads)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.5.1_Statistics_kept_current_auto_update_on_plus_manual_updates_after_large_loads.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.5.2",
+    "Description": "Auto-create statistics enabled where appropriate",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.5.2_Auto_create_statistics_enabled_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.5.3",
+    "Description": "Parameter sniffing issues identified and mitigated (OPTIMIZE FOR, recompile, etc.)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.5.3_Parameter_sniffing_issues_identified_and_mitigated_optimize_for_recompile_etc.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.5.4",
+    "Description": "Plan cache health reviewed (no excessive single-use plans / bloat)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.5.4_Plan_cache_health_reviewed_no_excessive_single_use_plans_bloat.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.2",
+    "Description": "SARGable predicates used (no functions wrapping indexed columns)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.1.2_SARGable_predicates_used_no_functions_wrapping_indexed_columns.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.2_SARGable_predicates_used_no_functions_wrapping_indexed_columns.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.3.4",
+    "Description": "Documentation kept current with schema changes",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.2.1",
+    "Description": "Runbook exists for daily/weekly/monthly operations",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.1.1",
+    "Description": "Service tier / compute sizing based on workload analysis (not guesswork)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.4.1",
+    "Description": "Unit tests exist for critical transformation logic (e.g., tSQLt)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.3.3",
+    "Description": "Test environment representative of production (data, scale)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.3.5",
+    "Description": "Escalation path defined for critical alerts",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.3.5_Escalation_path_defined_for_critical_alerts.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.3.5_Escalation_path_defined_for_critical_alerts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.2.5",
+    "Description": "Baselines captured for comparison over time",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.4.3",
+    "Description": "Data access to sensitive tables auditable (who accessed what, when)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/7.4.3_Data_access_to_sensitive_tables_auditable_who_accessed_what_when.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.3_Data_access_to_sensitive_tables_auditable_who_accessed_what_when.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.3.4",
+    "Description": "ETL is idempotent \u2014 safe to re-run after failure",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.3.4_ETL_is_idempotent_safe_to_re_run_after_failure.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.12",
+    "Description": "Listener / alias failover tested end-to-end \u2014 applications reconnect transparently with no manual intervention",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.4.1",
+    "Description": "SQL Audit (server/database) enabled for sensitive operations",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/7.4.1_SQL_Audit_server_database_enabled_for_sensitive_operations.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.1_SQL_Audit_server_database_enabled_for_sensitive_operations.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.8",
+    "Description": "Availability mode (synchronous vs asynchronous commit) and failover mode (automatic vs manual) documented and aligned to RPO/RTO",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.8_Availability_mode_synchronous_vs_asynchronous_commit_and_failover_mode_automatic_vs_manual_documented_and_aligned_to_RPO_RTO.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.7",
+    "Description": "Application connection resilience verified (retry logic, failover endpoints)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.7_Application_connection_resilience_verified_retry_logic_failover_endpoints.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.6",
+    "Description": "Secondary region/replica capacity provisioned or evaluated",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.3.3",
+    "Description": "Business definitions/rules documented and current",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.2.5",
+    "Description": "DBA/ops ownership and responsibilities defined",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.1.4",
+    "Description": "Dependencies documented (linked servers, cross-database references)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/8.1.4_Dependencies_documented_linked_servers_cross_database_references.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.1.3",
+    "Description": "Regime-specific control set mapped into the compliance matrix",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.3.5",
+    "Description": "Jump-host/bastion or controlled path for administrative access",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.1.1",
+    "Description": "Microsoft Entra ID (Azure AD) authentication used where possible (over SQL auth)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.1_Microsoft_Entra_ID_Azure_AD_authentication_used_where_possible_over_SQL_auth.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.5",
+    "Description": "Cross-layer reconciliation (mart vs integration vs source counts)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.5_Cross_layer_reconciliation_mart_vs_integration_vs_source_counts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.6",
+    "Description": "Corrupt/malformed rows isolated (not failing the entire batch)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.6_Corrupt_malformed_rows_isolated_not_failing_the_entire_batch.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.4",
+    "Description": "Duplicate detection across batches",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.4_Duplicate_detection_across_batches.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.1",
+    "Description": "Every table has an appropriate clustered index (or deliberate heap justification)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.1_Every_table_has_an_appropriate_clustered_index_or_deliberate_heap_justification.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.1_Every_table_has_an_appropriate_clustered_index_or_deliberate_heap_justification.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.5.3",
+    "Description": "Unique constraints on natural/business keys where appropriate",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.3_Unique_constraints_on_natural_business_keys_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.2",
+    "Description": "Columnstore indexes used for large fact tables / analytical workloads where appropriate",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.2_Columnstore_indexes_used_for_large_fact_tables_analytical_workloads_where_appropriate.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.2_Columnstore_indexes_used_for_large_fact_tables_analytical_workloads_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.2",
+    "Description": "Fact table grain clearly defined and documented per fact",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.2_Fact_table_grain_clearly_defined_and_documented_per_fact.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.6",
+    "Description": "Late-arriving / out-of-order data handled without corruption",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.6_Late_arriving_out_of_order_data_handled_without_corruption.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.4",
+    "Description": "CDC / Change Tracking configured and maintained correctly where used",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.4_CDC_Change_Tracking_configured_and_maintained_correctly_where_used.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.1.3",
+    "Description": "Business rules for transformations documented outside code",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.2.1",
+    "Description": "Reserved capacity / savings plans evaluated vs pay-as-you-go",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.4.3",
+    "Description": "Data validation tests run post-deployment (counts, schema checks)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.4.3_Data_validation_tests_run_post_deployment_counts_schema_checks.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.3.2",
+    "Description": "Production access restricted (no developer write/deploy)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.1.1",
+    "Description": "Monitoring solution in place (Azure Monitor / SQL Insights / third-party)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.1.1_Monitoring_solution_in_place_Azure_Monitor_SQL_Insights_third_party.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.1.1_Monitoring_solution_in_place_Azure_Monitor_SQL_Insights_third_party.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.5",
+    "Description": "Backups stored redundantly / geo-redundant where required",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.5_Backups_stored_redundantly_geo_redundant_where_required.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.5_Backups_stored_redundantly_geo_redundant_where_required.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.2.1",
+    "Description": "Segregation of Duties enforced (developer \u2260 deployer \u2260 approver)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.1.2",
+    "Description": "In-scope regulated data categories identified and inventoried",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.3.1",
+    "Description": "Firewall / network rules restrict access to known sources",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.6",
+    "Description": "Sensitive data classified (SQL Data Discovery \u0026 Classification / labels)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.6_Sensitive_data_classified_SQL_Data_Discovery_Classification_labels.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.4.6",
+    "Description": "**Identifiers / Keys**: uniqueness verified; format consistent; no nulls in keys",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.6_Identifiers_Keys_uniqueness_verified_format_consistent_no_nulls_in_keys.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.7",
+    "Description": "No duplicate grain in fact tables",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.7_No_duplicate_grain_in_fact_tables.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.2.2",
+    "Description": "Each layer has a defined purpose and transformation responsibility",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "14.2.3",
+    "Description": "Unused/duplicate indexes removed",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.2.3_Unused_duplicate_indexes_removed.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.3_Unused_duplicate_indexes_removed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.4.1",
+    "Description": "Solution maintainable by someone other than the original builder",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.1.4",
+    "Description": "Known issues and tech debt registered",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.2.3",
+    "Description": "Non-prod environments scaled down / paused when idle",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.2.2",
+    "Description": "Right-sizing reviewed periodically (over-provisioned tiers reduced)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.2.2_Right_sizing_reviewed_periodically_over_provisioned_tiers_reduced.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.4.4",
+    "Description": "Performance tests exist for critical queries/loads",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.3.5",
+    "Description": "Non-prod data masking/subsetting applied where sensitive",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.3.3",
+    "Description": "Error/severity alerts configured (Agent alerts or equivalent)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.3.3_Error_severity_alerts_configured_Agent_alerts_or_equivalent.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.3.3_Error_severity_alerts_configured_Agent_alerts_or_equivalent.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.3.1",
+    "Description": "Extended Events sessions used for diagnostics (over deprecated Profiler traces)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.3.1_Extended_Events_sessions_used_for_diagnostics_over_deprecated_Profiler_traces.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.2.4",
+    "Description": "Wait statistics reviewed as part of routine tuning",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.2.4_Wait_statistics_reviewed_as_part_of_routine_tuning.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.3.1",
+    "Description": "Consistency checks (DBCC CHECKDB) scheduled and monitored (SQL Server/MI)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.5",
+    "Description": "Failover tested at least annually",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "9.2.4",
+    "Description": "DR runbook documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "9.2.3",
+    "Description": "Geo-replication / failover group configured for DR where required",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.3_Geo_replication_failover_group_configured_for_DR_where_required.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.4",
+    "Description": "Long-term retention (LTR) configured where required",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.2.2",
+    "Description": "Data stewards assigned per domain/subject area",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.1.2",
+    "Description": "Enterprise catalog (e.g., Microsoft Purview) integrated or planned",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "5.3.6",
+    "Description": "Unknown/default dimension member usage monitored",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/5.3.6_Unknown_default_dimension_member_usage_monitored.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.6_Unknown_default_dimension_member_usage_monitored.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.5",
+    "Description": "Null/empty handling: unexpected nulls flagged",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.5_Null_empty_handling_unexpected_nulls_flagged.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.1",
+    "Description": "Schema validation on inbound data (column presence, types)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.1_Schema_validation_on_inbound_data_column_presence_types.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.5",
+    "Description": "ETL execution times monitored and baselined",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/2.4.5_ETL_execution_times_monitored_and_baselined.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.5_ETL_execution_times_monitored_and_baselined.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.5.5",
+    "Description": "Query Store used to force stable plans where regressions occur",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.5.5_Query_Store_used_to_force_stable_plans_where_regressions_occur.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.5.5_Query_Store_used_to_force_stable_plans_where_regressions_occur.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.5",
+    "Description": "Deadlock-prone patterns avoided; retry logic where needed",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.5_Deadlock_prone_patterns_avoided_retry_logic_where_needed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.5",
+    "Description": "No deprecated syntax/features (e.g., old-style joins, \u0060TEXT\u0060/\u0060NTEXT\u0060)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.5_No_deprecated_syntax_features_e_g_old_style_joins_TEXT_NTEXT.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.4",
+    "Description": "ETL windows avoid contention with reporting/query workloads",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.4_ETL_windows_avoid_contention_with_reporting_query_workloads.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.1",
+    "Description": "Deployment model is deliberate and documented (SQL Server / Azure SQL MI / Azure SQL DB) with rationale",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "14.2.1",
+    "Description": "Index usage analyzed (seeks vs scans) against workload",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.2.1_Index_usage_analyzed_seeks_vs_scans_against_workload.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.1_Index_usage_analyzed_seeks_vs_scans_against_workload.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.4.4",
+    "Description": "MAXDOP and cost threshold for parallelism set deliberately",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.4.4_MAXDOP_and_cost_threshold_for_parallelism_set_deliberately.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.4.3",
+    "Description": "Resource Governor used where workload isolation is required (where supported)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.4.3_Resource_Governor_used_where_workload_isolation_is_required_where_supported.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.3.6",
+    "Description": "Reporting workloads isolated from write workloads (read replicas) where possible",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.6_Reporting_workloads_isolated_from_write_workloads_read_replicas_where_possible.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.3.4",
+    "Description": "Long transactions avoided; batch large operations",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.4_Long_transactions_avoided_batch_large_operations.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.4.5",
+    "Description": "Regression testing on schema changes",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.4.2",
+    "Description": "Integration tests validate end-to-end ETL",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.4.2",
+    "Description": "Job failures alert the responsible team",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.4.2_Job_failures_alert_the_responsible_team.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.4.2_Job_failures_alert_the_responsible_team.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.11",
+    "Description": "Backup preference configured (backups taken from the preferred / secondary replica where used) and validated across failover",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.2.11_Backup_preference_configured_backups_taken_from_the_preferred_secondary_replica_where_used_and_validated_across_failover.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.11_Backup_preference_configured_backups_taken_from_the_preferred_secondary_replica_where_used_and_validated_across_failover.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.2.8",
+    "Description": "Customer-managed keys (CMK/BYOK) used where policy requires",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.2",
+    "Description": "TLS enforced for data in transit (Encrypt=true; minimum TLS version set)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.2_TLS_enforced_for_data_in_transit_Encrypt_true_minimum_TLS_version_set.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.1.3",
+    "Description": "Database roles used for permission grants (not per-user grants)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.3_Database_roles_used_for_permission_grants_not_per_user_grants.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.3",
+    "Description": "Record count reconciliation vs. source control counts",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.3_Record_count_reconciliation_vs_source_control_counts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.1",
+    "Description": "Data quality framework formally defined with rules, ownership, and scoring",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "4.5.1",
+    "Description": "Primary keys defined on all tables",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.1_Primary_keys_defined_on_all_tables.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.6",
+    "Description": "Failures trigger notifications (email/alert/monitoring)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/2.3.6_Failures_trigger_notifications_email_alert_monitoring.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.6_Failures_trigger_notifications_email_alert_monitoring.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.8",
+    "Description": "SCD Type 2 valid_from/valid_to/is_current maintained correctly (where used)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.8_SCD_Type_2_valid_from_valid_to_is_current_maintained_correctly_where_used.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.6",
+    "Description": "Schemas used to organize objects by layer/domain",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.6_Schemas_used_to_organize_objects_by_layer_domain.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.4",
+    "Description": "No stringly-typed dates/numbers; correct temporal types",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.4_No_stringly_typed_dates_numbers_correct_temporal_types.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.2",
+    "Description": "Naming conventions consistent for tables, columns, and schemas",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.2_Naming_conventions_consistent_for_tables_columns_and_schemas.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.6",
+    "Description": "Parallelism used appropriately (no unnecessary serial execution)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.6_Parallelism_used_appropriately_no_unnecessary_serial_execution.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.2.4",
+    "Description": "Data flow lineage is traceable end-to-end from source to mart",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "14.3.1",
+    "Description": "Blocking monitored and root causes addressed",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.3.1_Blocking_monitored_and_root_causes_addressed.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.1_Blocking_monitored_and_root_causes_addressed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.2.6",
+    "Description": "Fill factor tuned for volatile tables where needed",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.6_Fill_factor_tuned_for_volatile_tables_where_needed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.2.5",
+    "Description": "Columnstore health maintained (rowgroup quality, tuple mover) where used",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.5_Columnstore_health_maintained_rowgroup_quality_tuple_mover_where_used.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.2.4",
+    "Description": "Fragmentation-based maintenance (rebuild/reorganize) automated",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.4_Fragmentation_based_maintenance_rebuild_reorganize_automated.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.7",
+    "Description": "Query hints used sparingly and documented where present",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.7_Query_hints_used_sparingly_and_documented_where_present.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.3",
+    "Description": "Set-based rewrites applied where cursors/loops caused poor plans",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.3_Set_based_rewrites_applied_where_cursors_loops_caused_poor_plans.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.4.3",
+    "Description": "Onboarding materials exist for new team members",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.3.3",
+    "Description": "Acronyms and business terminology glossary available",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.1.2",
+    "Description": "Data flow / source-to-target mappings documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.1.2",
+    "Description": "DTU/vCore utilization profiled (peak vs off-peak)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.1.2_DTU_vCore_utilization_profiled_peak_vs_off_peak.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.2.3",
+    "Description": "Schema drift detected and reconciled between environments",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.2.3_Schema_drift_detected_and_reconciled_between_environments.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.1.5",
+    "Description": "Commit messages descriptive and linked to work items",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.1.1",
+    "Description": "Database schema and code source-controlled (SSDT/SQL project or migration scripts)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.4.5",
+    "Description": "Log/rowcount reconciliation captured per ETL run",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.4.5_Log_rowcount_reconciliation_captured_per_ETL_run.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.1.4",
+    "Description": "Alerts configured for resource saturation and errors",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.1.4_Alerts_configured_for_resource_saturation_and_errors.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.1.4_Alerts_configured_for_resource_saturation_and_errors.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.1.2",
+    "Description": "Key metrics tracked (CPU, memory, IO, DTU/vCore, waits)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.1.2_Key_metrics_tracked_CPU_memory_IO_DTU_vCore_waits.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.6",
+    "Description": "Backup failures alerted and monitored",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.6_Backup_failures_alerted_and_monitored.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.6_Backup_failures_alerted_and_monitored.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.3.4",
+    "Description": "Metadata accessible to consumers (discoverable)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.4.2",
+    "Description": "Login/permission changes captured and reviewable",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.2_Login_permission_changes_captured_and_reviewable.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.3.4",
+    "Description": "Data retention policies defined per data category",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.1.6",
+    "Description": "Breach / incident notification process documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.4.3",
+    "Description": "Managed Identity used for service-to-service auth where supported",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.4",
+    "Description": "Dynamic Data Masking applied to sensitive columns where appropriate",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.4_Dynamic_Data_Masking_applied_to_sensitive_columns_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.1.4",
+    "Description": "Application connects via a dedicated least-privilege service account/identity (Managed Identity preferred)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.4_Application_connects_via_a_dedicated_least_privilege_service_account_identity_Managed_Identity_preferred.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.4.5",
+    "Description": "**Categorical / Enum**: values within expected domain; no invalid codes",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.5_Categorical_Enum_values_within_expected_domain_no_invalid_codes.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.2",
+    "Description": "Business rule validation applied (domain rules, ranges)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.2_Business_rule_validation_applied_domain_rules_ranges.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.1",
+    "Description": "Referential integrity validated (FKs in facts match dimensions)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.1_Referential_integrity_validated_FKs_in_facts_match_dimensions.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.4",
+    "Description": "DQ results logged and trended over time",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.1.4_DQ_results_logged_and_trended_over_time.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.5.4",
+    "Description": "Check constraints enforce domain rules where practical",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.4_Check_constraints_enforce_domain_rules_where_practical.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.5.2",
+    "Description": "Foreign keys enforced where integrity matters (or documented trusted-by-ETL exceptions)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.2_Foreign_keys_enforced_where_integrity_matters_or_documented_trusted_by_ETL_exceptions.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.3",
+    "Description": "Watermark/control values persisted reliably (control table, not volatile)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.3_Watermark_control_values_persisted_reliably_control_table_not_volatile.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.3",
+    "Description": "Server/database topology documented (instances, databases, elastic pools)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.3.4",
+    "Description": "Environment configuration parity maintained",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.3.4_Environment_configuration_parity_maintained.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.4.4",
+    "Description": "SQL Agent / scheduler jobs inventoried and owned",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.4.4_SQL_Agent_scheduler_jobs_inventoried_and_owned.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.4.4_SQL_Agent_scheduler_jobs_inventoried_and_owned.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.4.3",
+    "Description": "SLA breach triggers alerts",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.4.3_SLA_breach_triggers_alerts.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.4.3_SLA_breach_triggers_alerts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.2.3",
+    "Description": "Ownership documented \u2014 not tribal knowledge",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.3.3",
+    "Description": "Right-to-erasure / rectification technically achievable",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.3.1",
+    "Description": "Personal data inventory exists with legal basis (if personal data is processed)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.4.5",
+    "Description": "Linked servers / external data sources use least-privilege, non-personal credentials",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.4.5_Linked_servers_external_data_sources_use_least_privilege_non_personal_credentials.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.4.2",
+    "Description": "No credentials hardcoded in ETL packages, scripts, or linked servers",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.4.2_No_credentials_hardcoded_in_ETL_packages_scripts_or_linked_servers.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.1.7",
+    "Description": "Regular access reviews scheduled and documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "5.4.7",
+    "Description": "**Boolean / Flag**: only expected values; consistent representation across tables",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.7_Boolean_Flag_only_expected_values_consistent_representation_across_tables.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.5",
+    "Description": "DQ remediation workflow exists (alert \u2192 investigate \u2192 fix \u2192 verify)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "4.3.8",
+    "Description": "Index maintenance (rebuild/reorganize) scheduled based on fragmentation",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.8_Index_maintenance_rebuild_reorganize_scheduled_based_on_fragmentation.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.8_Index_maintenance_rebuild_reorganize_scheduled_based_on_fragmentation.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.7",
+    "Description": "Fill factor and index options set deliberately where needed",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.7_Fill_factor_and_index_options_set_deliberately_where_needed.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.7_Fill_factor_and_index_options_set_deliberately_where_needed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.7",
+    "Description": "Capacity/scale approach documented (scale-up vs scale-out, read replicas)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.2.4",
+    "Description": "Maintenance procedures documented (index/stats/integrity)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/13.2.4_Maintenance_procedures_documented_index_stats_integrity.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/13.2.4_Maintenance_procedures_documented_index_stats_integrity.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "12.1.6",
+    "Description": "Storage sizing and growth monitored",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/12.1.6_Storage_sizing_and_growth_monitored.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.1.6_Storage_sizing_and_growth_monitored.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.2.6",
+    "Description": "Rollback / recovery procedure defined and tested",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/11.2.6_Rollback_recovery_procedure_defined_and_tested.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.2.6_Rollback_recovery_procedure_defined_and_tested.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.2.5",
+    "Description": "Deployment approvals required (segregation of duties)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.2.1",
+    "Description": "Automated build of the database project (DACPAC or migrations)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.1.4",
+    "Description": "Pull request reviews required before merge",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.1.5",
+    "Description": "Long-running/blocking query alerting configured",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.1.5_Long_running_blocking_query_alerting_configured.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.1.3",
+    "Description": "Resource utilization trended over time",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.1.3_Resource_utilization_trended_over_time.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.7",
+    "Description": "Recovery model appropriate (Full/Simple/Bulk-logged) \u2014 SQL Server/MI",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.7_Recovery_model_appropriate_Full_Simple_Bulk_logged_SQL_Server_MI.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.7_Recovery_model_appropriate_Full_Simple_Bulk_logged_SQL_Server_MI.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.3.5",
+    "Description": "Business glossary / terminology maintained",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.3.2",
+    "Description": "Technical metadata (schema) captured and current",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/8.3.2_Technical_metadata_schema_captured_and_current.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.2.4",
+    "Description": "Escalation path for data quality issues defined",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.1.3",
+    "Description": "Objects tagged/classified with business domain and owner",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/8.1.3_Objects_tagged_classified_with_business_domain_and_owner.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.2.4",
+    "Description": "Access control changes logged and reviewable",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.2.4_Access_control_changes_logged_and_reviewable.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.1.4",
+    "Description": "Data residency / regional processing requirements identified and met",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.4.1",
+    "Description": "Connection strings/secrets stored in a secret store (Key Vault), not config files or code",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.1.2",
+    "Description": "Principle of least privilege applied to logins/users (no broad db_owner/sysadmin)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.2_Principle_of_least_privilege_applied_to_logins_users_no_broad_db_owner_sysadmin.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.4",
+    "Description": "Aggregate consistency: detail sums equal aggregate totals",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.4_Aggregate_consistency_detail_sums_equal_aggregate_totals.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.3",
+    "Description": "DQ KPIs defined: completeness, accuracy, timeliness, consistency, uniqueness, validity",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "4.4.4",
+    "Description": "Data compression (row/page/columnstore) applied where beneficial",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.4_Data_compression_row_page_columnstore_applied_where_beneficial.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.4.3",
+    "Description": "Filegroups used to organize storage where applicable (SQL Server/MI)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.3_Filegroups_used_to_organize_storage_where_applicable_SQL_Server_MI.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.4.2",
+    "Description": "Partition alignment supports fast load/switch and purge (sliding window)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.2_Partition_alignment_supports_fast_load_switch_and_purge_sliding_window.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.4.1",
+    "Description": "Partitioning strategy defined for large tables (by date/range) where beneficial",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.1_Partitioning_strategy_defined_for_large_tables_by_date_range_where_beneficial.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.4",
+    "Description": "Retry logic exists for transient failures",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.4_Retry_logic_exists_for_transient_failures.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.5",
+    "Description": "Architecture diagram exists and reflects the actual implementation",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "9.2.2",
+    "Description": "HA solution matches SLA (Always On AG / failover groups / zone redundancy)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.2.2_HA_solution_matches_SLA_Always_On_AG_failover_groups_zone_redundancy.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.2_HA_solution_matches_SLA_Always_On_AG_failover_groups_zone_redundancy.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.1",
+    "Description": "RTO and RPO defined and documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.3.1",
+    "Description": "Data dictionary exists for DW/mart tables",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.4.6",
+    "Description": "Temporal tables / change tracking used for data history where required",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.6_Temporal_tables_change_tracking_used_for_data_history_where_required.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.4.4",
+    "Description": "Audit logs retained per compliance requirement",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.4_Audit_logs_retained_per_compliance_requirement.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.8",
+    "Description": "Freshness validation: marts updated within SLA",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/5.3.8_Freshness_validation_marts_updated_within_SLA.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.8_Freshness_validation_marts_updated_within_SLA.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.6",
+    "Description": "DQ SLAs defined per data product / mart",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/5.1.6_DQ_SLAs_defined_per_data_product_mart.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.1.6_DQ_SLAs_defined_per_data_product_mart.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.2.5",
+    "Description": "Transformation logic documented and reproducible",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.3.2",
+    "Description": "Private endpoints / VNet integration used (Azure SQL) or network isolation (SQL Server)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.1.6",
+    "Description": "Guest/contractor access explicitly governed and time-bound",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "5.4.3",
+    "Description": "**String / Text**: encoding/collation consistent; max length respected; no silent truncation",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.3_String_Text_encoding_collation_consistent_max_length_respected_no_silent_truncation.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.6",
+    "Description": "Missing-index recommendations reviewed (not blindly applied)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.6_Missing_index_recommendations_reviewed_not_blindly_applied.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.6_Missing_index_recommendations_reviewed_not_blindly_applied.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.4",
+    "Description": "No redundant/duplicate/overlapping indexes",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.4_No_redundant_duplicate_overlapping_indexes.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.4_No_redundant_duplicate_overlapping_indexes.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.7",
+    "Description": "Source metadata captured (load timestamp, source, batch ID)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.7_Source_metadata_captured_load_timestamp_source_batch_ID.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.2.2",
+    "Description": "Completeness: all expected sources/batches received",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.2.2_Completeness_all_expected_sources_batches_received.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.2",
+    "Description": "DQ rules codified (config-driven or reusable procedures), not ad-hoc manual checks",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.1.2_DQ_rules_codified_config_driven_or_reusable_procedures_not_ad_hoc_manual_checks.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.5.6",
+    "Description": "NOT NULL applied to mandatory columns",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.6_NOT_NULL_applied_to_mandatory_columns.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.4.5",
+    "Description": "tempdb configured appropriately (multiple files, sizing) \u2014 SQL Server/MI",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.4.5_tempdb_configured_appropriately_multiple_files_sizing_SQL_Server_MI.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.5_tempdb_configured_appropriately_multiple_files_sizing_SQL_Server_MI.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.3",
+    "Description": "Indexes/constraints managed during large loads (disable/rebuild where beneficial)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/2.4.3_Indexes_constraints_managed_during_large_loads_disable_rebuild_where_beneficial.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.3_Indexes_constraints_managed_during_large_loads_disable_rebuild_where_beneficial.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.3",
+    "Description": "Fact tables contain only foreign keys and measures (no descriptive attributes)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.3_Fact_tables_contain_only_foreign_keys_and_measures_no_descriptive_attributes.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.3",
+    "Description": "Data types appropriate and right-sized (no oversized varchar, correct numeric precision)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.3_Data_types_appropriate_and_right_sized_no_oversized_varchar_correct_numeric_precision.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.3",
+    "Description": "\u0060XACT_ABORT\u0060 / transaction state handling correct on error",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.3_XACT_ABORT_transaction_state_handling_correct_on_error.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.2",
+    "Description": "\u0060TRY...CATCH\u0060 with proper error raising/logging (THROW/RAISERROR)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.2_TRY_CATCH_with_proper_error_raising_logging_THROW_RAISERROR.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.6",
+    "Description": "Temp tables vs table variables chosen appropriately for cardinality",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.6_Temp_tables_vs_table_variables_chosen_appropriately_for_cardinality.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.5",
+    "Description": "Dynamic SQL, where used, is parameterized (sp_executesql) \u2014 no injection risk",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.5_Dynamic_SQL_where_used_is_parameterized_sp_executesql_no_injection_risk.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.2",
+    "Description": "Set-based logic used; cursors/\u0060WHILE\u0060 loops avoided except where justified",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.2_Set_based_logic_used_cursors_WHILE_loops_avoided_except_where_justified.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.6",
+    "Description": "Code is commented for complex logic; business rules explained",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.6_Code_is_commented_for_complex_logic_business_rules_explained.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.2",
+    "Description": "Set-based operations preferred over row-by-row processing",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.2_Set_based_operations_preferred_over_row_by_row_processing.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.1",
+    "Description": "ETL has structured error handling (TRY...CATCH, event handlers, failure paths)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.1_ETL_has_structured_error_handling_TRY_CATCH_event_handlers_failure_paths.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.2.7",
+    "Description": "Historical/archival strategy defined for the DW",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.2.5",
+    "Description": "Schema separation used to organize layers/domains (dedicated schemas, not all in dbo)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.2.5_Schema_separation_used_to_organize_layers_domains_dedicated_schemas_not_all_in_dbo.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.3.5",
+    "Description": "Lock escalation understood and mitigated where problematic",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.5_Lock_escalation_understood_and_mitigated_where_problematic.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.3.2",
+    "Description": "Deadlocks captured (Extended Events) and resolved",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.2_Deadlocks_captured_Extended_Events_and_resolved.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.2.2",
+    "Description": "Failure recovery procedures documented step-by-step",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/13.2.2_Failure_recovery_procedures_documented_step_by_step.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/13.2.2_Failure_recovery_procedures_documented_step_by_step.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "12.2.6",
+    "Description": "Compression used to reduce storage and IO cost where beneficial",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.2.6_Compression_used_to_reduce_storage_and_IO_cost_where_beneficial.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.3.1",
+    "Description": "Separate Dev / Test / Prod environments",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.3.1_Separate_Dev_Test_Prod_environments.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.4.1",
+    "Description": "ETL/job run history captured and retained",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.4.1_ETL_job_run_history_captured_and_retained.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.4.1_ETL_job_run_history_captured_and_retained.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.3.4",
+    "Description": "Alert thresholds tuned to avoid fatigue",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.3.2",
+    "Description": "Deadlock capture configured",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.3.2_Deadlock_capture_configured.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.4.1",
+    "Description": "Data freshness SLAs defined per mart/data product",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.4.1_Data_freshness_SLAs_defined_per_mart_data_product.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.4.1_Data_freshness_SLAs_defined_per_mart_data_product.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.3.5",
+    "Description": "Consent / purpose tracking integrated where applicable",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.3.2",
+    "Description": "Data minimization applied \u2014 only necessary personal data stored",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.2.6",
+    "Description": "Source-to-target reconciliation exists for financial data",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.2.6_Source_to_target_reconciliation_exists_for_financial_data.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.2.2",
+    "Description": "All schema/code changes go through formal change management",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.4.4",
+    "Description": "Credential/key rotation policy defined and automated",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.5",
+    "Description": "Row-Level Security implemented where multi-tenant/segmented access is required",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.5_Row_Level_Security_implemented_where_multi_tenant_segmented_access_is_required.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.1.8",
+    "Description": "Schema/object-level permissions align with least privilege",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.8_Schema_object_level_permissions_align_with_least_privilege.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.6",
+    "Description": "Date/Time dimension exists with required attributes",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.6_Date_Time_dimension_exists_with_required_attributes.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.4",
+    "Description": "Appropriate isolation levels used (no unnecessary SERIALIZABLE; RCSI considered)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.4_Appropriate_isolation_levels_used_no_unnecessary_SERIALIZABLE_RCSI_considered.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.4",
+    "Description": "Views used appropriately (no deeply nested view chains that hide cost)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.4_Views_used_appropriately_no_deeply_nested_view_chains_that_hide_cost.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.2",
+    "Description": "Failed loads are restartable from point of failure (not full re-run)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.2_Failed_loads_are_restartable_from_point_of_failure_not_full_re_run.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.1",
+    "Description": "Incremental load implemented where applicable (watermark / CDC / Change Tracking)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.1_Incremental_load_implemented_where_applicable_watermark_CDC_Change_Tracking.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.3",
+    "Description": "ETL is parameterized (no hardcoded servers, paths, dates, or credentials)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.3_ETL_is_parameterized_no_hardcoded_servers_paths_dates_or_credentials.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.2",
+    "Description": "ETL packages/pipelines follow consistent naming conventions",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.2_ETL_packages_pipelines_follow_consistent_naming_conventions.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.1",
+    "Description": "ETL tooling is consistent and deliberate (SSIS / Azure Data Factory / T-SQL / other)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.1_ETL_tooling_is_consistent_and_deliberate_SSIS_Azure_Data_Factory_T_SQL_other.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.10",
+    "Description": "HA node configuration parity verified \u2014 both nodes have identical instance configuration, trace flags, MAXDOP/memory, logins, SQL Agent jobs, linked servers, and certificates",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.10_HA_node_configuration_parity_verified_both_nodes_have_identical_instance_configuration_trace_flags_MAXDOP_memory_logins_SQL_Agent_jobs_linked_servers_and_certificates.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.7",
+    "Description": "Application connection endpoint is a failover-aware **AG Listener** / FCI virtual network name \u2014 not a static client alias or DNS CNAME that must be manually repointed on failover (verify what the alias \u0060C1SVPMLSQLAPP01\u0060 actually resolves to)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.7_Application_connection_endpoint_is_a_failover_aware_AG_Listener_FCI_virtual_network_name_not_a_static_client_alias_or_DNS_CNAME_that_must_be_manually_repointed_on_failover_verify_what_the_alias_C1SVPMLSQLAPP01_actually_resolves_to.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.6",
+    "Description": "Single source of truth \u2014 no duplicate warehouses serving the same purpose",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.1.6_Single_source_of_truth_no_duplicate_warehouses_serving_the_same_purpose.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.4.1",
+    "Description": "tempdb sized and file-configured correctly (SQL Server/MI)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.4.1_tempdb_sized_and_file_configured_correctly_SQL_Server_MI.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.4.1_tempdb_sized_and_file_configured_correctly_SQL_Server_MI.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "12.2.4",
+    "Description": "Backup storage costs monitored (retention tuned)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/12.2.4_Backup_storage_costs_monitored_retention_tuned.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.2.4_Backup_storage_costs_monitored_retention_tuned.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.3.3",
+    "Description": "Appropriate isolation level / RCSI or snapshot isolation considered",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.3.3_Appropriate_isolation_level_RCSI_or_snapshot_isolation_considered.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "12.2.5",
+    "Description": "Unused databases/objects/indexes cleaned up",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/12.2.5_Unused_databases_objects_indexes_cleaned_up.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.2.5_Unused_databases_objects_indexes_cleaned_up.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "12.1.5",
+    "Description": "Growth projections modeled for next 6\u201312 months",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.1.3",
+    "Description": "Elastic pools used where multiple databases share capacity efficiently",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/12.1.3_Elastic_pools_used_where_multiple_databases_share_capacity_efficiently.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.1.6",
+    "Description": "Secret-scanning enabled on the repository",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.1.6_Secret_scanning_enabled_on_the_repository.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.1.3",
+    "Description": "Branching strategy defined (feature/main/release)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "10.2.2",
+    "Description": "Query Store used to detect regressions and force plans where needed",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.2.2_Query_Store_used_to_detect_regressions_and_force_plans_where_needed.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.2.2_Query_Store_used_to_detect_regressions_and_force_plans_where_needed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.2",
+    "Description": "Point-in-time restore capability verified (retention period appropriate)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.2_Point_in_time_restore_capability_verified_retention_period_appropriate.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.2_Point_in_time_restore_capability_verified_retention_period_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.2.7",
+    "Description": "Backups are encrypted",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/6.2.7_Backups_are_encrypted.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.7_Backups_are_encrypted.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.9",
+    "Description": "AG / cluster health and replica synchronization state actively monitored \u2014 unhealthy or not-synchronizing replicas alerted",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.2.9_AG_cluster_health_and_replica_synchronization_state_actively_monitored_unhealthy_or_not_synchronizing_replicas_alerted.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.2.9_AG_cluster_health_and_replica_synchronization_state_actively_monitored_unhealthy_or_not_synchronizing_replicas_alerted.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.2.3",
+    "Description": "Audit trail for changes to financial-relevant data",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/7.2.3_Audit_trail_for_changes_to_financial_relevant_data.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.2.3_Audit_trail_for_changes_to_financial_relevant_data.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.4.5",
+    "Description": "Audit logs stored in a tamper-resistant location (separate store / immutable)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/7.4.5_Audit_logs_stored_in_a_tamper_resistant_location_separate_store_immutable.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/7.4.5_Audit_logs_stored_in_a_tamper_resistant_location_separate_store_immutable.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "7.3.6",
+    "Description": "Cross-border transfer justified and documented (if applicable)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.2.7",
+    "Description": "Retention of historical financial data per policy",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.3.4",
+    "Description": "No broad \u0022allow Azure services\u0022 / 0.0.0.0 firewall rules",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.3",
+    "Description": "Always Encrypted used for highly sensitive columns where required",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.3_Always_Encrypted_used_for_highly_sensitive_columns_where_required.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "6.1.5",
+    "Description": "No shared/generic accounts for administrative or application access",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.1.5_No_shared_generic_accounts_for_administrative_or_application_access.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.4.4",
+    "Description": "**Sensitive data**: masked/protected where required; format validation applied",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.4_Sensitive_data_masked_protected_where_required_format_validation_applied.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.8",
+    "Description": "Quarantine pattern: failed rows routed to error tables with failure reason",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.1.8_Quarantine_pattern_failed_rows_routed_to_error_tables_with_failure_reason.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.5.5",
+    "Description": "Constraints are TRUSTED (not disabled/untrusted, which hurts the optimizer)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.5.5_Constraints_are_TRUSTED_not_disabled_untrusted_which_hurts_the_optimizer.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.3.3",
+    "Description": "Nonclustered indexes align with query/workload patterns (not arbitrary)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.3_Nonclustered_indexes_align_with_query_workload_patterns_not_arbitrary.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.3_Nonclustered_indexes_align_with_query_workload_patterns_not_arbitrary.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.2",
+    "Description": "No \u0060SELECT *\u0060 in production code; explicit column lists",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.2_No_SELECT_in_production_code_explicit_column_lists.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.1",
+    "Description": "Consistent formatting and naming conventions across objects",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.1_Consistent_formatting_and_naming_conventions_across_objects.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.8",
+    "Description": "Multi-subnet AG connections use \u0060MultiSubnetFailover=True\u0060 with an appropriate connect timeout in application connection strings",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.2.1",
+    "Description": "Clear layering defined (staging \u2192 ODS/integration \u2192 dimensional DW \u2192 data marts)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.2.1_Clear_layering_defined_staging_ODS_integration_dimensional_DW_data_marts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.6",
+    "Description": "Key lookups minimized via covering indexes where beneficial",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.1.6_Key_lookups_minimized_via_covering_indexes_where_beneficial.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.6_Key_lookups_minimized_via_covering_indexes_where_beneficial.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.1",
+    "Description": "Critical queries reviewed via execution plans (no unexpected scans/spools)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.1_Critical_queries_reviewed_via_execution_plans_no_unexpected_scans_spools.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.3.1",
+    "Description": "Table/column definitions documented with business context",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.1.1",
+    "Description": "Architecture overview document exists",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "12.1.4",
+    "Description": "Auto-scaling / serverless considered where workload is intermittent",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.1.2",
+    "Description": "ETL packages/pipelines source-controlled",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.1.2_ETL_packages_pipelines_source_controlled.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.2.3",
+    "Description": "DMVs used for ongoing performance analysis (waits, missing/unused indexes)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.2.3_DMVs_used_for_ongoing_performance_analysis_waits_missing_unused_indexes.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.2.3_DMVs_used_for_ongoing_performance_analysis_waits_missing_unused_indexes.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.2.1",
+    "Description": "Query Store enabled and configured appropriately",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/10.2.1_Query_Store_enabled_and_configured_appropriately.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/10.2.1_Query_Store_enabled_and_configured_appropriately.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.1.5",
+    "Description": "Extended properties / documentation on key objects",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/8.1.5_Extended_properties_documentation_on_key_objects.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.4",
+    "Description": "Surrogate keys used for dimensions (IDENTITY/sequence), not business keys in facts",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.4_Surrogate_keys_used_for_dimensions_IDENTITY_sequence_not_business_keys_in_facts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.6",
+    "Description": "Multi-step operations maintain consistency on partial failure",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.6_Multi_step_operations_maintain_consistency_on_partial_failure.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.3.1",
+    "Description": "Transactions scoped correctly (not held open across long operations)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.3.1_Transactions_scoped_correctly_not_held_open_across_long_operations.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.1",
+    "Description": "Business/transformation logic encapsulated in stored procedures/functions (not ad-hoc scripts)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.1_Business_transformation_logic_encapsulated_in_stored_procedures_functions_not_ad_hoc_scripts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.7",
+    "Description": "No hardcoded literals for environment-specific values",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.7_No_hardcoded_literals_for_environment_specific_values.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.3",
+    "Description": "Bad/rejected rows routed to a quarantine/error table (not silently dropped or failing the batch)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.3_Bad_rejected_rows_routed_to_a_quarantine_error_table_not_silently_dropped_or_failing_the_batch.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.2",
+    "Description": "Full load reserved for small reference/dimension tables or initial loads",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.2_Full_load_reserved_for_small_reference_dimension_tables_or_initial_loads.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.6",
+    "Description": "ETL is metadata-driven or well-modularized where appropriate",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.6_ETL_is_metadata_driven_or_well_modularized_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.4",
+    "Description": "Orchestration/dependency management exists (master package/pipeline or scheduler)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.4_Orchestration_dependency_management_exists_master_package_pipeline_or_scheduler.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.4",
+    "Description": "Failover behavior documented and tested",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.1.2",
+    "Description": "Environment separation exists (Dev / Test / Prod) with isolated instances or databases",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.1.2_Environment_separation_exists_Dev_Test_Prod_with_isolated_instances_or_databases.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "10.1.6",
+    "Description": "Dashboard accessible to operations (not just DBAs)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.2.1",
+    "Description": "Transparent Data Encryption (TDE) enabled for encryption at rest",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/6.2.1_Transparent_Data_Encryption_TDE_enabled_for_encryption_at_rest.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.4.1",
+    "Description": "**Dates**: valid ranges; consistent handling; no invalid future dates where prohibited",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.1_Dates_valid_ranges_consistent_handling_no_invalid_future_dates_where_prohibited.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.1",
+    "Description": "Star schema implemented (fact \u002B dimension tables, not flat wide tables)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.1_Star_schema_implemented_fact_dimension_tables_not_flat_wide_tables.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.1",
+    "Description": "Modeling approach is deliberate (3NF integration layer and/or dimensional marts)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.1_Modeling_approach_is_deliberate_3NF_integration_layer_and_or_dimensional_marts.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.3",
+    "Description": "Schema-qualified object references (dbo.Table, not Table)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.3_Schema_qualified_object_references_dbo_Table_not_Table.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.7",
+    "Description": "ETL is logically documented (data flow, transformations, source-to-target mappings)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.3.6",
+    "Description": "Maintenance windows and patching approach defined (or Microsoft-managed for PaaS)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.3.2",
+    "Description": "Redundancy configured for the production database (replicas / zone redundancy)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.2_Redundancy_configured_for_the_production_database_replicas_zone_redundancy.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.2.6",
+    "Description": "Audit metadata captured on load (load_date, source_system, batch_id)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.2.6_Audit_metadata_captured_on_load_load_date_source_system_batch_id.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.4",
+    "Description": "Implicit conversions eliminated (data-type mismatches in joins/filters)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.4_Implicit_conversions_eliminated_data_type_mismatches_in_joins_filters.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.4.2",
+    "Description": "No single point of human dependency (bus factor \u003E 1)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.3.2",
+    "Description": "Source-to-target mapping documented per table",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "13.2.3",
+    "Description": "On-call / escalation procedures documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.2.7",
+    "Description": "Pre/post-deployment scripts managed and idempotent",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/11.2.7_Pre_post_deployment_scripts_managed_and_idempotent.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "11.2.4",
+    "Description": "No manual production changes \u2014 all via pipeline",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "11.2.2",
+    "Description": "Automated deployment pipeline (Dev \u2192 Test \u2192 Prod)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "9.4.2",
+    "Description": "Load completion SLAs set and monitored",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.4.2_Load_completion_SLAs_set_and_monitored.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.4.2_Load_completion_SLAs_set_and_monitored.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.3.5",
+    "Description": "Multi-step operations maintain integrity on partial failure",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.3.5_Multi_step_operations_maintain_integrity_on_partial_failure.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.3.3",
+    "Description": "Corruption detection alerting in place",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.3.3_Corruption_detection_alerting_in_place.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.3.2",
+    "Description": "Page verification set to CHECKSUM",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.3.2_Page_verification_set_to_CHECKSUM.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.2.10",
+    "Description": "WSFC quorum / witness configured correctly for the node count (avoids split-brain); quorum model documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.1.5",
+    "Description": "Required agreements in place (e.g., DPA) covering the platform and services",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "7.1.1",
+    "Description": "Applicable regulatory/compliance regime(s) identified and documented",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "6.3.3",
+    "Description": "Public network access disabled or tightly restricted (Azure SQL)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "5.4.2",
+    "Description": "**Numeric / Financial**: precision preserved; no rounding errors; currency codes valid",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.4.2_Numeric_Financial_precision_preserved_no_rounding_errors_currency_codes_valid.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.3.3",
+    "Description": "Deduplication verified \u2014 no duplicate business keys after load",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.3.3_Deduplication_verified_no_duplicate_business_keys_after_load.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.2.3",
+    "Description": "Staging area is transient/isolated and not queried by consumers",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.2.3_Staging_area_is_transient_isolated_and_not_queried_by_consumers.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.2.2",
+    "Description": "Missing indexes reviewed and applied judiciously",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/14.2.2_Missing_indexes_reviewed_and_applied_judiciously.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.2.2_Missing_indexes_reviewed_and_applied_judiciously.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "14.1.5",
+    "Description": "Excessive/unnecessary sorts and spools addressed",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/14.1.5_Excessive_unnecessary_sorts_and_spools_addressed.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "13.4.4",
+    "Description": "Code is self-documenting or well-commented for complex logic",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/13.4.4_Code_is_self_documenting_or_well_commented_for_complex_logic.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.4.4",
+    "Description": "Historical SLA compliance tracked and reported",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.4.4_Historical_SLA_compliance_tracked_and_reported.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.4.4_Historical_SLA_compliance_tracked_and_reported.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.3",
+    "Description": "Backups restore-tested regularly (not just taken)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.3_Backups_restore_tested_regularly_not_just_taken.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.3_Backups_restore_tested_regularly_not_just_taken.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "9.1.1",
+    "Description": "Backup strategy defined and matches RPO (full/differential/log or PaaS automated)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/9.1.1_Backup_strategy_defined_and_matches_RPO_full_differential_log_or_PaaS_automated.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/9.1.1_Backup_strategy_defined_and_matches_RPO_full_differential_log_or_PaaS_automated.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "8.2.1",
+    "Description": "Every table/dataset has a defined data owner",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "8.1.1",
+    "Description": "Source-to-target lineage documented (ETL mappings)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "4.4.6",
+    "Description": "Storage growth monitored; autogrowth settings sane (fixed size, not tiny %)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.4.6_Storage_growth_monitored_autogrowth_settings_sane_fixed_size_not_tiny.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.4.6_Storage_growth_monitored_autogrowth_settings_sane_fixed_size_not_tiny.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "5.1.7",
+    "Description": "DQ failures halt progression where critical (bad data not silently promoted)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/5.1.7_DQ_failures_halt_progression_where_critical_bad_data_not_silently_promoted.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.4.7",
+    "Description": "Archival/purge process exists for aged data",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "4.3.5",
+    "Description": "Unused indexes identified and removed (DMV evidence)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.3.5_Unused_indexes_identified_and_removed_DMV_evidence.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.3.5_Unused_indexes_identified_and_removed_DMV_evidence.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.1.5",
+    "Description": "Audit columns present where needed (created/modified, source, batch)",
+    "Verification": "",
+    "Outcome": "Fail",
+    "Evidence": "--- Script: Backend/checklist/scripts/sql/4.1.5_Audit_columns_present_where_needed_created_modified_source_batch.sql ---\r\n--- Batch 1 ---\r\nSQL ERROR: The connection does not support MultipleActiveResultSets.\r\n\r\n",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.1.5_Audit_columns_present_where_needed_created_modified_source_batch.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.7",
+    "Description": "SCD strategy defined and implemented per dimension (Type 1/2/3)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.7_SCD_strategy_defined_and_implemented_per_dimension_Type_1_2_3.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "4.2.5",
+    "Description": "Conformed dimensions shared across facts (no duplicate versions)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/4.2.5_Conformed_dimensions_shared_across_facts_no_duplicate_versions.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.2.3",
+    "Description": "Scalar UDFs avoided in hot paths (inlined/replaced where they hurt performance)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.2.3_Scalar_UDFs_avoided_in_hot_paths_inlined_replaced_where_they_hurt_performance.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "3.1.4",
+    "Description": "\u0060SET NOCOUNT ON\u0060 and appropriate SET options in procedures",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/3.1.4_SET_NOCOUNT_ON_and_appropriate_SET_options_in_procedures.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.4.1",
+    "Description": "Bulk load patterns used (BULK INSERT / bcp / minimal logging) for large loads",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.4.1_Bulk_load_patterns_used_BULK_INSERT_bcp_minimal_logging_for_large_loads.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.3.5",
+    "Description": "ETL runs are idempotent (re-run does not duplicate data)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.3.5_ETL_runs_are_idempotent_re_run_does_not_duplicate_data.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.2.5",
+    "Description": "Insert/Update/Delete operations handled correctly (MERGE or equivalent)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.2.5_Insert_Update_Delete_operations_handled_correctly_MERGE_or_equivalent.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "2.1.5",
+    "Description": "Reusable/templated ETL components (no copy-paste per table)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/2.1.5_Reusable_templated_ETL_components_no_copy_paste_per_table.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.9",
+    "Description": "Alias / DNS resolution and failover behavior documented and validated \u2014 applications reconnect transparently on failover with no manual repoint",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "NeedsReview",
+    "ScriptFile": "",
+    "Technique": "AI-MCP"
+  },
+  {
+    "Id": "1.3.5",
+    "Description": "Connection strings use listener / failover-group endpoints (not a single node)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.5_Connection_strings_use_listener_failover_group_endpoints_not_a_single_node.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.3.3",
+    "Description": "Read-scale replicas used for reporting where appropriate",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.3.3_Read_scale_replicas_used_for_reporting_where_appropriate.sql",
+    "Technique": "Script"
+  },
+  {
+    "Id": "1.1.4",
+    "Description": "Compute tier / service tier appropriate for workload (vCore/DTU, Business Critical/General Purpose)",
+    "Verification": "",
+    "Outcome": "NeedsReview",
+    "Evidence": "",
+    "ScriptFile": "Backend/checklist/scripts/sql/1.1.4_Compute_tier_service_tier_appropriate_for_workload_vCore_DTU_Business_Critical_General_Purpose.sql",
+    "Technique": "Script"
+  }
+]

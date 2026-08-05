@@ -1,0 +1,116 @@
+﻿{
+    "backup":  [
+                   "Backend/checklist/scripts/sql/backup.sql"
+               ],
+    "9.1.1":  [
+                  "Backend/checklist/scripts/sql/9.1.1_Backup_strategy_defined_and_matches_RPO_full_differential_log_or_PaaS_automated.sql"
+              ],
+    "6.2.2":  [
+                  "Backend/checklist/scripts/sql/6.2.2_tls_enforced_for_data_in_transit_encrypt_true_minimum_tls_version_set.sql"
+              ],
+    "tde":  [
+                "Backend/checklist/scripts/sql/tde.sql"
+            ],
+    "9.1.5":  [
+                  "Backend/checklist/scripts/sql/9.1.5_backups_stored_redundantly_geo_redundant_where_required.sql"
+              ],
+    "10.4.1":  [
+                   "Backend/checklist/scripts/sql/10.4.1_etl_job_run_history_captured_and_retained.sql"
+               ],
+    "4.5.4":  [
+                  "Backend/checklist/scripts/sql/4.5.4_check_constraints_enforce_domain_rules_where_practical.sql"
+              ],
+    "4.5.1":  [
+                  "Backend/checklist/scripts/sql/4.5.1_Primary_keys_defined_on_all_tables.sql"
+              ],
+    "14.5.2":  [
+                   "Backend/checklist/scripts/sql/14.5.2_auto_create_statistics_enabled_where_appropriate.sql"
+               ],
+    "4.2.3":  [
+                  "Backend/checklist/scripts/sql/4.2.3_fact_tables_contain_only_foreign_keys_and_measures_no_descriptive_attr.sql"
+              ],
+    "10.2.2":  [
+                   "Backend/checklist/scripts/sql/10.2.2_query_store_used_to_detect_regressions_and_force_plans_where_needed.sql"
+               ],
+    "deadlock":  [
+                     "Backend/checklist/scripts/sql/deadlock.sql"
+                 ],
+    "4.5.2":  [
+                  "Backend/checklist/scripts/sql/4.5.2_foreign_keys_enforced_where_integrity_matters_or_documented_trusted_by.sql"
+              ],
+    "2.1.3":  [
+                  "Backend/checklist/scripts/sql/2.1.3_etl_is_parameterized_no_hardcoded_servers_paths_dates_or_credentials.sql"
+              ],
+    "10.4.4":  [
+                   "Backend/checklist/scripts/sql/10.4.4_sql_agent_scheduler_jobs_inventoried_and_owned.sql"
+               ],
+    "14.5.5":  [
+                   "Backend/checklist/scripts/sql/14.5.5_query_store_used_to_force_stable_plans_where_regressions_occur.sql"
+               ],
+    "12.2.4":  [
+                   "Backend/checklist/scripts/sql/12.2.4_backup_storage_costs_monitored_retention_tuned.sql"
+               ],
+    "6.2.1":  [
+                  "Backend/checklist/scripts/sql/6.2.1_Transparent_Data_Encryption_TDE_enabled_for_encryption_at_rest.sql"
+              ],
+    "9.1.3":  [
+                  "Backend/checklist/scripts/sql/9.1.3_backups_restore_tested_regularly_not_just_taken.sql"
+              ],
+    "6.2.4":  [
+                  "Backend/checklist/scripts/sql/6.2.4_dynamic_data_masking_applied_to_sensitive_columns_where_appropriate.sql"
+              ],
+    "10.3.2":  [
+                   "Backend/checklist/scripts/sql/10.3.2_Deadlock_capture_configured.sql"
+               ],
+    "14.3.2":  [
+                   "Backend/checklist/scripts/sql/14.3.2_deadlocks_captured_extended_events_and_resolved.sql"
+               ],
+    "6.4.2":  [
+                  "Backend/checklist/scripts/sql/6.4.2_No_credentials_hardcoded_in_ETL_packages_scripts_or_linked_servers.sql"
+              ],
+    "11.3.5":  [
+                   "Backend/checklist/scripts/sql/11.3.5_non_prod_data_masking_subsetting_applied_where_sensitive.sql"
+               ],
+    "9.2.11":  [
+                   "Backend/checklist/scripts/sql/9.2.11_backup_preference_configured_backups_taken_from_the_preferred_secondar.sql"
+               ],
+    "3.1.2":  [
+                  "Backend/checklist/scripts/sql/3.1.2_No_SELECT_in_production_code_explicit_column_lists.sql"
+              ],
+    "6.2.7":  [
+                  "Backend/checklist/scripts/sql/6.2.7_backups_are_encrypted.sql"
+              ],
+    "4.5.6":  [
+                  "Backend/checklist/scripts/sql/4.5.6_not_null_applied_to_mandatory_columns.sql"
+              ],
+    "3.1.7":  [
+                  "Backend/checklist/scripts/sql/3.1.7_no_hardcoded_literals_for_environment_specific_values.sql"
+              ],
+    "10.2.1":  [
+                   "Backend/checklist/scripts/sql/10.2.1_Query_Store_enabled_and_configured_appropriately.sql"
+               ],
+    "4.5.3":  [
+                  "Backend/checklist/scripts/sql/4.5.3_unique_constraints_on_natural_business_keys_where_appropriate.sql"
+              ],
+    "10.4.2":  [
+                   "Backend/checklist/scripts/sql/10.4.2_Job_failures_alert_the_responsible_team.sql"
+               ],
+    "14.5.1":  [
+                   "Backend/checklist/scripts/sql/14.5.1_Statistics_kept_current_auto_update_on_plus_manual_updates_after_large_loads.sql"
+               ],
+    "9.3.1":  [
+                  "Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql"
+              ],
+    "3.3.5":  [
+                  "Backend/checklist/scripts/sql/3.3.5_deadlock_prone_patterns_avoided_retry_logic_where_needed.sql"
+              ],
+    "query-store":  [
+                        "Backend/checklist/scripts/sql/query-store.sql"
+                    ],
+    "9.1.6":  [
+                  "Backend/checklist/scripts/sql/9.1.6_backup_failures_alerted_and_monitored.sql"
+              ],
+    "query-store,backup,deadlock,dbcc-checkdb,tde":  [
+                                                         "Backend/checklist/scripts/sql/query-store,backup,deadlock,dbcc-checkdb,tde.sql"
+                                                     ]
+}

@@ -1,0 +1,442 @@
+<Window x:Class="SQLAuditor.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SQLAuditor.Wpf"
+        Title="SQL Auditor"
+        Height="880"
+        Width="1480"
+        MinHeight="780"
+        MinWidth="1280"
+        WindowStartupLocation="CenterScreen"
+        Background="#FFF4F7FB"
+        FontFamily="Segoe UI Variable Text, Segoe UI, Segoe UI">
+    <Window.Resources>
+        <SolidColorBrush x:Key="AppBg" Color="#FFF4F7FB" />
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFFFF" />
+        <SolidColorBrush x:Key="SurfaceAltBrush" Color="#FFF8FAFD" />
+        <SolidColorBrush x:Key="BorderBrushSoft" Color="#FFD9E1EC" />
+        <SolidColorBrush x:Key="PrimaryBrush" Color="#FF0F4C81" />
+        <SolidColorBrush x:Key="PrimaryHoverBrush" Color="#FF1268B3" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#FF2B7BBB" />
+        <SolidColorBrush x:Key="TextBrush" Color="#FF1F2937" />
+        <SolidColorBrush x:Key="MutedBrush" Color="#FF6B7280" />
+        <SolidColorBrush x:Key="PassBrush" Color="#FF1E8E3E" />
+        <SolidColorBrush x:Key="FailBrush" Color="#FFD64545" />
+        <SolidColorBrush x:Key="WarnBrush" Color="#FFE0A100" />
+        <SolidColorBrush x:Key="InfoBrush" Color="#FF2E6FBA" />
+
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        </Style>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+        </Style>
+
+        <Style TargetType="PasswordBox">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="Margin" Value="0" />
+        </Style>
+
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="MinHeight" Value="38" />
+        </Style>
+
+        <Style TargetType="TreeView">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto" />
+        </Style>
+
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto" />
+        </Style>
+
+        <Style x:Key="ModernButton" TargetType="Button">
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Background" Value="{StaticResource PrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="MinWidth" Value="110" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="12"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="{StaticResource PrimaryHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.9" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource ModernButton}">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Background" Value="#FFF2F5FA" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+        </Style>
+
+        <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource ModernButton}">
+            <Setter Property="Background" Value="#FFB42318" />
+            <Setter Property="BorderBrush" Value="#FFB42318" />
+        </Style>
+
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="18" />
+            <Setter Property="Padding" Value="20" />
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="2" Color="#1F0F172A" Opacity="0.12" />
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="StagePill" TargetType="Border">
+            <Setter Property="CornerRadius" Value="999" />
+            <Setter Property="Padding" Value="16,8" />
+            <Setter Property="Margin" Value="0,0,10,0" />
+            <Setter Property="Background" Value="#FFF0F4FA" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+
+        <Style x:Key="SuccessButton" TargetType="Button" BasedOn="{StaticResource ModernButton}">
+            <Setter Property="Background" Value="#FF1E8E3E" />
+            <Setter Property="BorderBrush" Value="#FF1E8E3E" />
+        </Style>
+
+        <DataTemplate x:Key="MetricBarTemplate">
+            <Grid Margin="0,0,0,14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Label}" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DisplayValue}" Foreground="{StaticResource MutedBrush}" FontSize="12" />
+                <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" Height="12" Maximum="100" Value="{Binding Percent}" Foreground="{Binding BarBrush}" Background="#FFE9EEF5" Margin="0,8,0,0" />
+                <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{Binding Detail}" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,6,0,0" />
+            </Grid>
+        </DataTemplate>
+
+        <Style x:Key="BodyTabControl" TargetType="TabControl">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabControl">
+                        <Border Background="Transparent">
+                            <ContentPresenter ContentSource="SelectedContent" Margin="0" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}" Margin="0,0,0,18">
+            <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Left">
+                    <TextBlock Text="SQL Auditor" FontSize="28" FontWeight="Bold" />
+                    <TextBlock Text="Enterprise review workspace for SQL checklist evaluation, manual follow-up, and reporting." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage1Label" Text="1  Login" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage2Label" Text="2  Checklist" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage3Label" Text="3  Evaluate" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage4Label" Text="4  Summary" FontSize="14" FontWeight="SemiBold" /></Border>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <Border Grid.Row="1" Style="{StaticResource CardBorder}">
+            <TabControl x:Name="MainTabs" PreviewMouseDown="MainTabs_PreviewMouseDown" Background="Transparent" BorderThickness="0" Style="{StaticResource BodyTabControl}">
+                <TabItem Header="1  Login">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalFirst">
+                        <Grid Margin="4">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="760">
+                                <StackPanel>
+                                    <TextBlock Text="Connect to SQL Server" FontSize="24" FontWeight="Bold" />
+                                    <TextBlock Text="Enter the SQL Server FQDN and authentication details to verify access." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" />
+
+                                    <TextBlock Text="SQL Server FQDN" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                    <TextBox x:Name="FqdnText" Width="520" />
+
+                                    <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
+                                    <StackPanel Orientation="Horizontal">
+                                        <ComboBox x:Name="AuthMethodCombo" Width="220">
+                                            <ComboBoxItem IsSelected="True">Windows Authentication</ComboBoxItem>
+                                            <ComboBoxItem>SQL Login</ComboBoxItem>
+                                        </ComboBox>
+                                        <TextBox x:Name="SqlUserBox" Width="180" Margin="12,0,0,0" Visibility="Collapsed" />
+                                        <PasswordBox x:Name="SqlPassBox" Width="180" Margin="12,0,0,0" Visibility="Collapsed" />
+                                    </StackPanel>
+
+                                    <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" />
+                                    <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" Click="VerifyBtn_Click" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+
+                <TabItem Header="2  Checklist" x:Name="ChecklistTab">
+                    <Grid Margin="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,16">
+                            <Button x:Name="LoadChecklistBtn" Content="Load Checklist" Style="{StaticResource SecondaryButton}" Click="LoadChecklistBtn_Click" IsEnabled="False" Margin="0,0,10,0" />
+                            <Button x:Name="GenerateScriptsBtn" Content="Generate Scripts" Style="{StaticResource SecondaryButton}" Click="GenerateScriptsBtn_Click" IsEnabled="False" Margin="0,0,10,0" />
+                            <Button x:Name="StartEvalBtn" Content="Start Evaluation" Style="{StaticResource ModernButton}" Click="StartEvalBtn_Click" IsEnabled="False" />
+                        </StackPanel>
+
+                        <Grid Grid.Row="1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="24" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="Checklist (select items to evaluate)" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PanningMode="Both">
+                                        <TreeView x:Name="ChecklistTree" />
+                                    </ScrollViewer>
+                                </DockPanel>
+                            </Border>
+
+                            <Border Grid.Column="2" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="Mapping Preview" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PanningMode="Both">
+                                        <TreeView x:Name="MappingTree" />
+                                    </ScrollViewer>
+                                </DockPanel>
+                            </Border>
+                        </Grid>
+
+                        <Border Grid.Row="2" Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,18,0,0">
+                            <DockPanel>
+                                <TextBlock DockPanel.Dock="Top" Text="Live Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,10" />
+                                <TextBox x:Name="UiLogBox" Height="140" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+                            </DockPanel>
+                        </Border>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="3  Evaluate" x:Name="EvalTab">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalFirst">
+                        <Grid Margin="4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.05*" />
+                                <ColumnDefinition Width="24" />
+                                <ColumnDefinition Width="1.35*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                        <TreeView x:Name="EvalTree" />
+                                    </ScrollViewer>
+                                </DockPanel>
+                            </Border>
+
+                            <Grid Grid.Column="2">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <Border Grid.Row="0" Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Grid.Row="0" Grid.Column="0" x:Name="PrevManualBtn" Content="Prev" Style="{StaticResource SecondaryButton}" Click="PrevManualBtn_Click" />
+                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ManualTitle" Text="Manual steps" FontWeight="Bold" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        <Button Grid.Row="0" Grid.Column="2" x:Name="NextManualBtn" Content="Next" Style="{StaticResource SecondaryButton}" Click="NextManualBtn_Click" HorizontalAlignment="Right" />
+
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Text="Manual Evaluation Guidance" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
+
+                                        <ScrollViewer Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" VerticalScrollBarVisibility="Auto" MaxHeight="300">
+                                            <TextBlock x:Name="ManualStepsText" Text="" TextWrapping="Wrap" FontSize="14" LineHeight="22" />
+                                        </ScrollViewer>
+
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Input / Evidence" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
+                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" Height="130" TextWrapping="Wrap" AcceptsReturn="True" TextChanged="ManualOutputBox_TextChanged" />
+
+                                        <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
+                                        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button x:Name="MarkPassedBtn" Content="Passed" Style="{StaticResource SuccessButton}" Width="110" Click="MarkPassedBtn_Click" Margin="0,0,10,0" />
+                                            <Button x:Name="MarkFailedBtn" Content="Failed" Style="{StaticResource DangerButton}" Width="110" Click="MarkFailedBtn_Click" Margin="0,0,10,0" />
+                                            <Button x:Name="SubmitBtn" Content="Submit" Style="{StaticResource ModernButton}" Width="120" Click="SubmitBtn_Click" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <Border Grid.Row="1" Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,16,0,0">
+                                    <Button x:Name="GenSummaryBtn" Content="Generate Summary / Report" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="GenSummaryBtn_Click" />
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+
+                <TabItem Header="4  Summary" x:Name="SummaryTab">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalFirst">
+                        <Grid Margin="4">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <UniformGrid Grid.Row="0" Columns="4" Margin="0,0,0,16">
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Total Items" Foreground="{StaticResource MutedBrush}" />
+                                        <TextBlock x:Name="SummaryTotalText" Text="0" FontSize="26" FontWeight="Bold" Margin="0,8,0,0" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Passed" Foreground="{StaticResource MutedBrush}" />
+                                        <TextBlock x:Name="SummaryPassedText" Text="0" FontSize="26" FontWeight="Bold" Foreground="{StaticResource PassBrush}" Margin="0,8,0,0" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Failed" Foreground="{StaticResource MutedBrush}" />
+                                        <TextBlock x:Name="SummaryFailedText" Text="0" FontSize="26" FontWeight="Bold" Foreground="{StaticResource FailBrush}" Margin="0,8,0,0" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
+                                    <StackPanel>
+                                        <TextBlock Text="Needs Review" Foreground="{StaticResource MutedBrush}" />
+                                        <TextBlock x:Name="SummaryReviewText" Text="0" FontSize="26" FontWeight="Bold" Foreground="{StaticResource WarnBrush}" Margin="0,8,0,0" />
+                                    </StackPanel>
+                                </Border>
+                            </UniformGrid>
+
+                            <Grid Grid.Row="1" Margin="0,0,0,16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="16" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Top" Text="Outcome Distribution" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                        <ItemsControl x:Name="SummaryOutcomeChartItems" ItemTemplate="{StaticResource MetricBarTemplate}" />
+                                    </DockPanel>
+                                </Border>
+
+                                <Border Grid.Column="2" Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Top" Text="Technique Distribution" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                        <ItemsControl x:Name="SummaryTechniqueChartItems" ItemTemplate="{StaticResource MetricBarTemplate}" />
+                                    </DockPanel>
+                                </Border>
+                            </Grid>
+
+                            <Border Grid.Row="2" Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
+                                <DockPanel>
+                                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Stretch" Margin="0,0,0,12">
+                                        <TextBlock Text="Summary Results" FontWeight="Bold" FontSize="16" VerticalAlignment="Center" />
+                                        <Button x:Name="ExportBtn" Content="Export Evaluation" Style="{StaticResource SecondaryButton}" DockPanel.Dock="Right" HorizontalAlignment="Right" Click="ExportBtn_Click" />
+                                    </StackPanel>
+                                    <ListBox x:Name="SummaryList">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Padding="12" Margin="0,0,0,8" Background="#FFF7FAFE" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="10">
+                                                    <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+                                                </Border>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </DockPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+            </TabControl>
+        </Border>
+    </Grid>
+</Window>

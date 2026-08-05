@@ -1,0 +1,32 @@
+# Build results
+bin/
+obj/
+
+# IDE
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Node.js (if any)
+node_modules/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Visual Studio cache/options directory
+.vs/
+
+# Test results
+[Tt]est[Rr]esults/
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+
+# Logs
+*.log

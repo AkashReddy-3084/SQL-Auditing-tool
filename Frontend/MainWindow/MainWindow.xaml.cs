@@ -1,0 +1,1849 @@
+using System;
+using System.Threading.Tasks;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using Microsoft.Win32;
+using System.Windows;
+using SQLAuditor.Lib;
+
+namespace SQLAuditor.Wpf
+{
+    public partial class MainWindow : Window
+    {
+        private sealed class SummaryMetricItem
+        {
+            public string Label { get; init; } = string.Empty;
+            public int Value { get; init; }
+            public int Total { get; init; }
+            public string Detail { get; init; } = string.Empty;
+            public System.Windows.Media.Brush BarBrush { get; init; } = System.Windows.Media.Brushes.SteelBlue;
+
+            public double Percent => Total <= 0 ? 0.0 : (double)Value * 100.0 / Total;
+            public string DisplayValue => Total <= 0 ? Value.ToString() : $"{Value} ({Percent:F0}%)";
+        }
+
+        private sealed class ManualEvaluationState
+        {
+            public string Instructions { get; set; } = string.Empty;
+            public string Remarks { get; set; } = string.Empty;
+            public string? SelectedOutcome { get; set; }
+            public bool IsSubmitted { get; set; }
+        }
+
+        private System.Threading.CancellationTokenSource? _progressWatcherCts;
+        private long _progressStreamPos = 0;
+        private bool _isVerified = false;
+        private Auditor? _auditor;
+        private System.Threading.CancellationTokenSource? _evaluationCts;
+        private bool _isEvaluating = false;
+        private bool _allowTabChange = false;
+        private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
+        private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
+        private bool _checklistLoaded = false;
+        // keep area association for items so UI can render Area -> Category -> Item
+        private System.Collections.Generic.List<(string Area, SQLAuditor.Lib.ChecklistItem Item)>? _loadedStructure;
+        private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
+        private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
+        private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
+        private int _manualIndex = -1;
+        private System.Collections.Generic.Dictionary<string, string>? _manualInstructions;
+        private System.Collections.Generic.Dictionary<string, ManualEvaluationState>? _manualStateMap;
+        private System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>? _evalItemMap;
+        private System.Collections.Generic.Dictionary<string, (string Status, string Technique)>? _evalStatusMap;
+        private bool _isHydratingManualUi = false;
+        // Selected checklist IDs are kept in-memory for the current session only
+        private System.Collections.Generic.List<string>? _selectedIds;
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            // wire auth selection UI
+            AuthMethodCombo.SelectionChanged += (s, e) =>
+            {
+                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
+                if (sel == "SQL Login")
+                {
+                    SqlUserBox.Visibility = Visibility.Visible;
+                    SqlPassBox.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    SqlUserBox.Visibility = Visibility.Collapsed;
+                    SqlPassBox.Visibility = Visibility.Collapsed;
+                }
+            };
+            Log("Ready — enter SQL FQDN and click Verify Access.");
+            // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
+            MainTabs.SelectedIndex = 0;
+            LoadChecklistBtn.IsEnabled = true;
+            Log("Opened on Login view.");
+            UpdateStageIndicators();
+            // Do not auto-populate checklist on startup; user must click Load Checklist.
+            // Do not start progress watcher until user triggers generation from Checklist tab.
+            // Note: Load checklist only when user clicks the button. Do not auto-invoke on startup.
+        }
+
+        private async Task StartProgressWatcherAsync(System.Threading.CancellationToken token)
+        {
+            try
+            {
+                // Check agent availability and warn user if unreachable
+                try
+                {
+                    if (_auditor != null)
+                    {
+                        var avail = await _auditor.IsAgentAvailableAsync();
+                        if (!avail)
+                        {
+                            var mb = MessageBox.Show(this, "Configured SLM/LLM appears unreachable. Continue generation using local/fallback generator?\n\nChoose 'Yes' to continue (will use fallback and may produce placeholders), 'No' to cancel.", "Agent Unavailable", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                                if (mb == MessageBoxResult.No)
+                                {
+                                    Log("Generation cancelled by user due to agent unavailability.");
+                                    // Keep Generate Scripts disabled while feature is inactive
+                                    GenerateScriptsBtn.IsEnabled = false;
+                                    return;
+                                }
+                            else
+                            {
+                                Log("Continuing generation using fallback/local agent.");
+                            }
+                        }
+                    }
+                }
+                catch (Exception exAvail)
+                {
+                    Log("Agent health check failed: " + exAvail.Message);
+                }
+                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "progress_stream.txt");
+                while (true)
+                {
+                    if (token.IsCancellationRequested) return;
+                    try
+                    {
+                        if (System.IO.File.Exists(path))
+                        {
+                            using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+                            using (var sr = new System.IO.StreamReader(fs))
+                            {
+                                fs.Seek(_progressStreamPos, System.IO.SeekOrigin.Begin);
+                                string? line;
+                                while ((line = await sr.ReadLineAsync()) != null)
+                                {
+                                    // append to UI
+                                    // write streamed progress lines to ui_log
+                                    Log(line);
+                                }
+                                _progressStreamPos = fs.Position;
+                            }
+                        }
+                    }
+                    catch { }
+                    try { await Task.Delay(1000, token); } catch (TaskCanceledException) { return; }
+                }
+            }
+            catch { }
+        }
+
+        private async void LoadChecklistBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_auditor == null)
+            {
+                // Allow loading checklist without a verified DB connection for UI/testing convenience
+                _auditor = new Auditor("");
+                Log("No DB connection provided — using offline auditor for checklist load.");
+            }
+            Log("Loading checklist structure...");
+            try
+            {
+                // Do not auto-generate placeholder scripts during checklist load; mapping should be authoritative.
+
+                // Ensure checklist is loaded
+                System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
+                try
+                {
+                    var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+                    string? root = null;
+                    while (dir != null)
+                    {
+                        var candidate = Path.Combine(dir.FullName, "Backend", "checklist", "deterministic-script-mapping.json");
+                        if (File.Exists(candidate)) { root = dir.FullName; mappingFile = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]?>>(File.ReadAllText(candidate)) ?? new(); break; }
+                        dir = dir.Parent;
+                    }
+                }
+                catch { }
+
+                // prepare maps
+                _itemTypeMap = new System.Collections.Generic.Dictionary<string, string>();
+                _itemScriptMap = new System.Collections.Generic.Dictionary<string, string[]>();
+
+                // pre-fill Script entries from mapping file, but validate mapped files exist and are not autogenerated placeholders
+                if (_loadedItems != null)
+                {
+                    foreach (var it in _loadedItems)
+                    {
+                        if (mappingFile.TryGetValue(it.Id, out var files) && files != null && files.Length > 0)
+                        {
+                            var valid = new System.Collections.Generic.List<string>();
+                            foreach (var f in files.Where(s => !string.IsNullOrWhiteSpace(s)))
+                            {
+                                try
+                                {
+                                    var candidate = f;
+                                    if (!Path.IsPathRooted(candidate)) candidate = Path.Combine(Directory.GetCurrentDirectory(), candidate.Replace('/', Path.DirectorySeparatorChar));
+                                    if (!File.Exists(candidate)) continue;
+                                    // ignore auto-generated placeholders
+                                    var txt = File.ReadAllText(candidate);
+                                    if (txt.IndexOf("Placeholder script for", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                                    // keep the relative form if original was relative
+                                    valid.Add(f);
+                                }
+                                catch { }
+                            }
+                            if (valid.Count > 0)
+                            {
+                                _itemTypeMap[it.Id] = "Script";
+                                _itemScriptMap[it.Id] = valid.ToArray();
+                            }
+                        }
+                    }
+                }
+
+                // Determine selected items from the already-populated ChecklistTree (Checklist should not change on Load)
+                var selectedItems = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+                foreach (var areaObj in ChecklistTree.Items)
+                {
+                    if (areaObj is System.Windows.Controls.TreeViewItem areaNode)
+                    {
+                        foreach (var catObj in areaNode.Items)
+                        {
+                            if (catObj is System.Windows.Controls.TreeViewItem catNode)
+                            {
+                                foreach (var itemObj in catNode.Items)
+                                {
+                                    if (itemObj is System.Windows.Controls.TreeViewItem itemTvi && itemTvi.Header is System.Windows.Controls.CheckBox cb)
+                                    {
+                                        if (cb.IsChecked == true && cb.Tag is SQLAuditor.Lib.ChecklistItem it)
+                                        {
+                                            selectedItems.Add(it);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (selectedItems.Count == 0)
+                {
+                    Log("No items selected — Mapping Preview will show all items by category.");
+                    // When no explicit selection, persist the full checklist as selected (so downstream actions evaluate all)
+                }
+
+                // Keep selected item IDs in-memory only (no disk persistence)
+                try
+                {
+                    _selectedIds = (selectedItems.Count == 0 ? (_loadedItems ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : selectedItems).Select(i => i.Id).ToList();
+                    Log($"Selected {_selectedIds.Count} checklist item(s) loaded into memory.");
+                }
+                catch (Exception ex)
+                {
+                    Log("Failed to populate selected checklist in-memory: " + ex.Message);
+                }
+
+                var mappingRows = new System.Collections.Generic.List<dynamic>();
+                // Use in-memory selected IDs (if any) to determine which items to show/process
+                var itemsToProcess = (_selectedIds != null && _selectedIds.Count > 0) ? (_loadedItems?.Where(i => _selectedIds.Contains(i.Id)).ToList() ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : (selectedItems.Count == 0 ? (_loadedItems ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : selectedItems);
+                foreach (var it in itemsToProcess)
+                {
+                    string type;
+                    string[] scripts = new string[0];
+                    if (_itemTypeMap != null && _itemTypeMap.TryGetValue(it.Id, out var existing) && existing == "Script")
+                    {
+                        type = "Script";
+                        if (_itemScriptMap != null && _itemScriptMap.TryGetValue(it.Id, out var s)) scripts = s;
+                    }
+                    else
+                    {
+                        type = _isVerified && _auditor != null ? "AI-MCP" : "AI-Manual";
+
+                        // persist into maps
+                        if (_itemTypeMap != null) _itemTypeMap[it.Id] = type;
+                        if (_itemScriptMap != null) _itemScriptMap[it.Id] = scripts;
+                    }
+
+                    var area = _loadedStructure?.FirstOrDefault(x => x.Item.Id == it.Id).Area ?? string.Empty;
+                    mappingRows.Add(new { Type = type, Area = area, Category = it.Category, Id = it.Id, Description = it.Description, Verification = it.Verification, ScriptFiles = string.Join(';', scripts) });
+                }
+
+                // Populate TreeView grouped by Area -> Category -> Item
+                this.Dispatcher.Invoke(() =>
+                {
+                    int GetAreaKey(string name)
+                    {
+                        if (string.IsNullOrWhiteSpace(name)) return int.MaxValue;
+                        var m = System.Text.RegularExpressions.Regex.Match(name, "\\d+");
+                        if (m.Success && int.TryParse(m.Value, out var v)) return v;
+                        return int.MaxValue;
+                    }
+
+                    // populate mapping tree hierarchically: DisplayType -> Area -> Category -> Item (with counts)
+                    MappingTree.Items.Clear();
+                    var normalized = mappingRows.Select(r => new { DisplayType = ((string)r.Type) == "Script" ? "Script" : "AI (MCP/Manual)", Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
+                    var byType = normalized.GroupBy(r => r.DisplayType).OrderBy(t => t.Key);
+                    foreach (var typeGrp in byType)
+                    {
+                        var typeName = typeGrp.Key;
+                        int typeCount = typeGrp.Count();
+                        var typeNode = new System.Windows.Controls.TreeViewItem() { Header = $"{typeName} ({typeCount} items)", IsExpanded = true };
+
+                        var byArea = typeGrp.GroupBy(r => r.Area).OrderBy(a => GetAreaKey(a.Key));
+                        foreach (var areaGrp2 in byArea)
+                        {
+                            var areaName = areaGrp2.Key;
+                            var categories = areaGrp2.GroupBy(r => r.Category).OrderBy(c => c.Key).ToList();
+                            int areaCategoriesCount = categories.Count;
+                            int areaItemsCount = areaGrp2.Count();
+                            var areaHeaderItem = new System.Windows.Controls.TreeViewItem() { Header = $"{areaName} ({areaCategoriesCount} categories, {areaItemsCount} items)", IsExpanded = true };
+                            foreach (var catGrp2 in categories)
+                            {
+                                var catLabel = catGrp2.Key;
+                                int catCount = catGrp2.Count();
+                                var catNode2 = new System.Windows.Controls.TreeViewItem() { Header = $"{catLabel} ({catCount})", IsExpanded = true };
+                                foreach (var row in catGrp2.OrderBy(r => r.Id))
+                                {
+                                    var scripts = row.ScriptFiles;
+                                    var itemText = $"{row.Id} {row.Description}" + (string.IsNullOrWhiteSpace(scripts) ? string.Empty : $" — Scripts: {scripts}");
+                                    var itemNode = new System.Windows.Controls.TreeViewItem() { Header = itemText };
+                                    catNode2.Items.Add(itemNode);
+                                }
+                                areaHeaderItem.Items.Add(catNode2);
+                            }
+                            typeNode.Items.Add(areaHeaderItem);
+                        }
+
+                        MappingTree.Items.Add(typeNode);
+                    }
+                });
+                // Note: do not auto-persist deterministic mapping here. Mapping is authoritative and should be managed intentionally.
+
+                // mark that user has explicitly loaded the checklist so UI actions become available
+                _checklistLoaded = true;
+                StartEvalBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
+                Log("Checklist loaded.");
+            }
+            catch (Exception ex)
+            {
+                Log("Error loading checklist: " + ex.Message);
+            }
+        }
+
+        private async void LoadScriptsBtn_Click(object sender, RoutedEventArgs e)
+        {
+            // Deprecated: functionality merged into Load Checklist
+            Log("Load Scripts button is deprecated; use Load Checklist instead.");
+        }
+
+        private async void StartEvalBtn_Click(object sender, RoutedEventArgs e)
+        {
+            // Initialize auditor with declared FQDN for this evaluation run
+            var fqdn = !string.IsNullOrWhiteSpace(FqdnText.Text) ? FqdnText.Text.Trim() : "abc.windows.net";
+            await EnsureAuditor(fqdn);
+            // Use selection captured during Load Checklist.
+            var selected = new System.Collections.Generic.List<string>();
+            try
+            {
+                if (_selectedIds != null && _selectedIds.Count > 0) selected.AddRange(_selectedIds);
+            }
+            catch { }
+            if (selected.Count == 0)
+            {
+                MessageBox.Show("No loaded checklist selection found. Click Load Checklist first.", "Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // move to evaluation page and build EvalTree
+            SetTabIndex(2);
+            UpdateStageIndicators();
+            EvalTree.Items.Clear();
+            UpdateStageIndicators();
+
+            // Initialize evaluation state for selected items only.
+            _manualQueue = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+            _manualInstructions = new System.Collections.Generic.Dictionary<string, string>();
+            _manualStateMap = new System.Collections.Generic.Dictionary<string, ManualEvaluationState>();
+            _manualIndex = -1;
+            _evalItemMap = new System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>();
+            _evalStatusMap = new System.Collections.Generic.Dictionary<string, (string Status, string Technique)>();
+
+            var selectedLookup = new System.Collections.Generic.HashSet<string>(selected);
+            if (_loadedStructure != null)
+            {
+                foreach (var pair in _loadedStructure)
+                {
+                    if (!selectedLookup.Contains(pair.Item.Id)) continue;
+                    _evalItemMap[pair.Item.Id] = pair;
+
+                    var initialTechnique = "AI-Manual";
+                    if (_itemTypeMap != null && _itemTypeMap.TryGetValue(pair.Item.Id, out var mappedType) && string.Equals(mappedType, "Script", StringComparison.OrdinalIgnoreCase))
+                    {
+                        initialTechnique = "Script";
+                    }
+                    else if (_isVerified && _auditor != null)
+                    {
+                        initialTechnique = "AI-MCP";
+                    }
+
+                    _evalStatusMap[pair.Item.Id] = ("Not Started", initialTechnique);
+                }
+            }
+
+            RenderEvaluationTree();
+            ShowManualAtIndex();
+            Log("Starting evaluation...");
+
+            var progress = new Progress<SQLAuditor.Lib.ChecklistResult>(r =>
+            {
+                var uiOutcome = NormalizeUiStatus(r.Outcome, r.Technique);
+                Log($"[{r.Id}] {uiOutcome} ({r.Technique})");
+
+                try
+                {
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        if (_evalStatusMap != null && _evalItemMap != null && _evalItemMap.ContainsKey(r.Id))
+                        {
+                            var current = _evalStatusMap.TryGetValue(r.Id, out var st) ? st.Status : "Not Started";
+
+                            // Do not regress pending/submitted manual states back to generating/evaluating.
+                            var isIncomingIntermediate = string.Equals(uiOutcome, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(uiOutcome, "Evaluating", StringComparison.OrdinalIgnoreCase);
+                            var isCurrentReady = string.Equals(current, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(current, "Passed", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(current, "Failed", StringComparison.OrdinalIgnoreCase);
+
+                            if (!(isIncomingIntermediate && isCurrentReady))
+                            {
+                                _evalStatusMap[r.Id] = (uiOutcome, r.Technique);
+                            }
+
+                            RenderEvaluationTree();
+                            UpdateManualActionButtonStates(GetCurrentManualSelectedOutcome(), IsCurrentManualSubmitted());
+                        }
+                    });
+                }
+                catch { }
+            });
+
+            async Task<string?> RequestUserInput(SQLAuditor.Lib.ChecklistItem item, string instructionsFromAuditor)
+            {
+                // Queue manual validation without blocking evaluation flow.
+                try
+                {
+                    var instructions = instructionsFromAuditor ?? string.Empty;
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        Log($"Manual input required for {item.Id}: {item.Description}");
+                        // Ensure manual queue contains this item
+                        if (_manualQueue == null) _manualQueue = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+                        if (_manualInstructions == null) _manualInstructions = new System.Collections.Generic.Dictionary<string, string>();
+                        if (_manualStateMap == null) _manualStateMap = new System.Collections.Generic.Dictionary<string, ManualEvaluationState>();
+                        if (!_manualQueue.Any(m => m.Id == item.Id)) _manualQueue.Add(item);
+                        _manualInstructions[item.Id] = instructions ?? string.Empty;
+
+                        var state = EnsureManualState(item.Id);
+                        state.Instructions = instructions ?? string.Empty;
+                        if (_manualIndex == -1) _manualIndex = 0;
+
+                        if (_evalStatusMap != null)
+                        {
+                            if (!state.IsSubmitted)
+                            {
+                                _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
+                            }
+                            RenderEvaluationTree();
+                        }
+                        ShowManualAtIndex();
+                    });
+                }
+                catch
+                {
+                    this.Dispatcher.Invoke(() => Log("Failed to generate manual instructions."));
+                }
+
+                // Return immediately so next checklist item starts without waiting for manual PASS/FAIL.
+                await Task.CompletedTask;
+                return string.Empty;
+            }
+
+            try
+            {
+                _evaluationCts = new System.Threading.CancellationTokenSource();
+                _isEvaluating = true;
+                var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
+                Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
+                UpdateSummaryView(results);
+                // write simple final report
+                try
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine($"# Evaluation Results — {DateTime.UtcNow}\n");
+                    int idx = 1;
+                    foreach (var r in results)
+                    {
+                        sb.AppendLine($"{idx++}. {r.Id} — {r.Description} — {r.Outcome} — Technique: {r.Technique}\n");
+                    }
+                    System.IO.Directory.CreateDirectory(System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results"));
+                    var outPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
+                    System.IO.File.WriteAllText(outPath, sb.ToString());
+                    Log("Rendered report saved to results/final_report.md");
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                Log("Evaluation error: " + ex.Message);
+            }
+            finally
+            {
+                _isEvaluating = false;
+            }
+        }
+
+        private async void RunAllBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var fqdn = FqdnText.Text.Trim();
+            if (string.IsNullOrEmpty(fqdn)) { Log("Enter FQDN first."); return; }
+            Log($"Starting checklist evaluation on {fqdn}...");
+            await EnsureAuditor(fqdn);
+            try
+            {
+                var progress = new Progress<SQLAuditor.Lib.ChecklistResult>(r =>
+                {
+                    // update UI with progress
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        Log($"[{r.Id}] {r.Outcome} ({r.Technique})");
+                    });
+                });
+
+                // requestUserInput delegate
+                async Task<string?> RequestUserInput(SQLAuditor.Lib.ChecklistItem item, string instructionsFromAuditor)
+                {
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        Log($"Manual input required for {item.Id}: {item.Description}");
+                        if (!string.IsNullOrWhiteSpace(instructionsFromAuditor))
+                        {
+                            Log($"Manual steps: {instructionsFromAuditor}");
+                        }
+                        Log("Please type response in the input box and press Send (e.g. 'Yes' / 'No' / notes).");
+                    });
+                    _pendingUserInput = new System.Threading.Tasks.TaskCompletionSource<string?>();
+                    // wait for user response (no timeout)
+                    var resp = await _pendingUserInput.Task;
+                    return resp;
+                }
+
+                _evaluationCts = new System.Threading.CancellationTokenSource();
+                _isEvaluating = true;
+                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token);
+                Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
+                UpdateSummaryView(results);
+
+                // generate simple report using SQL template
+                try
+                {
+                    var repoRoot = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory());
+                    // locate template under SQL folder
+                    var templatePath = System.IO.Path.Combine(repoRoot, "SQL", "05-report-template.md");
+                    string template = System.IO.File.Exists(templatePath) ? System.IO.File.ReadAllText(templatePath) : "";
+
+                    int total = results.Length;
+                    int passed = 0; int failed = 0; int needs = 0;
+                    foreach (var r in results)
+                    {
+                        if (r.Outcome == "Pass") passed++;
+                        else if (r.Outcome == "Fail") failed++;
+                        else needs++;
+                    }
+                    double pct = total == 0 ? 0 : (double)passed * 100.0 / total;
+
+                    // Replace placeholders conservatively
+                    if (!string.IsNullOrEmpty(template))
+                    {
+                        template = template.Replace("[XX.X%]", pct.ToString("0.0"));
+                        template = template.Replace("[Total Checklist Items]", total.ToString());
+                        template = template.Replace("[N]", total.ToString());
+                        template = template.Replace("[Items Scored]", (total - needs).ToString());
+                        template = template.Replace("[Items N/A]", needs.ToString());
+                        template = template.Replace("[Critical Findings]", failed.ToString());
+                        template = template.Replace("[High Findings]", failed.ToString());
+                    }
+
+                    var sbFindings = new System.Text.StringBuilder();
+                    sbFindings.AppendLine("| # | Checklist Ref | Finding | Severity | Outcome | Technique |");
+                    sbFindings.AppendLine("|---|---------------|---------|----------|---------|-----------|");
+                    int idx = 1;
+                    foreach (var r in results)
+                    {
+                        var shortDesc = r.Description.Length > 80 ? r.Description.Substring(0, 77) + "..." : r.Description;
+                        sbFindings.AppendLine($"| {idx++} | {r.Id} | {shortDesc} | - | {r.Outcome} | {r.Technique} |");
+                    }
+
+                    var finalReport = (template + "\n\n## Findings\n" + sbFindings.ToString());
+                    Directory.CreateDirectory(System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results"));
+                    var outPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
+                    System.IO.File.WriteAllText(outPath, finalReport);
+                    Log($"Rendered report saved to results/final_report.md");
+                }
+                catch (Exception ex)
+                {
+                    Log("Report generation error: " + ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("Error: " + ex.Message);
+            }
+            finally
+            {
+                _isEvaluating = false;
+            }
+        }
+
+        private void SubmitBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                var val = ManualOutputBox.Text ?? string.Empty;
+                _pendingUserInput.TrySetResult(val);
+                Log("Submitted manual evidence.");
+                // advance to next manual item if any
+                AdvanceManualIndex();
+                return;
+            }
+
+            var item = GetCurrentManualItem();
+            if (item == null)
+            {
+                Log("No pending manual checklist item selected.");
+                return;
+            }
+
+            SaveCurrentManualDraft(false);
+            var state = EnsureManualState(item.Id);
+
+            var inferred = EvaluateManualOutcome(state.Remarks);
+            if (string.Equals(inferred, "Pass", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(inferred, "Fail", StringComparison.OrdinalIgnoreCase))
+            {
+                // On submit, prefer explicit outcome mentioned in remarks.
+                state.SelectedOutcome = inferred;
+            }
+            else if (!string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("Select Passed/Failed or include pass/fail in remarks before submitting.", "Manual Evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            state.IsSubmitted = true;
+            PersistManualResult(item, state);
+
+            if (_evalStatusMap != null)
+            {
+                _evalStatusMap[item.Id] = (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
+            }
+
+            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+            RenderEvaluationTree();
+            Log($"Submitted manual evaluation for {item.Id} as {state.SelectedOutcome}.");
+        }
+
+        private void MarkPassedBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                _pendingUserInput.TrySetResult("PASS");
+                Log("Marked item as Passed (manual).");
+                AdvanceManualIndex();
+                return;
+            }
+
+            SaveCurrentManualDraft(false);
+            SetManualOutcomeForCurrentItem("Pass", persistImmediately: true);
+        }
+
+        private void MarkFailedBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                _pendingUserInput.TrySetResult("FAIL");
+                Log("Marked item as Failed (manual).");
+                AdvanceManualIndex();
+                return;
+            }
+
+            SaveCurrentManualDraft(false);
+            SetManualOutcomeForCurrentItem("Fail", persistImmediately: true);
+        }
+
+        private void PrevManualBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_manualQueue == null || _manualQueue.Count == 0) return;
+            SaveCurrentManualDraft(false);
+            if (_manualIndex <= 0) _manualIndex = _manualQueue.Count - 1;
+            else _manualIndex--;
+            ShowManualAtIndex();
+        }
+
+        private void NextManualBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_manualQueue == null || _manualQueue.Count == 0) return;
+            SaveCurrentManualDraft(false);
+            if (_manualIndex >= _manualQueue.Count - 1) _manualIndex = 0;
+            else _manualIndex++;
+            ShowManualAtIndex();
+        }
+
+        private void ShowManualAtIndex()
+        {
+            if (_manualQueue == null || _manualQueue.Count == 0 || _manualIndex < 0 || _manualIndex >= _manualQueue.Count)
+            {
+                ManualTitle.Text = "Manual steps";
+                ManualStepsText.Text = string.Empty;
+                _isHydratingManualUi = true;
+                ManualOutputBox.Text = string.Empty;
+                _isHydratingManualUi = false;
+                UpdateManualActionButtonStates(null, false);
+                return;
+            }
+            var it = _manualQueue[_manualIndex];
+            var state = EnsureManualState(it.Id);
+            ManualTitle.Text = $"Manual evaluation for {it.Id}";
+            ManualStepsText.Text = state.Instructions;
+            _isHydratingManualUi = true;
+            ManualOutputBox.Text = state.Remarks;
+            _isHydratingManualUi = false;
+            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+        }
+
+        private bool HasPendingManualResponses()
+        {
+            if (_evalStatusMap == null)
+            {
+                return false;
+            }
+
+            foreach (var kv in _evalStatusMap)
+            {
+                if (!string.Equals(kv.Value.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (_manualStateMap == null || !_manualStateMap.TryGetValue(kv.Key, out var state) || state == null)
+                {
+                    return true;
+                }
+
+                if (!state.IsSubmitted)
+                {
+                    return true;
+                }
+            }
+
+            return _evalStatusMap.Values.Any(v =>
+                string.Equals(v.Status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(v.Status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(v.Status, "Evaluating", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(v.Status, "Not Started", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private ChecklistResult[] LoadSummaryResultsFromDisk()
+        {
+            try
+            {
+                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+                if (!System.IO.File.Exists(path)) return Array.Empty<ChecklistResult>();
+                var txt = System.IO.File.ReadAllText(path);
+                return JsonSerializer.Deserialize<ChecklistResult[]>(txt) ?? Array.Empty<ChecklistResult>();
+            }
+            catch
+            {
+                return Array.Empty<ChecklistResult>();
+            }
+        }
+
+        private void MarkPendingManualAsFailed()
+        {
+            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+            if (System.IO.File.Exists(path))
+            {
+                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+            }
+
+            var pendingIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_evalStatusMap != null)
+            {
+                foreach (var kv in _evalStatusMap)
+                {
+                    if (string.Equals(kv.Value.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
+                        && (string.Equals(kv.Value.Status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(kv.Value.Status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        pendingIds.Add(kv.Key);
+                    }
+                }
+            }
+
+            if (_manualQueue != null)
+            {
+                foreach (var it in _manualQueue)
+                {
+                    pendingIds.Add(it.Id);
+                }
+            }
+
+            foreach (var id in pendingIds)
+            {
+                if (_evalItemMap == null || !_evalItemMap.TryGetValue(id, out var pair)) continue;
+                var item = pair.Item;
+                var failEvidence = "Marked as Fail because manual evaluation was skipped by the operator.";
+                var failResult = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, "Fail", failEvidence, item.ScriptFile, "AI-Manual");
+                var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0) list[idx] = failResult;
+                else list.Add(failResult);
+
+                if (_evalStatusMap != null)
+                {
+                    _evalStatusMap[item.Id] = ("Failed", "AI-Manual");
+                }
+            }
+
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+
+            if (_manualQueue != null) _manualQueue.Clear();
+            _manualIndex = -1;
+            ManualTitle.Text = "Manual steps";
+            ManualStepsText.Text = string.Empty;
+            ManualOutputBox.Text = string.Empty;
+            RenderEvaluationTree();
+        }
+
+        private void UpdateSummaryView(System.Collections.Generic.IReadOnlyCollection<ChecklistResult> results)
+        {
+            var resultList = results?.ToList() ?? new System.Collections.Generic.List<ChecklistResult>();
+            var total = resultList.Count;
+            var passed = resultList.Count(r => string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase));
+            var failed = resultList.Count(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
+            var review = resultList.Count(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase));
+            var script = resultList.Count(r => string.Equals(r.Technique, "Script", StringComparison.OrdinalIgnoreCase));
+            var mcp = resultList.Count(r => string.Equals(r.Technique, "AI-MCP", StringComparison.OrdinalIgnoreCase));
+            var manual = resultList.Count(r => string.Equals(r.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase));
+
+            if (SummaryTotalText != null) SummaryTotalText.Text = total.ToString();
+            if (SummaryPassedText != null) SummaryPassedText.Text = passed.ToString();
+            if (SummaryFailedText != null) SummaryFailedText.Text = failed.ToString();
+            if (SummaryReviewText != null) SummaryReviewText.Text = review.ToString();
+
+            if (SummaryList != null)
+            {
+                SummaryList.Items.Clear();
+                foreach (var r in resultList)
+                {
+                    SummaryList.Items.Add($"{r.Id} | {r.Description} | {r.Outcome} | {r.Technique}");
+                }
+            }
+
+            if (SummaryOutcomeChartItems != null)
+            {
+                SummaryOutcomeChartItems.ItemsSource = new[]
+                {
+                    new SummaryMetricItem { Label = "Passed", Value = passed, Total = Math.Max(total, 1), Detail = "Items marked Pass", BarBrush = System.Windows.Media.Brushes.ForestGreen },
+                    new SummaryMetricItem { Label = "Failed", Value = failed, Total = Math.Max(total, 1), Detail = "Items marked Fail", BarBrush = System.Windows.Media.Brushes.IndianRed },
+                    new SummaryMetricItem { Label = "Needs Review", Value = review, Total = Math.Max(total, 1), Detail = "Items requiring follow-up", BarBrush = System.Windows.Media.Brushes.Goldenrod }
+                };
+            }
+
+            if (SummaryTechniqueChartItems != null)
+            {
+                SummaryTechniqueChartItems.ItemsSource = new[]
+                {
+                    new SummaryMetricItem { Label = "Script", Value = script, Total = Math.Max(total, 1), Detail = "Script-based checks", BarBrush = System.Windows.Media.Brushes.SteelBlue },
+                    new SummaryMetricItem { Label = "AI-MCP", Value = mcp, Total = Math.Max(total, 1), Detail = "MCP-evaluated checks", BarBrush = System.Windows.Media.Brushes.MediumPurple },
+                    new SummaryMetricItem { Label = "AI-Manual", Value = manual, Total = Math.Max(total, 1), Detail = "Pending/Manual checks", BarBrush = System.Windows.Media.Brushes.OrangeRed }
+                };
+            }
+        }
+
+        private string NormalizeUiStatus(string outcome, string technique)
+        {
+            if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase) && string.Equals(outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return "Generating Manual Plan";
+            if (string.Equals(outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return "Evaluating";
+            if (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Passed", StringComparison.OrdinalIgnoreCase)) return "Passed";
+            if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase) && string.Equals(outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) return "Pending Manual Evaluation";
+            if (string.Equals(outcome, "Not Started", StringComparison.OrdinalIgnoreCase)) return "Not Started";
+            return "Failed";
+        }
+
+        private System.Windows.Media.Brush GetStatusBrush(string status)
+        {
+            if (string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.ForestGreen;
+            if (string.Equals(status, "Evaluating", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DarkOrange;
+            if (string.Equals(status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DodgerBlue;
+            if (string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.Goldenrod;
+            if (string.Equals(status, "Not Started", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DimGray;
+            return System.Windows.Media.Brushes.IndianRed;
+        }
+
+        private void RenderEvaluationTree()
+        {
+            if (_evalItemMap == null || _evalStatusMap == null) return;
+
+            EvalTree.Items.Clear();
+            var techniqueOrder = new[] { "Script", "AI-MCP", "AI-Manual" };
+
+            foreach (var technique in techniqueOrder)
+            {
+                var techniqueItems = _evalItemMap
+                    .Where(kv => _evalStatusMap.TryGetValue(kv.Key, out var state) && string.Equals(state.Technique, technique, StringComparison.OrdinalIgnoreCase))
+                    .Select(kv => kv.Value)
+                    .OrderBy(v => v.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds))
+                    .ToList();
+
+                if (techniqueItems.Count == 0) continue;
+
+                var techniqueNode = new System.Windows.Controls.TreeViewItem { Header = $"{technique} ({techniqueItems.Count} items)", IsExpanded = true };
+
+                var byArea = techniqueItems
+                    .GroupBy(x => GetChecklistAreaId(x.Item.Id))
+                    .OrderBy(g => g.Key, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds));
+
+                foreach (var areaGrp in byArea)
+                {
+                    var areaTitle = areaGrp.FirstOrDefault().Area;
+                    var areaNode = new System.Windows.Controls.TreeViewItem { Header = FormatAreaLabel(areaGrp.Key, areaTitle), IsExpanded = true };
+
+                    var bySubArea = areaGrp
+                        .GroupBy(x => GetChecklistSubAreaId(x.Item.Id))
+                        .OrderBy(g => g.Key, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds));
+
+                    foreach (var subAreaGrp in bySubArea)
+                    {
+                        var subAreaTitle = subAreaGrp.FirstOrDefault().Item.Category;
+                        var subAreaNode = new System.Windows.Controls.TreeViewItem { Header = FormatSubAreaLabel(subAreaGrp.Key, subAreaTitle), IsExpanded = true };
+
+                        foreach (var pair in subAreaGrp.OrderBy(x => x.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
+                        {
+                            var status = _evalStatusMap.TryGetValue(pair.Item.Id, out var st) ? st.Status : "Not Started";
+                            var statusBrush = GetStatusBrush(status);
+                            var text = new System.Windows.Controls.TextBlock();
+                            text.Inlines.Add(new System.Windows.Documents.Run($"[{status}] ")
+                            {
+                                Foreground = statusBrush,
+                                FontWeight = FontWeights.SemiBold
+                            });
+                            text.Inlines.Add(new System.Windows.Documents.Run($"{pair.Item.Id} {pair.Item.Description}"));
+
+                            var itemNode = new System.Windows.Controls.TreeViewItem
+                            {
+                                Header = text,
+                                Tag = pair.Item,
+                                IsExpanded = true
+                            };
+                            subAreaNode.Items.Add(itemNode);
+                        }
+
+                        areaNode.Items.Add(subAreaNode);
+                    }
+
+                    techniqueNode.Items.Add(areaNode);
+                }
+
+                EvalTree.Items.Add(techniqueNode);
+            }
+        }
+
+        private string EvaluateManualOutcome(string response)
+        {
+            if (string.IsNullOrWhiteSpace(response)) return "NeedsReview";
+            if (string.Equals(response, "PASS", StringComparison.OrdinalIgnoreCase)) return "Pass";
+            if (string.Equals(response, "FAIL", StringComparison.OrdinalIgnoreCase)) return "Fail";
+            if (response.IndexOf("pass", StringComparison.OrdinalIgnoreCase) >= 0) return "Pass";
+            if (response.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0) return "Fail";
+            return "NeedsReview";
+        }
+
+        private void ApplyDeferredManualDecision(string response)
+        {
+            try
+            {
+                var item = GetCurrentManualItem();
+                if (item == null)
+                {
+                    Log("No pending manual checklist item selected.");
+                    return;
+                }
+
+                SaveCurrentManualDraft(false);
+                var state = EnsureManualState(item.Id);
+                var outcome = EvaluateManualOutcome(response);
+                state.SelectedOutcome = outcome;
+                state.IsSubmitted = true;
+
+                var status = string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed";
+                if (_evalStatusMap != null)
+                {
+                    _evalStatusMap[item.Id] = (status, "AI-Manual");
+                }
+                RenderEvaluationTree();
+                PersistManualResult(item, state);
+                UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+                Log($"Stored deferred manual result for {item.Id}: {outcome}");
+
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to store deferred manual decision: " + ex.Message);
+            }
+        }
+
+        private SQLAuditor.Lib.ChecklistItem? GetCurrentManualItem()
+        {
+            if (_manualQueue == null || _manualQueue.Count == 0 || _manualIndex < 0 || _manualIndex >= _manualQueue.Count)
+            {
+                return null;
+            }
+
+            return _manualQueue[_manualIndex];
+        }
+
+        private ManualEvaluationState EnsureManualState(string itemId)
+        {
+            if (_manualStateMap == null)
+            {
+                _manualStateMap = new System.Collections.Generic.Dictionary<string, ManualEvaluationState>();
+            }
+
+            if (!_manualStateMap.TryGetValue(itemId, out var state))
+            {
+                state = new ManualEvaluationState();
+                _manualStateMap[itemId] = state;
+            }
+
+            if (string.IsNullOrEmpty(state.Instructions) && _manualInstructions != null && _manualInstructions.TryGetValue(itemId, out var inst))
+            {
+                state.Instructions = inst ?? string.Empty;
+            }
+
+            return state;
+        }
+
+        private void SaveCurrentManualDraft(bool resetSubmitted)
+        {
+            if (_isHydratingManualUi)
+            {
+                return;
+            }
+
+            var item = GetCurrentManualItem();
+            if (item == null)
+            {
+                return;
+            }
+
+            var state = EnsureManualState(item.Id);
+            var remarks = ManualOutputBox.Text ?? string.Empty;
+            var changed = !string.Equals(state.Remarks, remarks, StringComparison.Ordinal);
+            state.Remarks = remarks;
+
+            if (changed && resetSubmitted && state.IsSubmitted)
+            {
+                state.IsSubmitted = false;
+                if (_evalStatusMap != null)
+                {
+                    _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
+                    RenderEvaluationTree();
+                }
+            }
+
+            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+        }
+
+        private void SetManualOutcomeForCurrentItem(string outcome, bool persistImmediately = false)
+        {
+            var item = GetCurrentManualItem();
+            if (item == null)
+            {
+                Log("No pending manual checklist item selected.");
+                return;
+            }
+
+            var state = EnsureManualState(item.Id);
+            var changed = !string.Equals(state.SelectedOutcome, outcome, StringComparison.OrdinalIgnoreCase);
+            state.SelectedOutcome = outcome;
+
+            if (persistImmediately)
+            {
+                state.IsSubmitted = true;
+                if (_evalStatusMap != null)
+                {
+                    _evalStatusMap[item.Id] = (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
+                    RenderEvaluationTree();
+                }
+                PersistManualResult(item, state);
+                UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+                Log($"Marked {item.Id} as {outcome}.");
+                return;
+            }
+
+            if (changed && state.IsSubmitted)
+            {
+                state.IsSubmitted = false;
+                if (_evalStatusMap != null)
+                {
+                    _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
+                    RenderEvaluationTree();
+                }
+            }
+
+            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+            Log($"Selected {outcome} for {item.Id}. Click Submit to save.");
+        }
+
+        private void PersistManualResult(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
+        {
+            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+            if (System.IO.File.Exists(path))
+            {
+                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+            }
+
+            var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
+            var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
+            var updated = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual")
+            {
+                McpUsage = null,
+                McpExecutionTimeMs = null,
+                McpEvidence = null
+            };
+
+            var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0) list[idx] = updated;
+            else list.Add(updated);
+
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)
+        {
+            if (MarkPassedBtn == null || MarkFailedBtn == null || SubmitBtn == null || ManualOutputBox == null)
+            {
+                return;
+            }
+
+            var isEnabled = IsCurrentManualReadyForInput();
+            MarkPassedBtn.IsEnabled = isEnabled;
+            MarkFailedBtn.IsEnabled = isEnabled;
+            SubmitBtn.IsEnabled = isEnabled;
+            ManualOutputBox.IsEnabled = isEnabled;
+
+            MarkPassedBtn.Opacity = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
+            MarkPassedBtn.BorderThickness = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
+
+            MarkFailedBtn.Opacity = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
+            MarkFailedBtn.BorderThickness = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
+
+            SubmitBtn.Opacity = isSubmitted ? 1.0 : 0.85;
+            SubmitBtn.BorderThickness = isSubmitted ? new Thickness(3) : new Thickness(1);
+            SubmitBtn.Content = isSubmitted ? "Submitted" : "Submit";
+        }
+
+        private bool IsCurrentManualReadyForInput()
+        {
+            var item = GetCurrentManualItem();
+            if (item == null)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private string? GetCurrentManualSelectedOutcome()
+        {
+            var item = GetCurrentManualItem();
+            if (item == null || _manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out var state) || state == null)
+            {
+                return null;
+            }
+
+            return state.SelectedOutcome;
+        }
+
+        private bool IsCurrentManualSubmitted()
+        {
+            var item = GetCurrentManualItem();
+            if (item == null || _manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out var state) || state == null)
+            {
+                return false;
+            }
+
+            return state.IsSubmitted;
+        }
+
+        private System.Collections.Generic.List<string> GetIncompleteEvaluationMessages()
+        {
+            var messages = new System.Collections.Generic.List<string>();
+            if (_evalItemMap == null || _evalStatusMap == null)
+            {
+                return messages;
+            }
+
+            foreach (var pair in _evalItemMap.OrderBy(x => x.Value.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
+            {
+                var item = pair.Value.Item;
+                if (!_evalStatusMap.TryGetValue(item.Id, out var statusEntry))
+                {
+                    messages.Add($"{item.Id}: status missing.");
+                    continue;
+                }
+
+                var technique = statusEntry.Technique;
+                var status = statusEntry.Status;
+                if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase))
+                {
+                    ManualEvaluationState? manualState = null;
+                    if (_manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out manualState) || manualState == null)
+                    {
+                        messages.Add($"{item.Id}: manual guidance generated but no saved response yet.");
+                        continue;
+                    }
+
+                    if (!string.Equals(manualState.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(manualState.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
+                    {
+                        messages.Add($"{item.Id}: choose Passed or Failed.");
+                        continue;
+                    }
+
+                    if (!manualState.IsSubmitted)
+                    {
+                        messages.Add($"{item.Id}: manual evaluation not submitted.");
+                        continue;
+                    }
+
+                    if (!string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        messages.Add($"{item.Id}: current status is '{status}'.");
+                    }
+
+                    continue;
+                }
+
+                if (!string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+                {
+                    messages.Add($"{item.Id}: current status is '{status}'.");
+                }
+            }
+
+            return messages;
+        }
+
+        private void ManualOutputBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            SaveCurrentManualDraft(true);
+        }
+
+        private void AdvanceManualIndex()
+        {
+            if (_manualQueue == null) return;
+            if (_manualIndex < 0) return;
+            _manualIndex++;
+            if (_manualIndex >= _manualQueue.Count)
+            {
+                // finished manual queue
+                _manualIndex = -1;
+                ManualTitle.Text = "Manual steps";
+                ManualStepsText.Text = string.Empty;
+                ManualOutputBox.Text = string.Empty;
+            }
+            else
+            {
+                ShowManualAtIndex();
+            }
+        }
+
+        private async void RunScanBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var fqdn = FqdnText.Text.Trim();
+            if (string.IsNullOrEmpty(fqdn)) { Log("Enter FQDN first."); return; }
+            await EnsureAuditor(fqdn);
+            Log("Attempting to run PowerShell scan (if present)...");
+            try
+            {
+                // find script path in caller repo
+                var scriptsDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "SQL", "scripts");
+                var psPath = System.IO.Path.Combine(scriptsDir, "07-sql-code-scan.ps1");
+                if (!System.IO.File.Exists(psPath)) { Log("PowerShell scan not found."); return; }
+                var outText = await _auditor!.RunScriptFileAsync(psPath);
+                Log("PowerShell scan complete — output saved to results/.");
+            }
+            catch (Exception ex)
+            {
+                Log("Error: " + ex.Message);
+            }
+        }
+
+        private void ExportBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var defaultPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
+                if (!System.IO.File.Exists(defaultPath))
+                {
+                    MessageBox.Show("No final report found in results/. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                var dlg = new SaveFileDialog() { FileName = "final_report.md", Filter = "Markdown|*.md|All Files|*.*" };
+                if (dlg.ShowDialog() == true)
+                {
+                    System.IO.File.Copy(defaultPath, dlg.FileName, true);
+                    MessageBox.Show("Exported to " + dlg.FileName, "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Export failed: " + ex.Message, "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async Task EnsureAuditor(string fqdn)
+        {
+            if (_auditor != null) return;
+
+            // Fresh AI-MCP defaults for SQL Server checklist evaluation.
+            Environment.SetEnvironmentVariable("PROVIDER_BASE_URL", "https://llm.maqsoftware.net/v1");
+            Environment.SetEnvironmentVariable("PROVIDER_API_KEY", "sk-jlQlxi3zFjCNOYyeSqLDwQ");
+            Environment.SetEnvironmentVariable("MODEL", "qwen-3.6-27b");
+
+            // Build connection string according to auth selection
+            string cs;
+            try
+            {
+                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
+                sel = sel.Trim();
+                if (string.Equals(sel, "SQL Login", StringComparison.OrdinalIgnoreCase))
+                {
+                    var user = SqlUserBox.Text ?? "";
+                    var pass = SqlPassBox.Password ?? "";
+                    cs = $"Server={fqdn};Database=master;User Id={user};Password={pass};TrustServerCertificate=true;";
+                }
+                else
+                {
+                    // default to Windows Authentication
+                    cs = $"Server={fqdn};Database=master;Integrated Security=true;TrustServerCertificate=true;";
+                }
+            }
+            catch
+            {
+                cs = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
+            }
+            _auditor = new Auditor(cs);
+            // Attempt to normalize the connection (try common server variants) so UI verification and later runs use a working connection string
+            try
+            {
+                await _auditor.TestAndNormalizeConnectionAsync();
+            }
+            catch { }
+            await Task.CompletedTask;
+        }
+
+        private void MainTabs_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            // Prevent users from switching tabs by clicking on headers. Only allow programmatic navigation.
+            if (_allowTabChange) return;
+            try
+            {
+                var src = e.OriginalSource as System.Windows.DependencyObject;
+                while (src != null && !(src is System.Windows.Controls.TabItem))
+                {
+                    src = System.Windows.Media.VisualTreeHelper.GetParent(src);
+                }
+                if (src is System.Windows.Controls.TabItem)
+                {
+                    e.Handled = true; // swallow header click
+                }
+            }
+            catch { e.Handled = true; }
+        }
+
+        private void SetTabIndex(int idx)
+        {
+            try
+            {
+                _allowTabChange = true;
+                MainTabs.SelectedIndex = idx;
+            }
+            finally { _allowTabChange = false; }
+        }
+
+        private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var fqdn = FqdnText.Text.Trim();
+            if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
+            AccessStatus.Text = "Testing connection...";
+            try
+            {
+                await EnsureAuditor(fqdn);
+                var ok = await _auditor!.TestConnectionAsync();
+                if (ok)
+                {
+                    _isVerified = true;
+                    AccessStatus.Text = $"Verified: {fqdn}";
+                    VerifyBtn.Content = "Configure Checklist";
+                    SetTabIndex(1);
+                    LoadChecklistBtn.IsEnabled = true;
+                    Log($"Connection to {fqdn} verified.");
+                    // Auto-load the checklist structure after successful verification
+                    try
+                    {
+                        await PopulateChecklistStructureAsync();
+                        Log("Checklist auto-loaded after verification.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("Failed to auto-load checklist: " + ex.Message);
+                    }
+                }
+                else
+                {
+                    _isVerified = false;
+                    AccessStatus.Text = "Failed to connect.";
+                    Log($"Failed to connect to {fqdn}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AccessStatus.Text = "Error testing connection.";
+                Log("Verify error: " + ex.Message);
+            }
+            UpdateStageIndicators();
+        }
+
+        private void Send_Click(object sender, RoutedEventArgs e)
+        {
+            Log("Send clicked (legacy) - no input box present.");
+        }
+
+        private static string GetChecklistAreaId(string? itemId)
+        {
+            if (string.IsNullOrWhiteSpace(itemId)) return string.Empty;
+            var parts = itemId.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length > 0 ? parts[0] : string.Empty;
+        }
+
+        private static string GetChecklistSubAreaId(string? itemId)
+        {
+            if (string.IsNullOrWhiteSpace(itemId)) return string.Empty;
+            var parts = itemId.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length >= 2 ? string.Join('.', parts.Take(2)) : parts.Length > 0 ? parts[0] : string.Empty;
+        }
+
+        private static int CompareChecklistIds(string? left, string? right)
+        {
+            if (string.IsNullOrWhiteSpace(left) && string.IsNullOrWhiteSpace(right)) return 0;
+            if (string.IsNullOrWhiteSpace(left)) return 1;
+            if (string.IsNullOrWhiteSpace(right)) return -1;
+
+            var leftParts = left.Split('.', StringSplitOptions.RemoveEmptyEntries).Select(p => int.TryParse(p, out var v) ? v : int.MaxValue).ToArray();
+            var rightParts = right.Split('.', StringSplitOptions.RemoveEmptyEntries).Select(p => int.TryParse(p, out var v) ? v : int.MaxValue).ToArray();
+
+            var depth = Math.Max(leftParts.Length, rightParts.Length);
+            for (int i = 0; i < depth; i++)
+            {
+                var leftValue = i < leftParts.Length ? leftParts[i] : int.MaxValue;
+                var rightValue = i < rightParts.Length ? rightParts[i] : int.MaxValue;
+                if (leftValue != rightValue) return leftValue.CompareTo(rightValue);
+            }
+
+            return string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string FormatAreaLabel(string? areaId, string? title)
+        {
+            if (string.IsNullOrWhiteSpace(areaId)) return string.IsNullOrWhiteSpace(title) ? "Area" : title;
+            return string.IsNullOrWhiteSpace(title) ? $"Area {areaId}" : $"Area {areaId}: {title}";
+        }
+
+        private static string FormatSubAreaLabel(string? subAreaId, string? title)
+        {
+            if (string.IsNullOrWhiteSpace(subAreaId)) return string.IsNullOrWhiteSpace(title) ? "Sub-area" : title;
+            return string.IsNullOrWhiteSpace(title) ? $"Sub-area {subAreaId}" : $"Sub-area {subAreaId}: {title}";
+        }
+
+        private void AreaCb_Checked(object? sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.CheckBox cb && cb.Parent is System.Windows.Controls.StackPanel sp)
+            {
+                // parent TreeViewItem is two levels up
+                var tvi = FindAncestor<System.Windows.Controls.TreeViewItem>(sp);
+                if (tvi != null)
+                {
+                    SetChildrenChecked(tvi, true);
+                }
+            }
+        }
+
+        private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
+        {
+            // Temporarily disabled: generating/updating scripts for unmapped items is not allowed.
+            Log("Generate Scripts action is currently disabled — will not update or create unmapped scripts.");
+            MessageBox.Show(this, "Generate Scripts is temporarily disabled and will not modify scripts for unmapped checklist items.", "Generate Scripts Disabled", MessageBoxButton.OK, MessageBoxImage.Information);
+            // The intended operator-driven flow (commented-out) is shown below.
+            // When re-enabled, the button SHOULD be the *only* code path that writes
+            // new scripts into Backend/checklist/scripts/sql and updates
+            // Backend/checklist/deterministic-script-mapping.json via Auditor.SaveGeneratedScriptAsync.
+            // DO NOT add other automatic writers elsewhere in the codebase.
+
+            /* Example (commented):
+            await EnsureAuditor(FqdnText.Text.Trim());
+            var selected = /* gather selected checklist items * / ;
+            foreach (var item in selected)
+            {
+                // The script content should be created externally (GHCP Copilot),
+                // then pasted or loaded here. The tool must NOT generate scripts
+                // automatically without operator confirmation.
+                string scriptText = /* operator-provided script contents * /;
+                // Persist intentionally via the auditor API
+                var savedPath = await _auditor.SaveGeneratedScriptAsync(item.Id, scriptText, item.Id + ".sql");
+                Log($"Saved generated script for {item.Id} -> {savedPath}");
+            }
+            */
+
+            await Task.CompletedTask;
+            return;
+        }
+
+        private void AreaCb_Unchecked(object? sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.CheckBox cb && cb.Parent is System.Windows.Controls.StackPanel sp)
+            {
+                var tvi = FindAncestor<System.Windows.Controls.TreeViewItem>(sp);
+                if (tvi != null)
+                {
+                    SetChildrenChecked(tvi, false);
+                }
+            }
+        }
+
+        private static T? FindAncestor<T>(DependencyObject? child) where T : DependencyObject
+        {
+            var parent = child;
+            while (parent != null)
+            {
+                if (parent is T t) return t;
+                parent = System.Windows.Media.VisualTreeHelper.GetParent(parent);
+            }
+            return null;
+        }
+
+        private void SetChildrenChecked(System.Windows.Controls.TreeViewItem root, bool isChecked)
+        {
+            foreach (var obj in root.Items)
+            {
+                if (obj is System.Windows.Controls.TreeViewItem tvi)
+                {
+                    if (tvi.Header is System.Windows.Controls.CheckBox cb) cb.IsChecked = isChecked;
+                    SetChildrenChecked(tvi, isChecked);
+                }
+            }
+        }
+
+        private void UpdateStageIndicators()
+        {
+            try
+            {
+                // simple visual indicator: bold active stage
+                Stage1Label.FontWeight = MainTabs.SelectedIndex == 0 ? FontWeights.Bold : FontWeights.Normal;
+                Stage2Label.FontWeight = MainTabs.SelectedIndex == 1 ? FontWeights.Bold : FontWeights.Normal;
+                Stage3Label.FontWeight = MainTabs.SelectedIndex == 2 ? FontWeights.Bold : FontWeights.Normal;
+                Stage4Label.FontWeight = MainTabs.SelectedIndex == 3 ? FontWeights.Bold : FontWeights.Normal;
+
+                // Allow loading checklist at any time (user action required)
+                LoadChecklistBtn.IsEnabled = true;
+                // Keep Generate Scripts disabled for now (feature temporarily inactive)
+                GenerateScriptsBtn.IsEnabled = false;
+                StartEvalBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
+            }
+            catch { }
+        }
+
+        private async Task PopulateChecklistStructureAsync()
+        {
+            try
+            {
+                if (_auditor == null) _auditor = new Auditor("");
+                var groups = await _auditor.GetChecklistStructureAsync();
+                this.Dispatcher.Invoke(() =>
+                {
+                    ChecklistTree.Items.Clear();
+                    _loadedItems = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+                    _loadedStructure = new System.Collections.Generic.List<(string, SQLAuditor.Lib.ChecklistItem)>();
+                });
+
+                // Build ChecklistTree as Area -> Category -> Item (checkboxes)
+                this.Dispatcher.Invoke(() =>
+                {
+                    ChecklistTree.Items.Clear();
+                    _loadedItems = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+                    _loadedStructure = new System.Collections.Generic.List<(string, SQLAuditor.Lib.ChecklistItem)>();
+                });
+
+                foreach (var g in groups)
+                {
+                    foreach (var it in g.Items)
+                    {
+                        _loadedItems.Add(it);
+                        _loadedStructure!.Add((g.Area, it));
+                    }
+                }
+
+                this.Dispatcher.Invoke(() =>
+                {
+                    var byArea = _loadedStructure
+                        .GroupBy(x => GetChecklistAreaId(x.Item.Id))
+                        .OrderBy(a => a.Key, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds));
+
+                    foreach (var areaGrp in byArea)
+                    {
+                        var areaTitle = areaGrp.FirstOrDefault().Area;
+                        var areaHeader = new System.Windows.Controls.TreeViewItem();
+                        var areaPanel = new System.Windows.Controls.StackPanel() { Orientation = System.Windows.Controls.Orientation.Horizontal };
+                        var areaCb = new System.Windows.Controls.CheckBox() { Content = FormatAreaLabel(areaGrp.Key, areaTitle) };
+                        areaCb.Tag = areaGrp.Key;
+                        areaCb.Checked += AreaCb_Checked;
+                        areaCb.Unchecked += AreaCb_Unchecked;
+                        areaPanel.Children.Add(areaCb);
+                        areaHeader.Header = areaPanel;
+                        areaHeader.IsExpanded = true;
+
+                        var bySubArea = areaGrp
+                            .GroupBy(r => GetChecklistSubAreaId(r.Item.Id))
+                            .OrderBy(c => c.Key, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds));
+
+                        foreach (var subAreaGrp in bySubArea)
+                        {
+                            var subAreaTitle = subAreaGrp.FirstOrDefault().Item.Category;
+                            var catNode = new System.Windows.Controls.TreeViewItem() { Header = FormatSubAreaLabel(subAreaGrp.Key, subAreaTitle), IsExpanded = true };
+                            foreach (var pair in subAreaGrp.OrderBy(r => r.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
+                            {
+                                var item = pair.Item;
+                                var cb = new System.Windows.Controls.CheckBox() { Content = item.Id + " " + item.Description, Tag = item };
+                                var node = new System.Windows.Controls.TreeViewItem() { Header = cb };
+                                catNode.Items.Add(node);
+                            }
+                            areaHeader.Items.Add(catNode);
+                        }
+                        ChecklistTree.Items.Add(areaHeader);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Log("Populate checklist error: " + ex.Message);
+            }
+        }
+
+        private void Log(string message)
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                System.IO.Directory.CreateDirectory(dir);
+                var path = System.IO.Path.Combine(dir, "ui_log.txt");
+                var line = $"{DateTime.UtcNow:O} {message}\n";
+                System.IO.File.AppendAllText(path, line);
+                System.Diagnostics.Debug.WriteLine(message);
+                try
+                {
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        try
+                        {
+                            if (UiLogBox != null)
+                            {
+                                UiLogBox.AppendText(line);
+                                UiLogBox.ScrollToEnd();
+                            }
+                        }
+                        catch { }
+                    });
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        private async void GenSummaryBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isEvaluating)
+                {
+                    MessageBox.Show("Evaluation is still running. Wait for completion before generating the summary report.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var incomplete = GetIncompleteEvaluationMessages();
+                if (incomplete.Count > 0)
+                {
+                    var preview = string.Join("\n", incomplete.Take(12));
+                    var more = incomplete.Count > 12 ? $"\n...and {incomplete.Count - 12} more item(s)." : string.Empty;
+                    MessageBox.Show(
+                        "Assessment is not complete. Finish these items before generating summary:\n\n"
+                        + preview
+                        + more,
+                        "Incomplete Evaluation",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                    return;
+                }
+
+                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+                if (!System.IO.File.Exists(path)) { Log("No results/checklist_results.json found"); return; }
+                var txt = System.IO.File.ReadAllText(path);
+                var arr = JsonSerializer.Deserialize<SQLAuditor.Lib.ChecklistResult[]>(txt) ?? Array.Empty<SQLAuditor.Lib.ChecklistResult>();
+
+                // Load checklist structure to map IDs to areas/categories
+                System.Collections.Generic.Dictionary<string, (string Area, string Category)> map = new System.Collections.Generic.Dictionary<string, (string, string)>();
+                try
+                {
+                    var structList = await _auditor!.GetChecklistStructureAsync();
+                    foreach (var (area, items) in structList)
+                    {
+                        foreach (var it in items)
+                        {
+                            map[it.Id] = (area, it.Category);
+                        }
+                    }
+                }
+                catch { }
+
+                // Scoring: map outcomes to numeric scores per rubric (conservative)
+                int total = arr.Length;
+                int itemsScored = arr.Count(r => string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
+                int itemsNA = arr.Count(r => string.Equals(r.Outcome, "N/A", StringComparison.OrdinalIgnoreCase));
+                int criticalFindings = arr.Count(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
+
+                System.Collections.Generic.Dictionary<string, int> itemScores = new System.Collections.Generic.Dictionary<string, int>();
+                foreach (var r in arr)
+                {
+                    int score = 0;
+                    if (string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase)) score = 2; // Implemented baseline
+                    else if (string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase)) score = 0;
+                    else score = 0; // NeedsReview/Stopped/N/A => 0 by default
+                    itemScores[r.Id] = score;
+                }
+
+                // Compute category and area scores
+                var categoryScores = new System.Collections.Generic.Dictionary<string, (int Sum, int Count)>();
+                var areaCategoryMap = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<string>>();
+                foreach (var kv in itemScores)
+                {
+                    var id = kv.Key; var sc = kv.Value;
+                    var area = map.ContainsKey(id) ? map[id].Area : "Unassigned";
+                    var cat = map.ContainsKey(id) ? map[id].Category : "Unassigned";
+                    var catKey = area + "||" + cat;
+                    if (!categoryScores.ContainsKey(catKey)) categoryScores[catKey] = (0, 0);
+                    var cur = categoryScores[catKey];
+                    categoryScores[catKey] = (cur.Sum + sc, cur.Count + 1);
+                    if (!areaCategoryMap.ContainsKey(area)) areaCategoryMap[area] = new System.Collections.Generic.List<string>();
+                    if (!areaCategoryMap[area].Contains(cat)) areaCategoryMap[area].Add(cat);
+                }
+
+                var areaScores = new System.Collections.Generic.Dictionary<string, double>();
+                foreach (var area in areaCategoryMap.Keys)
+                {
+                    double totalPct = 0; int cats = 0;
+                    foreach (var cat in areaCategoryMap[area])
+                    {
+                        var key = area + "||" + cat;
+                        if (!categoryScores.ContainsKey(key)) continue;
+                        var (sum, count) = categoryScores[key];
+                        if (count == 0) continue;
+                        double catPct = (double)sum / (3.0 * count) * 100.0;
+                        totalPct += catPct; cats++;
+                    }
+                    var areaPct = cats == 0 ? 0.0 : totalPct / cats;
+                    areaScores[area] = areaPct;
+                }
+
+                // Area weights per rubric
+                var areaWeights = new System.Collections.Generic.Dictionary<string, double>
+                {
+                    { "Architecture & Design", 0.08 },{ "Data Integration & ETL", 0.10 },{ "T-SQL Code Quality", 0.08 },{ "Data Modeling & Storage", 0.09 },{ "Data Quality Framework", 0.09 },{ "Security & Access Control", 0.12 },{ "Compliance & Regulatory", 0.07 },{ "Data Governance", 0.04 },{ "Reliability & Resilience", 0.06 },{ "Monitoring & Observability", 0.05 },{ "DevOps & Deployment", 0.06 },{ "Cost Management & Capacity", 0.04 },{ "Documentation & Knowledge Mgmt", 0.03 },{ "Performance & Query Tuning", 0.09 }
+                };
+
+                double overallWeighted = 0.0; double totalWeight = 0.0;
+                foreach (var aw in areaWeights)
+                {
+                    var areaName = aw.Key;
+                    var weight = aw.Value;
+                    totalWeight += weight;
+                    var pct = areaScores.ContainsKey(areaName) ? areaScores[areaName] : 0.0;
+                    overallWeighted += pct * weight;
+                }
+                // Normalize by totalWeight (should be 1.0)
+                var overallScore = totalWeight == 0 ? 0.0 : overallWeighted / totalWeight;
+
+                // Build report using template file as header, then inject computed values
+                var templatePath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "SQL", "05-report-template.md");
+                var report = new System.Text.StringBuilder();
+                if (System.IO.File.Exists(templatePath))
+                {
+                    var tpl = System.IO.File.ReadAllText(templatePath);
+                    // Replace some placeholders
+                    tpl = tpl.Replace("**[XX.X%]**", $"**{overallScore:F1}%**");
+                    tpl = tpl.Replace("[XX.X%]", $"{overallScore:F1}%");
+                    tpl = tpl.Replace("Total Checklist Items","Total Checklist Items");
+                    tpl = tpl.Replace("328", total.ToString());
+                    tpl = tpl.Replace("[N]", itemsScored.ToString());
+                    tpl = tpl.Replace("[Date]", DateTime.UtcNow.ToString("yyyy-MM-dd"));
+                    report.AppendLine(tpl);
+                }
+                else
+                {
+                    report.AppendLine($"# Audit Report — Overall Score: {overallScore:F1}%\n");
+                }
+
+                // Save report
+                try
+                {
+                    var outDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                    System.IO.Directory.CreateDirectory(outDir);
+                    var outPath = System.IO.Path.Combine(outDir, "final_report.md");
+                    System.IO.File.WriteAllText(outPath, report.ToString());
+                    Log("Rendered report saved to results/final_report.md");
+                }
+                catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
+
+                UpdateSummaryView(arr);
+                SetTabIndex(3);
+            }
+            catch (Exception ex)
+            {
+                Log("Generate summary error: " + ex.Message);
+            }
+        }
+    }
+}
+

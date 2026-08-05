@@ -1,0 +1,17 @@
+Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
+SQL Server: {{SQL_SERVER_NAME}}
+SQL Snapshot:
+{{SQL_SNAPSHOT}}
+
+Assess the checklist item using ONLY the SQL snapshot.
+
+Evaluation rules:
+1. First determine feasibility from available snapshot signals.
+2. If snapshot includes relevant object/code indicators (for example module counts, TRY/CATCH usage counts, THROW/RAISERROR usage, NOCOUNT usage, cursor/while usage, deprecated type counts), treat as potentially feasible.
+3. Use feasible=false only when key required signals are absent.
+4. When feasible=true but confidence is limited, use outcome=NeedsReview with specific evidence.
+5. Never copy these instructions in the response.
+
+Return strict JSON only with keys: outcome, evidence, feasible, reasoning.
