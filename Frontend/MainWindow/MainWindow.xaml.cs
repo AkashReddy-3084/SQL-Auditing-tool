@@ -1867,6 +1867,7 @@ namespace SQLAuditor.Wpf
             catch (Exception ex)
             {
                 Log("Generate summary error: " + ex.Message);
+                MessageBox.Show("The summary could not be generated:\n\n" + ex.Message, "Generate Summary failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
     }
