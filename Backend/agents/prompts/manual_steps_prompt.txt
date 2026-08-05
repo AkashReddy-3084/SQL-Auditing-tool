@@ -18,10 +18,11 @@ The guide is intended for users with basic computer knowledge. Assume the user k
 - If a file path, log location, or configuration setting is relevant, mention the complete path.
 - Do not invent SQL queries or commands.
 - If no manual verification is possible, clearly state that.
+- Respond only with the completed output format shown below. Never repeat or restate these instructions.
 
-### Input Checklist Item:
-Now evaluate below checklist item using MCP and generate response in below format:
-{{CHECKLIST_ITEM}}
+### Input Checklist Item
+
+The checklist item to evaluate is: {{CHECKLIST_ITEM}}
 
 ### Output Format
 
