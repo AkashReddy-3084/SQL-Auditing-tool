@@ -23,6 +23,14 @@ namespace SQLAuditor.Wpf
             public string DisplayValue => Total <= 0 ? Value.ToString() : $"{Value} ({Percent:F0}%)";
         }
 
+        private sealed class SummaryResultRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Description { get; init; } = string.Empty;
+            public string Outcome { get; init; } = string.Empty;
+            public string Technique { get; init; } = string.Empty;
+        }
+
         private sealed class ManualEvaluationState
         {
             public string Instructions { get; set; } = string.Empty;
@@ -817,11 +825,15 @@ namespace SQLAuditor.Wpf
 
             if (SummaryList != null)
             {
-                SummaryList.Items.Clear();
-                foreach (var r in resultList)
-                {
-                    SummaryList.Items.Add($"{r.Id} | {r.Description} | {r.Outcome} | {r.Technique}");
-                }
+                SummaryList.ItemsSource = resultList
+                    .Select(r => new SummaryResultRow
+                    {
+                        Id = r.Id ?? string.Empty,
+                        Description = r.Description ?? string.Empty,
+                        Outcome = r.Outcome ?? string.Empty,
+                        Technique = r.Technique ?? string.Empty
+                    })
+                    .ToList();
             }
 
             if (SummaryOutcomeChartItems != null)
@@ -1294,6 +1306,31 @@ namespace SQLAuditor.Wpf
             }
         }
 
+        private void ExitBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isEvaluating)
+                {
+                    var choice = MessageBox.Show(
+                        "An evaluation is still running. Exit anyway?",
+                        "Exit SQL Auditor",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning);
+                    if (choice != MessageBoxResult.Yes) return;
+
+                    try { _evaluationCts?.Cancel(); } catch { }
+                }
+
+                try { _progressWatcherCts?.Cancel(); } catch { }
+            }
+            catch { }
+            finally
+            {
+                Application.Current.Shutdown();
+            }
+        }
+
         private async Task EnsureAuditor(string fqdn)
         {
             if (_auditor != null) return;
@@ -1714,6 +1751,7 @@ namespace SQLAuditor.Wpf
 
                 UpdateSummaryView(arr);
                 SetTabIndex(3);
+                UpdateStageIndicators();
             }
             catch (Exception ex)
             {

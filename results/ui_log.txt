@@ -754,3 +754,292 @@
 2026-08-06T06:26:39.2871794Z Marked 3.3.1 as Pass.
 2026-08-06T06:26:43.6634942Z Submitted manual evaluation for 3.3.1 as Pass.
 2026-08-06T06:26:46.5122772Z Rendered report saved to results/final_report.md
+2026-08-06T06:42:38.2969459Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T06:42:38.3020596Z Opened on Login view.
+2026-08-06T06:43:05.6143763Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T06:43:22.5544752Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T06:43:39.5356399Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T06:43:54.7159633Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T06:44:09.4121951Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T06:44:26.4422435Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T06:44:43.4519053Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T06:44:43.4958557Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T06:44:43.4993291Z Connection to localhost verified.
+2026-08-06T06:44:43.5652788Z Checklist auto-loaded after verification.
+2026-08-06T06:45:14.1289959Z Loading checklist structure...
+2026-08-06T06:45:14.1607574Z Selected 5 checklist item(s) loaded into memory.
+2026-08-06T06:45:14.2027830Z Checklist loaded.
+2026-08-06T06:45:15.6906113Z Starting evaluation...
+2026-08-06T06:45:15.7374042Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T06:45:56.4834983Z [1.1.1] Failed (AI-MCP)
+2026-08-06T06:45:56.4918683Z [1.2.1] Evaluating (AI-MCP)
+2026-08-06T06:47:36.5340249Z SQL MCP evaluation error for 1.2.1: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T06:47:36.5644322Z [1.2.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:49:42.2481255Z Manual steps LLM call failed for 1.2.1: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T06:49:42.2523335Z [1.2.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:49:42.2625245Z [2.1.1] Evaluating (AI-MCP)
+2026-08-06T06:49:42.2785788Z Manual input required for 1.2.1: Clear layering defined (staging → ODS/integration → dimensional DW → data marts)
+2026-08-06T06:50:16.8182003Z Marked 1.2.1 as Pass.
+2026-08-06T06:51:22.4423223Z SQL MCP evaluation error for 2.1.1: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T06:51:22.4446103Z [2.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:53:27.9892727Z Manual steps LLM call failed for 2.1.1: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T06:53:27.9914813Z Manual input required for 2.1.1: ETL tooling is consistent and deliberate (SSIS / Azure Data Factory / T-SQL / other)
+2026-08-06T06:53:27.9957544Z [2.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:53:28.0147209Z [3.1.1] Evaluating (AI-MCP)
+2026-08-06T06:53:57.7363468Z Marked 2.1.1 as Pass.
+2026-08-06T06:55:08.1177717Z SQL MCP evaluation error for 3.1.1: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T06:55:08.1211945Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:57:17.8260121Z Manual steps LLM call failed for 3.1.1: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T06:57:17.8277599Z Manual input required for 3.1.1: Consistent formatting and naming conventions across objects
+2026-08-06T06:57:17.8318587Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T06:57:17.8438120Z [3.2.1] Evaluating (AI-MCP)
+2026-08-06T06:57:33.4396586Z Marked 3.1.1 as Fail.
+2026-08-06T06:58:57.9416323Z SQL MCP evaluation error for 3.2.1: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T06:58:57.9433234Z [3.2.1] Generating Manual Plan (AI-Manual)
+2026-08-06T07:01:03.5765561Z Manual steps LLM call failed for 3.2.1: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:01:03.5794760Z [3.2.1] Generating Manual Plan (AI-Manual)
+2026-08-06T07:01:03.5881238Z Manual input required for 3.2.1: Business/transformation logic encapsulated in stored procedures/functions (not ad-hoc scripts)
+2026-08-06T07:01:03.6690910Z Evaluation complete. 5 items evaluated. Results in results/ folder.
+2026-08-06T07:01:03.6863082Z Summary report generated at results/final_report.md
+2026-08-06T07:01:21.9199139Z Marked 3.2.1 as Pass.
+2026-08-06T07:01:29.1434298Z Rendered report saved to results/final_report.md
+2026-08-06T07:26:28.6986027Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T07:26:28.7070109Z Opened on Login view.
+2026-08-06T07:26:54.8492998Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T07:27:11.9146832Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T07:27:28.9332820Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T07:27:45.6951353Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T07:28:00.3639313Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T07:28:17.3520650Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T07:28:34.3645920Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T07:28:34.4330122Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T07:28:34.4389092Z Connection to localhost verified.
+2026-08-06T07:28:34.5638023Z Checklist auto-loaded after verification.
+2026-08-06T07:29:46.3496391Z Loading checklist structure...
+2026-08-06T07:29:46.7344977Z Selected 8 checklist item(s) loaded into memory.
+2026-08-06T07:29:46.7772665Z Checklist loaded.
+2026-08-06T07:29:48.7350273Z Starting evaluation...
+2026-08-06T07:29:48.7847138Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T07:30:29.5303383Z [1.1.1] Failed (AI-MCP)
+2026-08-06T07:30:29.5387807Z [1.1.7] Evaluating (AI-MCP)
+2026-08-06T07:31:34.4054181Z [1.1.7] Generating Manual Plan (AI-Manual)
+2026-08-06T07:33:00.8398655Z [1.1.7] Generating Manual Plan (AI-Manual)
+2026-08-06T07:33:00.8530102Z [1.2.7] Evaluating (AI-MCP)
+2026-08-06T07:33:00.8809254Z Manual input required for 1.1.7: Capacity/scale approach documented (scale-up vs scale-out, read replicas)
+2026-08-06T07:33:56.0960015Z Marked 1.1.7 as Pass.
+2026-08-06T07:34:17.8309424Z [1.2.7] Generating Manual Plan (AI-Manual)
+2026-08-06T07:36:23.5094310Z Manual steps LLM call failed for 1.2.7: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:36:23.5114486Z [1.2.7] Generating Manual Plan (AI-Manual)
+2026-08-06T07:36:23.5186393Z [2.1.4] Evaluating (AI-MCP)
+2026-08-06T07:36:23.5386608Z Manual input required for 1.2.7: Historical/archival strategy defined for the DW
+2026-08-06T07:37:51.4368167Z [2.1.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:39:57.0932841Z Manual steps LLM call failed for 2.1.4: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:39:57.0957599Z Manual input required for 2.1.4: Orchestration/dependency management exists (master package/pipeline or scheduler)
+2026-08-06T07:39:57.1026181Z [2.1.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:39:57.1246444Z [2.4.4] Evaluating (AI-MCP)
+2026-08-06T07:41:37.2219581Z SQL MCP evaluation error for 2.4.4: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T07:41:37.2241380Z [2.4.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:43:42.8591939Z Manual steps LLM call failed for 2.4.4: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:43:42.8623497Z [2.4.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:43:42.8696129Z Manual input required for 2.4.4: ETL windows avoid contention with reporting/query workloads
+2026-08-06T07:43:42.8957806Z [3.1.4] Evaluating (AI-MCP)
+2026-08-06T07:45:13.6568518Z [3.1.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:47:19.2378140Z Manual steps LLM call failed for 3.1.4: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:47:19.2398192Z [3.1.4] Generating Manual Plan (AI-Manual)
+2026-08-06T07:47:19.2457124Z Manual input required for 3.1.4: `SET NOCOUNT ON` and appropriate SET options in procedures
+2026-08-06T07:47:19.2684419Z [3.3.3] Evaluating (AI-MCP)
+2026-08-06T07:48:47.3891022Z [3.3.3] Generating Manual Plan (AI-Manual)
+2026-08-06T07:50:53.0976743Z Manual steps LLM call failed for 3.3.3: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:50:53.1007760Z [3.3.3] Generating Manual Plan (AI-Manual)
+2026-08-06T07:50:53.1083998Z Manual input required for 3.3.3: `XACT_ABORT` / transaction state handling correct on error
+2026-08-06T07:50:53.1236424Z [4.1.3] Evaluating (AI-MCP)
+2026-08-06T07:51:52.1110205Z [4.1.3] Generating Manual Plan (AI-Manual)
+2026-08-06T07:53:57.5953664Z Manual steps LLM call failed for 4.1.3: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T07:53:57.5995170Z [4.1.3] Generating Manual Plan (AI-Manual)
+2026-08-06T07:53:57.6050524Z Manual input required for 4.1.3: Data types appropriate and right-sized (no oversized varchar, correct numeric precision)
+2026-08-06T07:53:57.6829932Z Evaluation complete. 8 items evaluated. Results in results/ folder.
+2026-08-06T07:53:57.7078302Z Summary report generated at results/final_report.md
+2026-08-06T08:57:43.8956450Z Marked 1.1.7 as Pass.
+2026-08-06T08:57:51.5021395Z Marked 1.2.7 as Fail.
+2026-08-06T08:57:56.5921255Z Marked 2.1.4 as Pass.
+2026-08-06T08:58:01.8953182Z Marked 2.4.4 as Pass.
+2026-08-06T08:58:06.8533754Z Marked 3.1.4 as Pass.
+2026-08-06T08:59:15.9543520Z Marked 3.1.4 as Pass.
+2026-08-06T08:59:27.6217045Z Marked 3.3.3 as Pass.
+2026-08-06T08:59:32.4978660Z Marked 4.1.3 as Fail.
+2026-08-06T08:59:35.6330384Z Rendered report saved to results/final_report.md
+2026-08-06T09:22:31.3061987Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T09:22:31.3121505Z Opened on Login view.
+2026-08-06T09:24:01.9162413Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:24:18.8651704Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:24:35.8111441Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:24:52.4103608Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:25:07.0469182Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:25:24.0156521Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:25:40.9592312Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:25:41.0157507Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T09:25:41.0217158Z Connection to localhost verified.
+2026-08-06T09:25:41.1094369Z Checklist auto-loaded after verification.
+2026-08-06T09:26:10.9652529Z Loading checklist structure...
+2026-08-06T09:26:11.3572762Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T09:26:11.4003088Z Checklist loaded.
+2026-08-06T09:26:13.5806691Z Starting evaluation...
+2026-08-06T09:26:13.6108318Z [3.1.2] Evaluating (Script)
+2026-08-06T09:26:13.6354314Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T09:26:14.9845975Z [3.1.2] Passed (Script)
+2026-08-06T09:26:58.6787604Z [1.1.1] Failed (AI-MCP)
+2026-08-06T09:26:58.7613404Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T09:26:58.7726762Z Summary report generated at results/final_report.md
+2026-08-06T09:27:57.3159158Z Rendered report saved to results/final_report.md
+2026-08-06T09:29:47.0682192Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T09:29:47.0742057Z Opened on Login view.
+2026-08-06T09:30:14.4780440Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:30:31.4469173Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:30:48.4132092Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:31:03.5610330Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:31:18.2136163Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:31:35.1448268Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:31:52.0962215Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:31:52.1486448Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T09:31:52.1536847Z Connection to localhost verified.
+2026-08-06T09:31:52.2546710Z Checklist auto-loaded after verification.
+2026-08-06T09:32:40.0834907Z Loading checklist structure...
+2026-08-06T09:32:40.5593684Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T09:32:40.6134405Z Checklist loaded.
+2026-08-06T09:32:46.7520215Z Starting evaluation...
+2026-08-06T09:32:46.7901405Z [3.1.2] Evaluating (Script)
+2026-08-06T09:32:46.8153447Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T09:32:48.8776604Z [3.1.2] Passed (Script)
+2026-08-06T09:33:36.4238369Z [1.1.1] Failed (AI-MCP)
+2026-08-06T09:33:36.5253064Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T09:33:36.5451459Z Summary report generated at results/final_report.md
+2026-08-06T09:34:56.5549404Z Rendered report saved to results/final_report.md
+2026-08-06T09:53:51.8969233Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T09:53:51.9033560Z Opened on Login view.
+2026-08-06T09:54:19.5131842Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:54:36.4748671Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:54:53.4693935Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:55:08.5656357Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:55:17.7212666Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T09:55:17.7270313Z Opened on Login view.
+2026-08-06T09:55:47.0067066Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:56:04.0079404Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:56:20.9356623Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:56:36.0766677Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:56:50.7387417Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T09:57:07.7008527Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:57:24.6319165Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T09:57:24.6979385Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T09:57:24.7034660Z Connection to localhost verified.
+2026-08-06T09:57:24.7899334Z Checklist auto-loaded after verification.
+2026-08-06T09:59:16.0768273Z Loading checklist structure...
+2026-08-06T09:59:16.4924987Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T09:59:16.5407735Z Checklist loaded.
+2026-08-06T09:59:19.2071702Z Starting evaluation...
+2026-08-06T09:59:19.2643648Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T10:00:11.1494648Z [1.1.1] Failed (AI-MCP)
+2026-08-06T10:00:11.1550065Z [3.1.1] Evaluating (AI-MCP)
+2026-08-06T10:01:48.1018146Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T10:03:53.7366508Z Manual steps LLM call failed for 3.1.1: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T10:03:53.7393570Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T10:03:53.7655852Z Manual input required for 3.1.1: Consistent formatting and naming conventions across objects
+2026-08-06T10:03:53.8129547Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T10:03:53.8406366Z Summary report generated at results/final_report.md
+2026-08-06T10:03:58.7416109Z Marked 3.1.1 as Pass.
+2026-08-06T10:04:03.1104292Z Rendered report saved to results/final_report.md
+2026-08-06T10:08:36.7542765Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T10:08:36.7610439Z Opened on Login view.
+2026-08-06T10:09:10.1783239Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:09:27.1000324Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:09:44.0474366Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:09:59.1197985Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:10:13.7655923Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:10:30.7543455Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:10:47.7356835Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:10:47.7907472Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T10:10:47.7951493Z Connection to localhost verified.
+2026-08-06T10:10:47.8625438Z Checklist auto-loaded after verification.
+2026-08-06T10:11:09.2486178Z Loading checklist structure...
+2026-08-06T10:11:09.2842464Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T10:11:09.3306715Z Checklist loaded.
+2026-08-06T10:11:10.4504666Z Starting evaluation...
+2026-08-06T10:11:10.4963572Z [1.1.1] Evaluating (AI-MCP)
+2026-08-06T10:12:10.7761285Z [1.1.1] Failed (AI-MCP)
+2026-08-06T10:12:10.7832688Z [3.1.1] Evaluating (AI-MCP)
+2026-08-06T10:13:50.9310830Z SQL MCP evaluation error for 3.1.1: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T10:13:50.9475069Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T10:15:46.0894432Z [3.1.1] Generating Manual Plan (AI-Manual)
+2026-08-06T10:15:46.1393499Z Manual input required for 3.1.1: Consistent formatting and naming conventions across objects
+2026-08-06T10:15:46.1999797Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T10:15:46.2345143Z Summary report generated at results/final_report.md
+2026-08-06T10:16:16.8044359Z Marked 3.1.1 as Pass.
+2026-08-06T10:16:19.2390894Z Rendered report saved to results/final_report.md
+2026-08-06T10:25:50.9673069Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T10:25:50.9762890Z Opened on Login view.
+2026-08-06T10:26:18.7807953Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:26:35.7581676Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:26:52.7509360Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:27:09.2470816Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:27:23.8478112Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:27:40.8035412Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:27:58.4032873Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:27:58.5116521Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T10:27:58.5209691Z Connection to localhost verified.
+2026-08-06T10:27:58.6742776Z Checklist auto-loaded after verification.
+2026-08-06T10:29:41.9143468Z Loading checklist structure...
+2026-08-06T10:29:41.9533679Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T10:29:42.0011810Z Checklist loaded.
+2026-08-06T10:29:42.6573496Z Starting evaluation...
+2026-08-06T10:29:42.6922649Z [3.1.2] Evaluating (Script)
+2026-08-06T10:29:42.7282845Z [1.1.2] Evaluating (AI-MCP)
+2026-08-06T10:29:44.2879349Z [3.1.2] Passed (Script)
+2026-08-06T10:31:22.9454188Z SQL MCP evaluation error for 1.1.2: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T10:31:22.9615150Z [1.1.2] Generating Manual Plan (AI-Manual)
+2026-08-06T10:33:28.6580125Z Manual steps LLM call failed for 1.1.2: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T10:33:28.6613974Z [1.1.2] Generating Manual Plan (AI-Manual)
+2026-08-06T10:33:28.6898422Z Manual input required for 1.1.2: Environment separation exists (Dev / Test / Prod) with isolated instances or databases
+2026-08-06T10:33:28.7800849Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T10:33:28.8127869Z Summary report generated at results/final_report.md
+2026-08-06T10:34:57.8011817Z Marked 1.1.2 as Pass.
+2026-08-06T10:35:00.5035441Z Rendered report saved to results/final_report.md
+2026-08-06T10:37:23.1599499Z Ready — enter SQL FQDN and click Verify Access.
+2026-08-06T10:37:23.1717980Z Opened on Login view.
+2026-08-06T10:37:55.0722026Z Variant: localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:38:12.0352403Z Variant: . -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:38:29.0393707Z Variant: (local) -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:38:44.1386965Z Variant: 127.0.0.1 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:38:58.7947841Z Variant: np:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: Named Pipes Provider, error: 40 - Could not open a connection to SQL Server)
+2026-08-06T10:39:15.7209767Z Variant: tcp:localhost -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:39:32.6751030Z Variant: localhost,1433 -> FAIL: A network-related or instance-specific error occurred while establishing a connection to SQL Server. The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server is configured to allow remote connections. (provider: TCP Provider, error: 0 - No connection could be made because the target machine actively refused it.)
+2026-08-06T10:39:32.8954030Z Adopted working connection variant: localhost\SQLEXPRESS -> SUCCESS
+2026-08-06T10:39:32.9138817Z Connection to localhost verified.
+2026-08-06T10:39:33.4688426Z Checklist auto-loaded after verification.
+2026-08-06T10:40:00.3028681Z Loading checklist structure...
+2026-08-06T10:40:01.1612637Z Selected 2 checklist item(s) loaded into memory.
+2026-08-06T10:40:01.2363846Z Checklist loaded.
+2026-08-06T10:40:02.5564777Z Starting evaluation...
+2026-08-06T10:40:02.6659249Z [3.1.2] Evaluating (Script)
+2026-08-06T10:40:02.7081810Z [1.1.2] Evaluating (AI-MCP)
+2026-08-06T10:40:06.9105780Z [3.1.2] Passed (Script)
+2026-08-06T10:41:43.2608992Z SQL MCP evaluation error for 1.1.2: TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.
+2026-08-06T10:41:43.3592777Z [1.1.2] Generating Manual Plan (AI-Manual)
+2026-08-06T10:43:49.0737924Z Manual steps LLM call failed for 1.1.2: HttpRequestException: HTTP 524 <none> from https://llm.maqsoftware.net/v1/chat/completions (model 'qwen-3.6-27b'): error code: 524
+
+2026-08-06T10:43:49.0804664Z [1.1.2] Generating Manual Plan (AI-Manual)
+2026-08-06T10:43:49.1277554Z Manual input required for 1.1.2: Environment separation exists (Dev / Test / Prod) with isolated instances or databases
+2026-08-06T10:43:49.2186579Z Evaluation complete. 2 items evaluated. Results in results/ folder.
+2026-08-06T10:43:49.2579791Z Summary report generated at results/final_report.md
+2026-08-06T10:43:53.3941512Z Marked 1.1.2 as Pass.
+2026-08-06T10:44:34.9968827Z Rendered report saved to results/final_report.md

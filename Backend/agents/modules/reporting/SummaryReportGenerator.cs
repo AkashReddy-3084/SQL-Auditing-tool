@@ -492,24 +492,6 @@ public sealed class SummaryReportGenerator
         }
         sb.AppendLine();
 
-        // 1.6 Compliance summary
-        sb.AppendLine("### 1.6 Compliance Summary");
-        sb.AppendLine();
-        sb.AppendLine("> MLC compliance regime is TBD. Complete once the regime is confirmed (see Compliance Matrix Section 0).");
-        sb.AppendLine();
-        sb.AppendLine("| Control Group | Score | Rating | Key Gaps |");
-        sb.AppendLine("|--------------|-------|--------|----------|");
-        var groups = m.ComplianceGroups.Count > 0
-            ? m.ComplianceGroups
-            : DefaultComplianceGroups();
-        foreach (var g in groups)
-        {
-            var gr = _calculator.GetRiskRating(g.ScorePercent);
-            var scoreCell = g.ScorePercent is null ? "TBD" : Pct(g.ScorePercent);
-            var ratingCell = g.ScorePercent is null ? "TBD" : $"{gr.Icon} {gr.Label}";
-            sb.AppendLine($"| {g.Name} | {scoreCell} | {ratingCell} | {Clean(g.KeyGaps)} |");
-        }
-        sb.AppendLine();
         sb.AppendLine("---");
         sb.AppendLine();
     }
@@ -521,10 +503,11 @@ public sealed class SummaryReportGenerator
         sb.AppendLine("> Areas with no assessed items are omitted. Full checklist scores are in [02-audit-checklist.md](02-audit-checklist.md).");
         sb.AppendLine();
 
+        var sectionNumber = 1;
         foreach (var a in areaScores.Where(a => a.Items.Count > 0))
         {
             var r = _calculator.GetRiskRating(a.ScorePercent);
-            sb.AppendLine($"### 2.{a.Area.Number} Area {a.Area.Number}: {a.Area.Name}");
+            sb.AppendLine($"### 2.{sectionNumber++} Area {a.Area.Number}: {a.Area.Name}");
             sb.AppendLine();
             sb.AppendLine($"**Area Score: {Pct(a.ScorePercent)} | Rating: {r.Icon} {r.Label}**");
             sb.AppendLine();
@@ -640,15 +623,6 @@ public sealed class SummaryReportGenerator
             .ThenBy(i => i.Id)
             .Take(take)
             .ToList();
-
-    private static List<ComplianceGroup> DefaultComplianceGroups() => new()
-    {
-        new() { Name = "ITGC (SOX-style)" },
-        new() { Name = "Financial Data Integrity" },
-        new() { Name = "Audit Trail & Logging" },
-        new() { Name = "Data Privacy" },
-        new() { Name = "Regime Plug-in" },
-    };
 
     private static string Pct(double? value) =>
         value is null ? "N/A" : $"{value.Value.ToString("0.0", CultureInfo.InvariantCulture)}%";

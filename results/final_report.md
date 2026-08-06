@@ -30,10 +30,10 @@
 
 | Metric | Value |
 |--------|-------|
-| **Overall Score** | **83.3%** |
-| **Risk Rating** | 🟢 **Good** |
-| **Total Checklist Items** | 3 |
-| **Items Scored** | 3 |
+| **Overall Score** | **100.0%** |
+| **Risk Rating** | 🔵 **Excellent** |
+| **Total Checklist Items** | 2 |
+| **Items Scored** | 2 |
 | **Items N/A** | 0 |
 | **Critical Findings** | 0 |
 | **High Findings** | 0 |
@@ -42,7 +42,7 @@
 
 | # | Area | Weight | Score | Weighted | Rating |
 |---|------|--------|-------|----------|--------|
-| 1 | Architecture & Design | 8% | 66.7% | 5.3 | 🟡 Medium |
+| 1 | Architecture & Design | 8% | 100.0% | 8.0 | 🔵 Excellent |
 | 2 | Data Integration & ETL | 10% | N/A | — | — |
 | 3 | T-SQL Code Quality | 8% | 100.0% | 8.0 | 🔵 Excellent |
 | 4 | Data Modeling & Storage | 9% | N/A | — | — |
@@ -56,14 +56,14 @@
 | 12 | Cost Management & Capacity | 4% | N/A | — | — |
 | 13 | Documentation & Knowledge Mgmt | 3% | N/A | — | — |
 | 14 | Performance & Query Tuning | 9% | N/A | — | — |
-| | **Overall** | **100%** | | **83.3%** | 🟢 Good |
+| | **Overall** | **100%** | | **100.0%** | 🔵 Excellent |
 
 ### 1.3 Radar Chart
 
 ```mermaid
 radar-beta
   axis Architecture, ETL, TSQL, Modeling, Quality, Security, Compliance, Governance, Reliability, Monitoring, DevOps, CostMgmt, Documentation, Performance
-  curve ScorePct["% Score"] { 67, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+  curve ScorePct["% Score"] { 100, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 ```
 
 ### 1.4 Top 5 Critical Findings
@@ -78,18 +78,6 @@ radar-beta
 |---|---------------|-----------|--------|------------|-------------|
 | — | No remediation required for the assessed items. | | | | |
 
-### 1.6 Compliance Summary
-
-> MLC compliance regime is TBD. Complete once the regime is confirmed (see Compliance Matrix Section 0).
-
-| Control Group | Score | Rating | Key Gaps |
-|--------------|-------|--------|----------|
-| ITGC (SOX-style) | TBD | TBD |  |
-| Financial Data Integrity | TBD | TBD |  |
-| Audit Trail & Logging | TBD | TBD |  |
-| Data Privacy | TBD | TBD |  |
-| Regime Plug-in | TBD | TBD |  |
-
 ---
 
 ## 2. Detailed Findings by Area
@@ -98,41 +86,39 @@ radar-beta
 
 ### 2.1 Area 1: Architecture & Design
 
-**Area Score: 66.7% | Rating: 🟡 Medium**
+**Area Score: 100.0% | Rating: 🔵 Excellent**
 
 | Category | Score | Rating |
 |----------|-------|--------|
-| 1.1 | 66.7% | 🟡 Medium |
+| 1.1 | 100.0% | 🔵 Excellent |
 
 #### Findings
 
 | # | Checklist Ref | Finding | Severity | Score |
 |---|--------------|---------|----------|-------|
-| 1 | 1.1.1 | Implemented with minor improvement opportunities: Deployment model is deliberate and documented (SQL Server / Azure SQL MI / Azure SQL DB) with rationale. | Low | 2 |
-| 2 | 1.1.7 | Implemented with minor improvement opportunities: Capacity/scale approach documented (scale-up vs scale-out, read replicas). | Low | 2 |
+| 1 | 1.1.2 | Control satisfied: Environment separation exists (Dev / Test / Prod) with isolated instances or databases. | Informational | 3 |
 
 #### Recommendations
 
 | # | Recommendation | Addresses | Effort | Risk Impact | Score Impact |
 |---|---------------|-----------|--------|------------|-------------|
-| 1 | Optimize 'Deployment model is deliberate and documented (SQL Server / Azure SQL MI / Azure SQL DB) with rationale' toward best practice and document the supporting configuration. | 1.1.1 | Low | Low — control in place | +1 pts |
-| 2 | Optimize 'Capacity/scale approach documented (scale-up vs scale-out, read replicas)' toward best practice and document the supporting configuration. | 1.1.7 | Low | Low — control in place | +1 pts |
+| — | No remediation required for the assessed items in this area. | | | | |
 
 ---
 
-### 2.3 Area 3: T-SQL Code Quality
+### 2.2 Area 3: T-SQL Code Quality
 
 **Area Score: 100.0% | Rating: 🔵 Excellent**
 
 | Category | Score | Rating |
 |----------|-------|--------|
-| 3.3 | 100.0% | 🔵 Excellent |
+| 3.1 | 100.0% | 🔵 Excellent |
 
 #### Findings
 
 | # | Checklist Ref | Finding | Severity | Score |
 |---|--------------|---------|----------|-------|
-| 1 | 3.3.1 | Control satisfied: Transactions scoped correctly (not held open across long operations). | Informational | 3 |
+| 1 | 3.1.2 | Control satisfied: No `SELECT *` in production code; explicit column lists. | Informational | 3 |
 
 #### Recommendations
 
