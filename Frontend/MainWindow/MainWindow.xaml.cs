@@ -1355,11 +1355,6 @@ namespace SQLAuditor.Wpf
         {
             if (_auditor != null) return;
 
-            // Fresh AI-MCP defaults for SQL Server checklist evaluation.
-            Environment.SetEnvironmentVariable("PROVIDER_BASE_URL", "https://llm.maqsoftware.net/v1");
-            Environment.SetEnvironmentVariable("PROVIDER_API_KEY", "sk-jlQlxi3zFjCNOYyeSqLDwQ");
-            Environment.SetEnvironmentVariable("MODEL", "qwen-3.6-27b");
-
             // Build connection string according to auth selection
             string cs;
             try
