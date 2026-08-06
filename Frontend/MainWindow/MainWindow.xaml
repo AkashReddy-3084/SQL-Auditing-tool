@@ -365,6 +365,7 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
                             <UniformGrid Grid.Row="0" Columns="4" Margin="0,0,0,16">
@@ -418,21 +419,47 @@
 
                             <Border Grid.Row="2" Style="{StaticResource CardBorder}" Background="#FFF9FBFD">
                                 <DockPanel>
-                                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Stretch" Margin="0,0,0,12">
-                                        <TextBlock Text="Summary Results" FontWeight="Bold" FontSize="16" VerticalAlignment="Center" />
-                                        <Button x:Name="ExportBtn" Content="Export Evaluation" Style="{StaticResource SecondaryButton}" DockPanel.Dock="Right" HorizontalAlignment="Right" Click="ExportBtn_Click" />
-                                    </StackPanel>
-                                    <ListBox x:Name="SummaryList">
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <Border Padding="12" Margin="0,0,0,8" Background="#FFF7FAFE" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="10">
-                                                    <TextBlock Text="{Binding}" TextWrapping="Wrap" />
-                                                </Border>
-                                            </DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
+                                    <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="0,0,0,12">
+                                        <TextBlock Text="Summary Results" FontWeight="Bold" FontSize="16" VerticalAlignment="Center" DockPanel.Dock="Left" />
+                                        <Button x:Name="ExportBtn" Content="Export Evaluation" Style="{StaticResource SecondaryButton}" DockPanel.Dock="Right" Click="ExportBtn_Click" />
+                                    </DockPanel>
+                                    <DataGrid x:Name="SummaryList"
+                                              AutoGenerateColumns="False"
+                                              IsReadOnly="True"
+                                              CanUserAddRows="False"
+                                              CanUserResizeRows="False"
+                                              CanUserDeleteRows="False"
+                                              HeadersVisibility="Column"
+                                              SelectionMode="Single"
+                                              GridLinesVisibility="All"
+                                              Background="White"
+                                              RowBackground="White"
+                                              AlternatingRowBackground="#FFF7FAFE"
+                                              HorizontalGridLinesBrush="{StaticResource BorderBrushSoft}"
+                                              VerticalGridLinesBrush="{StaticResource BorderBrushSoft}"
+                                              BorderBrush="{StaticResource BorderBrushSoft}"
+                                              BorderThickness="1"
+                                              ColumnWidth="Auto">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="Auto" />
+                                            <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="TextWrapping" Value="Wrap" />
+                                                        <Setter Property="Margin" Value="6,4" />
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="Auto" />
+                                            <DataGridTextColumn Header="Technique" Binding="{Binding Technique}" Width="Auto" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
                                 </DockPanel>
                             </Border>
+
+                            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+                                <Button x:Name="ExitBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitBtn_Click" />
+                            </StackPanel>
                         </Grid>
                     </ScrollViewer>
                 </TabItem>
