@@ -625,8 +625,6 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, cancellationToken);
-
                 if (!string.IsNullOrWhiteSpace(_connectionString))
                 {
                     try
@@ -643,20 +641,20 @@ namespace SQLAuditor.Lib
 
                         if (mcp != null)
                         {
-                            return mcp with
-                            {
-                                SlmTokensUsed = manualPlan.TotalTokens
-                            };
+                            return mcp;
                         }
                     }
                     catch (Exception ex)
                     {
-                        try { File.AppendAllText(Path.Combine(Directory.GetCurrentDirectory(), "results", "ui_log.txt"), $"{DateTime.UtcNow:O} SQL MCP evaluation error for {it.Id}: {ex.Message}\r\n"); } catch { }
+                        LogDiagnostic($"SQL MCP evaluation error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
                     }
                 }
 
                 var manualStartingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, it.ScriptFile, "AI-Manual");
                 progress?.Report(manualStartingProgress);
+
+                // Only reached once MCP has declined or failed, so the guidance is never wasted work.
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, cancellationToken);
 
                 if (requestUserInput != null && nonBlockingManualFallback)
                 {
@@ -931,14 +929,27 @@ namespace SQLAuditor.Lib
                 {
                     return slm;
                 }
+
+                LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
             }
-            catch
+            catch (Exception ex)
             {
-                // Fall through to static template when SLM is unavailable.
+                LogDiagnostic($"Manual steps LLM call failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
             }
 
             var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item);
             return new ManualStepsGenerationResult(fallback, fallback, 0);
+        }
+
+        private static void LogDiagnostic(string message)
+        {
+            try
+            {
+                var dir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n");
+            }
+            catch { }
         }
 
         private async Task<string> ExecuteSqlTextAsync(SqlConnection conn, string txt)
