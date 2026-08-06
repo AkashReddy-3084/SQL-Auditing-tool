@@ -114,7 +114,15 @@ internal sealed class SqlServerMcpEvaluator
             McpTokensUsed = provider.TotalTokens,
             McpUsage = "Yes",
             McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-            McpEvidence = evidence
+            McpEvidence = evidence,
+            Score = parsed.Score,
+            ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
+            Severity = parsed.Severity ?? string.Empty,
+            Finding = parsed.Finding ?? string.Empty,
+            Recommendation = parsed.Recommendation,
+            Effort = parsed.Effort ?? string.Empty,
+            RiskImpact = parsed.RiskImpact ?? string.Empty,
+            ScoreImpact = parsed.ScoreImpact
         };
     }
 
@@ -157,7 +165,15 @@ internal sealed class SqlServerMcpEvaluator
             McpTokensUsed = provider.TotalTokens,
             McpUsage = "Yes",
             McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-            McpEvidence = evidence
+            McpEvidence = evidence,
+            Score = parsed.Score,
+            ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
+            Severity = parsed.Severity ?? string.Empty,
+            Finding = parsed.Finding ?? string.Empty,
+            Recommendation = parsed.Recommendation,
+            Effort = parsed.Effort ?? string.Empty,
+            RiskImpact = parsed.RiskImpact ?? string.Empty,
+            ScoreImpact = parsed.ScoreImpact
         };
     }
 
@@ -271,7 +287,22 @@ internal sealed class SqlServerMcpEvaluator
         return false;
     }
 
-    private static (string Outcome, string Evidence, bool Feasible, JsonElement? RawAttribute, string Notes) ParseProviderResponse(string raw)
+    private sealed record ParsedMcpResponse(
+        string Outcome,
+        string Evidence,
+        bool Feasible,
+        JsonElement? RawAttribute,
+        string Notes,
+        int? Score,
+        string? ImplementationStatus,
+        string? Severity,
+        string? Finding,
+        string? Recommendation,
+        string? Effort,
+        string? RiskImpact,
+        double? ScoreImpact);
+
+    private static ParsedMcpResponse ParseProviderResponse(string raw)
     {
         var cleaned = raw.Trim();
 
@@ -285,14 +316,60 @@ internal sealed class SqlServerMcpEvaluator
                 ? f.ValueKind == JsonValueKind.True || (f.ValueKind == JsonValueKind.String && bool.TryParse(f.GetString(), out var b) && b)
                 : true;
             var reasoning = root.TryGetProperty("reasoning", out var r) ? r.GetString() ?? string.Empty : string.Empty;
-            return (NormalizeOutcome(outcomeRaw), evidence, feasible, root.Clone(), reasoning);
+
+            return new ParsedMcpResponse(
+                NormalizeOutcome(outcomeRaw),
+                evidence,
+                feasible,
+                root.Clone(),
+                reasoning,
+                ReadOptionalInt(root, "score"),
+                ReadOptionalString(root, "implementationStatus"),
+                ReadOptionalString(root, "severity"),
+                ReadOptionalString(root, "finding"),
+                ReadOptionalString(root, "recommendation"),
+                ReadOptionalString(root, "effort"),
+                ReadOptionalString(root, "riskImpact"),
+                ReadOptionalDouble(root, "scoreImpact"));
         }
         catch
         {
             var outcome = NormalizeOutcome(cleaned);
             var feasibleText = !Regex.IsMatch(cleaned, "not feasible|cannot determine|insufficient evidence|manual review required", RegexOptions.IgnoreCase);
-            return (outcome, cleaned, feasibleText, null, feasibleText ? string.Empty : "Not feasible for MCP");
+            return new ParsedMcpResponse(
+                outcome,
+                cleaned,
+                feasibleText,
+                null,
+                feasibleText ? string.Empty : "Not feasible for MCP",
+                null, null, null, null, null, null, null, null);
         }
+    }
+
+    private static string? ReadOptionalString(JsonElement root, string name)
+    {
+        if (root.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String)
+        {
+            var value = el.GetString();
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+        return null;
+    }
+
+    private static int? ReadOptionalInt(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var el)) return null;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var i)) return i;
+        if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out i)) return i;
+        return null;
+    }
+
+    private static double? ReadOptionalDouble(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var el)) return null;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var d)) return d;
+        if (el.ValueKind == JsonValueKind.String && double.TryParse(el.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out d)) return d;
+        return null;
     }
 
     private static string NormalizeOutcome(string raw)

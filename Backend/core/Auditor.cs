@@ -37,8 +37,45 @@ namespace SQLAuditor.Lib
 
         public string Outcome { get; init; }
 
-        [JsonIgnore]
+        // ---- Report enrichment fields (consumed by the Summary Report generator) ----
+        // Populated by the MCP evaluator when available and back-filled with
+        // deterministic defaults by ChecklistResultEnricher before persistence so
+        // that checklist_results.json is always compatible with SummaryReportGenerator.
+
+        [JsonPropertyName("Score")]
+        public int? Score { get; init; }
+
+        [JsonPropertyName("ImplementationStatus")]
+        public string ImplementationStatus { get; init; } = string.Empty;
+
+        [JsonPropertyName("Evidence")]
         public string Evidence { get; init; }
+
+        [JsonPropertyName("Severity")]
+        public string Severity { get; init; } = string.Empty;
+
+        [JsonPropertyName("Finding")]
+        public string Finding { get; init; } = string.Empty;
+
+        [JsonPropertyName("Recommendation")]
+        public string? Recommendation { get; init; }
+
+        [JsonPropertyName("Effort")]
+        public string? Effort { get; init; }
+
+        [JsonPropertyName("RiskImpact")]
+        public string RiskImpact { get; init; } = string.Empty;
+
+        [JsonPropertyName("ScoreImpact")]
+        public double? ScoreImpact { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonPropertyName("NotApplicable")]
+        public bool? NotApplicable { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonPropertyName("NotApplicableJustification")]
+        public string? NotApplicableJustification { get; init; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         [JsonPropertyName("rawAttribute")]
@@ -762,14 +799,40 @@ namespace SQLAuditor.Lib
                 RunPipelineAsync(scriptItems, true),
                 RunPipelineAsync(aiItems, false));
 
+            // Back-fill report-oriented fields so the persisted JSON is always
+            // schema-compatible with the Summary Report generator.
+            var enrichedResults = results.Select(ChecklistResultEnricher.Enrich).ToArray();
+
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             try
             {
-                Directory.CreateDirectory(Path.Combine(Directory.GetCurrentDirectory(), "results"));
-                await File.WriteAllTextAsync(Path.Combine("results", "checklist_results.json"), JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
+                Directory.CreateDirectory(resultsDir);
+                await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(enrichedResults, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { }
 
-            return results.ToArray();
+            // Automatically produce the final Markdown summary report from the
+            // freshly written checklist_results.json.
+            try
+            {
+                var reportPath = Path.Combine(resultsDir, "final_report.md");
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = enrichedResults.Length,
+                    });
+            }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
+            }
+
+            return enrichedResults;
         }
 
         public async Task<bool> TestConnectionAsync()
