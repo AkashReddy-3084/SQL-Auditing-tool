@@ -23,6 +23,14 @@ namespace SQLAuditor.Wpf
             public string DisplayValue => Total <= 0 ? Value.ToString() : $"{Value} ({Percent:F0}%)";
         }
 
+        private sealed class SummaryResultRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Description { get; init; } = string.Empty;
+            public string Outcome { get; init; } = string.Empty;
+            public string Technique { get; init; } = string.Empty;
+        }
+
         private sealed class ManualEvaluationState
         {
             public string Instructions { get; set; } = string.Empty;
@@ -483,22 +491,9 @@ namespace SQLAuditor.Wpf
                 var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(results);
-                // write simple final report
-                try
-                {
-                    var sb = new System.Text.StringBuilder();
-                    sb.AppendLine($"# Evaluation Results — {DateTime.UtcNow}\n");
-                    int idx = 1;
-                    foreach (var r in results)
-                    {
-                        sb.AppendLine($"{idx++}. {r.Id} — {r.Description} — {r.Outcome} — Technique: {r.Technique}\n");
-                    }
-                    System.IO.Directory.CreateDirectory(System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results"));
-                    var outPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
-                    System.IO.File.WriteAllText(outPath, sb.ToString());
-                    Log("Rendered report saved to results/final_report.md");
-                }
-                catch { }
+                // checklist_results.json and the full final_report.md are produced
+                // automatically by the Auditor at the end of the assessment.
+                Log("Summary report generated at results/final_report.md");
             }
             catch (Exception ex)
             {
@@ -550,57 +545,9 @@ namespace SQLAuditor.Wpf
                 var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token);
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
-
-                // generate simple report using SQL template
-                try
-                {
-                    var repoRoot = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory());
-                    // locate template under SQL folder
-                    var templatePath = System.IO.Path.Combine(repoRoot, "SQL", "05-report-template.md");
-                    string template = System.IO.File.Exists(templatePath) ? System.IO.File.ReadAllText(templatePath) : "";
-
-                    int total = results.Length;
-                    int passed = 0; int failed = 0; int needs = 0;
-                    foreach (var r in results)
-                    {
-                        if (r.Outcome == "Pass") passed++;
-                        else if (r.Outcome == "Fail") failed++;
-                        else needs++;
-                    }
-                    double pct = total == 0 ? 0 : (double)passed * 100.0 / total;
-
-                    // Replace placeholders conservatively
-                    if (!string.IsNullOrEmpty(template))
-                    {
-                        template = template.Replace("[XX.X%]", pct.ToString("0.0"));
-                        template = template.Replace("[Total Checklist Items]", total.ToString());
-                        template = template.Replace("[N]", total.ToString());
-                        template = template.Replace("[Items Scored]", (total - needs).ToString());
-                        template = template.Replace("[Items N/A]", needs.ToString());
-                        template = template.Replace("[Critical Findings]", failed.ToString());
-                        template = template.Replace("[High Findings]", failed.ToString());
-                    }
-
-                    var sbFindings = new System.Text.StringBuilder();
-                    sbFindings.AppendLine("| # | Checklist Ref | Finding | Severity | Outcome | Technique |");
-                    sbFindings.AppendLine("|---|---------------|---------|----------|---------|-----------|");
-                    int idx = 1;
-                    foreach (var r in results)
-                    {
-                        var shortDesc = r.Description.Length > 80 ? r.Description.Substring(0, 77) + "..." : r.Description;
-                        sbFindings.AppendLine($"| {idx++} | {r.Id} | {shortDesc} | - | {r.Outcome} | {r.Technique} |");
-                    }
-
-                    var finalReport = (template + "\n\n## Findings\n" + sbFindings.ToString());
-                    Directory.CreateDirectory(System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results"));
-                    var outPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
-                    System.IO.File.WriteAllText(outPath, finalReport);
-                    Log($"Rendered report saved to results/final_report.md");
-                }
-                catch (Exception ex)
-                {
-                    Log("Report generation error: " + ex.Message);
-                }
+                // checklist_results.json and the full final_report.md are produced
+                // automatically by the Auditor at the end of the assessment.
+                Log("Summary report generated at results/final_report.md");
             }
             catch (Exception ex)
             {
@@ -838,6 +785,7 @@ namespace SQLAuditor.Wpf
                 var item = pair.Item;
                 var failEvidence = "Marked as Fail because manual evaluation was skipped by the operator.";
                 var failResult = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, "Fail", failEvidence, item.ScriptFile, "AI-Manual");
+                failResult = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(failResult);
                 var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
                 if (idx >= 0) list[idx] = failResult;
                 else list.Add(failResult);
@@ -877,11 +825,15 @@ namespace SQLAuditor.Wpf
 
             if (SummaryList != null)
             {
-                SummaryList.Items.Clear();
-                foreach (var r in resultList)
-                {
-                    SummaryList.Items.Add($"{r.Id} | {r.Description} | {r.Outcome} | {r.Technique}");
-                }
+                SummaryList.ItemsSource = resultList
+                    .Select(r => new SummaryResultRow
+                    {
+                        Id = r.Id ?? string.Empty,
+                        Description = r.Description ?? string.Empty,
+                        Outcome = r.Outcome ?? string.Empty,
+                        Technique = r.Technique ?? string.Empty
+                    })
+                    .ToList();
             }
 
             if (SummaryOutcomeChartItems != null)
@@ -1157,6 +1109,9 @@ namespace SQLAuditor.Wpf
                 McpExecutionTimeMs = null,
                 McpEvidence = null
             };
+            // Back-fill the report fields (Score, Severity, Finding, Recommendation, ...)
+            // so manually evaluated items match the schema used by the report generator.
+            updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(updated);
 
             var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0) list[idx] = updated;
@@ -1348,6 +1303,31 @@ namespace SQLAuditor.Wpf
             catch (Exception ex)
             {
                 MessageBox.Show("Export failed: " + ex.Message, "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void ExitBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isEvaluating)
+                {
+                    var choice = MessageBox.Show(
+                        "An evaluation is still running. Exit anyway?",
+                        "Exit SQL Auditor",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning);
+                    if (choice != MessageBoxResult.Yes) return;
+
+                    try { _evaluationCts?.Cancel(); } catch { }
+                }
+
+                try { _progressWatcherCts?.Cancel(); } catch { }
+            }
+            catch { }
+            finally
+            {
+                Application.Current.Shutdown();
             }
         }
 
@@ -1748,121 +1728,30 @@ namespace SQLAuditor.Wpf
                 var txt = System.IO.File.ReadAllText(path);
                 var arr = JsonSerializer.Deserialize<SQLAuditor.Lib.ChecklistResult[]>(txt) ?? Array.Empty<SQLAuditor.Lib.ChecklistResult>();
 
-                // Load checklist structure to map IDs to areas/categories
-                System.Collections.Generic.Dictionary<string, (string Area, string Category)> map = new System.Collections.Generic.Dictionary<string, (string, string)>();
-                try
-                {
-                    var structList = await _auditor!.GetChecklistStructureAsync();
-                    foreach (var (area, items) in structList)
-                    {
-                        foreach (var it in items)
-                        {
-                            map[it.Id] = (area, it.Category);
-                        }
-                    }
-                }
-                catch { }
-
-                // Scoring: map outcomes to numeric scores per rubric (conservative)
-                int total = arr.Length;
-                int itemsScored = arr.Count(r => string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
-                int itemsNA = arr.Count(r => string.Equals(r.Outcome, "N/A", StringComparison.OrdinalIgnoreCase));
-                int criticalFindings = arr.Count(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
-
-                System.Collections.Generic.Dictionary<string, int> itemScores = new System.Collections.Generic.Dictionary<string, int>();
-                foreach (var r in arr)
-                {
-                    int score = 0;
-                    if (string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase)) score = 2; // Implemented baseline
-                    else if (string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase)) score = 0;
-                    else score = 0; // NeedsReview/Stopped/N/A => 0 by default
-                    itemScores[r.Id] = score;
-                }
-
-                // Compute category and area scores
-                var categoryScores = new System.Collections.Generic.Dictionary<string, (int Sum, int Count)>();
-                var areaCategoryMap = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<string>>();
-                foreach (var kv in itemScores)
-                {
-                    var id = kv.Key; var sc = kv.Value;
-                    var area = map.ContainsKey(id) ? map[id].Area : "Unassigned";
-                    var cat = map.ContainsKey(id) ? map[id].Category : "Unassigned";
-                    var catKey = area + "||" + cat;
-                    if (!categoryScores.ContainsKey(catKey)) categoryScores[catKey] = (0, 0);
-                    var cur = categoryScores[catKey];
-                    categoryScores[catKey] = (cur.Sum + sc, cur.Count + 1);
-                    if (!areaCategoryMap.ContainsKey(area)) areaCategoryMap[area] = new System.Collections.Generic.List<string>();
-                    if (!areaCategoryMap[area].Contains(cat)) areaCategoryMap[area].Add(cat);
-                }
-
-                var areaScores = new System.Collections.Generic.Dictionary<string, double>();
-                foreach (var area in areaCategoryMap.Keys)
-                {
-                    double totalPct = 0; int cats = 0;
-                    foreach (var cat in areaCategoryMap[area])
-                    {
-                        var key = area + "||" + cat;
-                        if (!categoryScores.ContainsKey(key)) continue;
-                        var (sum, count) = categoryScores[key];
-                        if (count == 0) continue;
-                        double catPct = (double)sum / (3.0 * count) * 100.0;
-                        totalPct += catPct; cats++;
-                    }
-                    var areaPct = cats == 0 ? 0.0 : totalPct / cats;
-                    areaScores[area] = areaPct;
-                }
-
-                // Area weights per rubric
-                var areaWeights = new System.Collections.Generic.Dictionary<string, double>
-                {
-                    { "Architecture & Design", 0.08 },{ "Data Integration & ETL", 0.10 },{ "T-SQL Code Quality", 0.08 },{ "Data Modeling & Storage", 0.09 },{ "Data Quality Framework", 0.09 },{ "Security & Access Control", 0.12 },{ "Compliance & Regulatory", 0.07 },{ "Data Governance", 0.04 },{ "Reliability & Resilience", 0.06 },{ "Monitoring & Observability", 0.05 },{ "DevOps & Deployment", 0.06 },{ "Cost Management & Capacity", 0.04 },{ "Documentation & Knowledge Mgmt", 0.03 },{ "Performance & Query Tuning", 0.09 }
-                };
-
-                double overallWeighted = 0.0; double totalWeight = 0.0;
-                foreach (var aw in areaWeights)
-                {
-                    var areaName = aw.Key;
-                    var weight = aw.Value;
-                    totalWeight += weight;
-                    var pct = areaScores.ContainsKey(areaName) ? areaScores[areaName] : 0.0;
-                    overallWeighted += pct * weight;
-                }
-                // Normalize by totalWeight (should be 1.0)
-                var overallScore = totalWeight == 0 ? 0.0 : overallWeighted / totalWeight;
-
-                // Build report using template file as header, then inject computed values
-                var templatePath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "SQL", "05-report-template.md");
-                var report = new System.Text.StringBuilder();
-                if (System.IO.File.Exists(templatePath))
-                {
-                    var tpl = System.IO.File.ReadAllText(templatePath);
-                    // Replace some placeholders
-                    tpl = tpl.Replace("**[XX.X%]**", $"**{overallScore:F1}%**");
-                    tpl = tpl.Replace("[XX.X%]", $"{overallScore:F1}%");
-                    tpl = tpl.Replace("Total Checklist Items","Total Checklist Items");
-                    tpl = tpl.Replace("328", total.ToString());
-                    tpl = tpl.Replace("[N]", itemsScored.ToString());
-                    tpl = tpl.Replace("[Date]", DateTime.UtcNow.ToString("yyyy-MM-dd"));
-                    report.AppendLine(tpl);
-                }
-                else
-                {
-                    report.AppendLine($"# Audit Report — Overall Score: {overallScore:F1}%\n");
-                }
-
-                // Save report
+                // Generate the summary report from the persisted checklist_results.json
+                // using the shared report generator so the output stays consistent with
+                // the report produced automatically at the end of an assessment.
                 try
                 {
                     var outDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
                     System.IO.Directory.CreateDirectory(outDir);
                     var outPath = System.IO.Path.Combine(outDir, "final_report.md");
-                    System.IO.File.WriteAllText(outPath, report.ToString());
+                    new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                        path,
+                        outPath,
+                        new SqlAuditor.Reporting.ReportMetadata
+                        {
+                            ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                            Auditors = "SQL Auditor Tool (automated)",
+                            TotalChecklistItems = arr.Length,
+                        });
                     Log("Rendered report saved to results/final_report.md");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
 
                 UpdateSummaryView(arr);
                 SetTabIndex(3);
+                UpdateStageIndicators();
             }
             catch (Exception ex)
             {
