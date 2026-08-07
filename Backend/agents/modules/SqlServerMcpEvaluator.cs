@@ -16,10 +16,6 @@ internal sealed class SqlServerMcpEvaluator
 {
     private sealed record ProviderCallResult(string Content, string RawOutput, int TotalTokens);
 
-    private const string DefaultBaseUrl = "https://llm.maqsoftware.net/v1";
-    private const string DefaultApiKey = "sk-jlQlxi3zFjCNOYyeSqLDwQ";
-    private const string DefaultModel = "qwen-3.6-27b";
-
     private readonly string _baseUrl;
     private readonly string _apiKey;
     private readonly string _model;
@@ -40,14 +36,10 @@ internal sealed class SqlServerMcpEvaluator
 
     public static SqlServerMcpEvaluator CreateFromEnvironment()
     {
-        var baseUrl = Environment.GetEnvironmentVariable("PROVIDER_BASE_URL");
-        var apiKey = Environment.GetEnvironmentVariable("PROVIDER_API_KEY");
-        var model = Environment.GetEnvironmentVariable("MODEL");
-
         return new SqlServerMcpEvaluator(
-            string.IsNullOrWhiteSpace(baseUrl) ? DefaultBaseUrl : baseUrl.TrimEnd('/'),
-            string.IsNullOrWhiteSpace(apiKey) ? DefaultApiKey : apiKey,
-            string.IsNullOrWhiteSpace(model) ? DefaultModel : model);
+            ProviderConfig.BaseUrl,
+            ProviderConfig.ApiKey,
+            ProviderConfig.Model);
     }
 
     public async Task<bool> IsAvailableAsync(int timeoutMs = 5000)

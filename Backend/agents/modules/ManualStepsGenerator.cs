@@ -13,11 +13,6 @@ internal sealed record ManualStepsGenerationResult(string Instructions, string R
 
 internal sealed class ManualStepsGenerator
 {
-    private const string DefaultBaseUrl = "https://llm.maqsoftware.net/v1";
-    private const string DefaultApiKey = "sk-jlQlxi3zFjCNOYyeSqLDwQ";
-    private const string DefaultModel = "qwen-3.6-27b";
-    private const int DefaultTimeoutSeconds = 240;
-
     private readonly string _baseUrl;
     private readonly string _model;
     private readonly HttpClient _http;
@@ -32,20 +27,11 @@ internal sealed class ManualStepsGenerator
 
     public static ManualStepsGenerator CreateFromEnvironment()
     {
-        var baseUrl = Environment.GetEnvironmentVariable("PROVIDER_BASE_URL");
-        var apiKey = Environment.GetEnvironmentVariable("PROVIDER_API_KEY");
-        var model = Environment.GetEnvironmentVariable("MODEL");
-        var timeoutRaw = Environment.GetEnvironmentVariable("PROVIDER_TIMEOUT_SECONDS");
-
-        var timeoutSeconds = int.TryParse(timeoutRaw, out var parsedTimeout) && parsedTimeout > 0
-            ? parsedTimeout
-            : DefaultTimeoutSeconds;
-
         return new ManualStepsGenerator(
-            string.IsNullOrWhiteSpace(baseUrl) ? DefaultBaseUrl : baseUrl.TrimEnd('/'),
-            string.IsNullOrWhiteSpace(apiKey) ? DefaultApiKey : apiKey,
-            string.IsNullOrWhiteSpace(model) ? DefaultModel : model,
-            TimeSpan.FromSeconds(timeoutSeconds));
+            ProviderConfig.BaseUrl,
+            ProviderConfig.ApiKey,
+            ProviderConfig.Model,
+            ProviderConfig.Timeout);
     }
 
     public async Task<string> GenerateAsync(ChecklistItem item, CancellationToken cancellationToken = default)
