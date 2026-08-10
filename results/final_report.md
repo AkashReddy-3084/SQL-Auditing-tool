@@ -9,7 +9,7 @@
 | **Client** | MLC |
 | **Solution** | SQL Server / Azure SQL Data Warehouse |
 | **Audit Period** | [Start Date] – [End Date] |
-| **Report Date** | 2026-08-06 |
+| **Report Date** | 2026-08-10 |
 | **Auditor(s)** | SQL Auditor Tool (automated) |
 | **Report Version** | 1.0 |
 | **Classification** | Confidential |
@@ -20,7 +20,7 @@
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1 | | | Initial draft |
-| 1.0 | 2026-08-06 | SQL Auditor Tool (automated) | Final report |
+| 1.0 | 2026-08-10 | SQL Auditor Tool (automated) | Final report |
 
 ---
 
@@ -30,21 +30,21 @@
 
 | Metric | Value |
 |--------|-------|
-| **Overall Score** | **100.0%** |
-| **Risk Rating** | 🔵 **Excellent** |
-| **Total Checklist Items** | 2 |
-| **Items Scored** | 2 |
+| **Overall Score** | **0.0%** |
+| **Risk Rating** | 🔴 **Critical** |
+| **Total Checklist Items** | 1 |
+| **Items Scored** | 1 |
 | **Items N/A** | 0 |
-| **Critical Findings** | 0 |
+| **Critical Findings** | 1 |
 | **High Findings** | 0 |
 
 ### 1.2 Area Scorecard
 
 | # | Area | Weight | Score | Weighted | Rating |
 |---|------|--------|-------|----------|--------|
-| 1 | Architecture & Design | 8% | 100.0% | 8.0 | 🔵 Excellent |
+| 1 | Architecture & Design | 8% | 0.0% | 0.0 | 🔴 Critical |
 | 2 | Data Integration & ETL | 10% | N/A | — | — |
-| 3 | T-SQL Code Quality | 8% | 100.0% | 8.0 | 🔵 Excellent |
+| 3 | T-SQL Code Quality | 8% | N/A | — | — |
 | 4 | Data Modeling & Storage | 9% | N/A | — | — |
 | 5 | Data Quality Framework | 9% | N/A | — | — |
 | 6 | Security & Access Control | 12% | N/A | — | — |
@@ -56,27 +56,27 @@
 | 12 | Cost Management & Capacity | 4% | N/A | — | — |
 | 13 | Documentation & Knowledge Mgmt | 3% | N/A | — | — |
 | 14 | Performance & Query Tuning | 9% | N/A | — | — |
-| | **Overall** | **100%** | | **100.0%** | 🔵 Excellent |
+| | **Overall** | **100%** | | **0.0%** | 🔴 Critical |
 
 ### 1.3 Radar Chart
 
 ```mermaid
 radar-beta
   axis Architecture, ETL, TSQL, Modeling, Quality, Security, Compliance, Governance, Reliability, Monitoring, DevOps, CostMgmt, Documentation, Performance
-  curve ScorePct["% Score"] { 100, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+  curve ScorePct["% Score"] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 ```
 
 ### 1.4 Top 5 Critical Findings
 
 | # | Finding | Area | Severity | Checklist Ref |
 |---|---------|------|----------|---------------|
-| — | No critical findings identified in the assessed items. | | | |
+| 1 | Deployment model is identified as SQL Server Express on a local Windows 10 machine, but lacks required documentation and rationale. | 1. Architecture & Design | Medium | 1.1.1 |
 
 ### 1.5 Top 5 Priority Recommendations
 
 | # | Recommendation | Addresses | Effort | Risk Impact | Score Impact |
 |---|---------------|-----------|--------|------------|-------------|
-| — | No remediation required for the assessed items. | | | | |
+| 1 | Create and maintain formal documentation detailing the deployment model and the business/technical rationale for its selection. | 1.1.1 | Low | Unmanaged deployment choices increase configuration drift and compliance risks. | +3 pts |
 
 ---
 
@@ -86,45 +86,23 @@ radar-beta
 
 ### 2.1 Area 1: Architecture & Design
 
-**Area Score: 100.0% | Rating: 🔵 Excellent**
+**Area Score: 0.0% | Rating: 🔴 Critical**
 
 | Category | Score | Rating |
 |----------|-------|--------|
-| 1.1 | 100.0% | 🔵 Excellent |
+| 1.1 | 0.0% | 🔴 Critical |
 
 #### Findings
 
 | # | Checklist Ref | Finding | Severity | Score |
 |---|--------------|---------|----------|-------|
-| 1 | 1.1.2 | Control satisfied: Environment separation exists (Dev / Test / Prod) with isolated instances or databases. | Informational | 3 |
+| 1 | 1.1.1 | Deployment model is identified as SQL Server Express on a local Windows 10 machine, but lacks required documentation and rationale. | Medium | 0 |
 
 #### Recommendations
 
 | # | Recommendation | Addresses | Effort | Risk Impact | Score Impact |
 |---|---------------|-----------|--------|------------|-------------|
-| — | No remediation required for the assessed items in this area. | | | | |
-
----
-
-### 2.2 Area 3: T-SQL Code Quality
-
-**Area Score: 100.0% | Rating: 🔵 Excellent**
-
-| Category | Score | Rating |
-|----------|-------|--------|
-| 3.1 | 100.0% | 🔵 Excellent |
-
-#### Findings
-
-| # | Checklist Ref | Finding | Severity | Score |
-|---|--------------|---------|----------|-------|
-| 1 | 3.1.2 | Control satisfied: No `SELECT *` in production code; explicit column lists. | Informational | 3 |
-
-#### Recommendations
-
-| # | Recommendation | Addresses | Effort | Risk Impact | Score Impact |
-|---|---------------|-----------|--------|------------|-------------|
-| — | No remediation required for the assessed items in this area. | | | | |
+| 1 | Create and maintain formal documentation detailing the deployment model and the business/technical rationale for its selection. | 1.1.1 | Low | Unmanaged deployment choices increase configuration drift and compliance risks. | +3 pts |
 
 ---
 
@@ -132,7 +110,7 @@ radar-beta
 
 | Priority | Recommendation | Area(s) | Effort | Severity Addressed | Target Window |
 |----------|---------------|---------|--------|--------------------|---------------|
-| — | No remediation required for the assessed items. | | | | |
+| 1 | Create and maintain formal documentation detailing the deployment model and the business/technical rationale for its selection. | 1. Architecture & Design | Low | Medium | 0–7 days |
 
 ---
 
@@ -142,11 +120,4 @@ radar-beta
 - **Appendix B**: Compliance matrix — [03-compliance-matrix.md](03-compliance-matrix.md)
 - **Appendix C**: Risk register — [06-risk-register-template.md](06-risk-register-template.md)
 - **Appendix D**: Evidence index — [DMV outputs, execution plans, config exports collected]
-
----
-
-> ⚠️ **Testing caveat:** Some fields required by the report template are not yet
-> emitted by the assessment engine and were populated with **dummy values**
-> (Score, Severity, Finding, Recommendation, Effort, Risk Impact, Score Impact).
-> Ask the POC to persist these fields in `checklist_results.json` for accurate reporting.
 

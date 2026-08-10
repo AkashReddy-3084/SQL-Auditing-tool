@@ -833,6 +833,79 @@ namespace SQLAuditor.Lib
             return enrichedResults;
         }
 
+        // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview in the
+        // persisted results and regenerates the report. Used by the CLI --interactive
+        // flow and the IDE 'resolve_review' tool so manual items can be decided by a
+        // human without re-running the evaluation. Patches the JSON in place so no
+        // enrichment fields are lost.
+        public bool ResolveReview(string id, string decision, string? notes, out string newOutcome)
+        {
+            newOutcome = string.Empty;
+            var norm = decision?.Trim().ToLowerInvariant();
+            var outcome = norm switch
+            {
+                "pass" or "p" or "yes" or "y" => "Pass",
+                "fail" or "f" or "no" or "n" => "Fail",
+                "needsreview" or "review" or "r" => "NeedsReview",
+                _ => string.Empty
+            };
+            if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
+
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath)) return false;
+
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                return false;
+
+            System.Text.Json.Nodes.JsonObject? target = null;
+            foreach (var el in arr)
+            {
+                if (el is System.Text.Json.Nodes.JsonObject obj &&
+                    string.Equals(obj["Id"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = obj;
+                    break;
+                }
+            }
+            if (target == null) return false;
+
+            target["Outcome"] = outcome;
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
+                target["Evidence"] = string.IsNullOrWhiteSpace(existing)
+                    ? $"Manual decision: {outcome}. {notes}"
+                    : existing + $"\n\nManual decision: {outcome}. {notes}";
+                target["Finding"] = notes;
+            }
+
+            try
+            {
+                File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { return false; }
+
+            // Regenerate the Markdown report from the updated results.
+            try
+            {
+                var reportPath = Path.Combine(resultsDir, "final_report.md");
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
+            newOutcome = outcome;
+            return true;
+        }
+
         public async Task<bool> TestConnectionAsync()
         {
             if (string.IsNullOrWhiteSpace(_connectionString)) return false;
