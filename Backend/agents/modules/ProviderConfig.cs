@@ -3,7 +3,7 @@ using System.IO;
 
 namespace SQLAuditor.Lib;
 
-internal static class ProviderConfig
+public static class ProviderConfig
 {
     private const int DefaultTimeoutSeconds = 240;
 

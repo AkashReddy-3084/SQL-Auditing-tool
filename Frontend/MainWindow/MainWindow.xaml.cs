@@ -1505,32 +1505,122 @@ namespace SQLAuditor.Wpf
 
         private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
         {
-            // Temporarily disabled: generating/updating scripts for unmapped items is not allowed.
-            Log("Generate Scripts action is currently disabled — will not update or create unmapped scripts.");
-            MessageBox.Show(this, "Generate Scripts is temporarily disabled and will not modify scripts for unmapped checklist items.", "Generate Scripts Disabled", MessageBoxButton.OK, MessageBoxImage.Information);
-            // The intended operator-driven flow (commented-out) is shown below.
-            // When re-enabled, the button SHOULD be the *only* code path that writes
-            // new scripts into Backend/checklist/scripts/sql and updates
-            // Backend/checklist/deterministic-script-mapping.json via Auditor.SaveGeneratedScriptAsync.
-            // DO NOT add other automatic writers elsewhere in the codebase.
+            GenerateScriptsBtn.IsEnabled = false;
 
-            /* Example (commented):
-            await EnsureAuditor(FqdnText.Text.Trim());
-            var selected = /* gather selected checklist items * / ;
-            foreach (var item in selected)
+            try
             {
-                // The script content should be created externally (GHCP Copilot),
-                // then pasted or loaded here. The tool must NOT generate scripts
-                // automatically without operator confirmation.
-                string scriptText = /* operator-provided script contents * /;
-                // Persist intentionally via the auditor API
-                var savedPath = await _auditor.SaveGeneratedScriptAsync(item.Id, scriptText, item.Id + ".sql");
-                Log($"Saved generated script for {item.Id} -> {savedPath}");
-            }
-            */
+                // Resolve the Backend base path (the ScriptGeneratorAgent expects it)
+                var repoRoot = FindRepoRootFromCwd();
+                if (repoRoot == null)
+                {
+                    MessageBox.Show(this, "Cannot locate the repository root (Backend/checklist not found).", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                var basePath = System.IO.Path.Combine(repoRoot, "Backend");
 
-            await Task.CompletedTask;
-            return;
+                // Use the same LLM provider config as the rest of the app
+                string llmBaseUrl, llmApiKey, llmModel;
+                int llmTimeout;
+                try
+                {
+                    llmBaseUrl = ProviderConfig.BaseUrl;
+                    llmApiKey = ProviderConfig.ApiKey;
+                    llmModel = ProviderConfig.Model;
+                    llmTimeout = (int)ProviderConfig.Timeout.TotalSeconds;
+                }
+                catch (Exception exCfg)
+                {
+                    MessageBox.Show(this, $"LLM configuration error: {exCfg.Message}\n\nEnsure .env is configured.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                var promptsDir = System.IO.Path.Combine(basePath, "agents", "prompts");
+                if (!System.IO.Directory.Exists(promptsDir))
+                {
+                    MessageBox.Show(this, $"Prompts directory not found: {promptsDir}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                // Gather selected checklist items and convert to ScriptGenChecklistItem
+                var selectedItems = new System.Collections.Generic.List<SQLAuditor.Agents.ScriptGenChecklistItem>();
+                if (_loadedStructure != null && _selectedIds != null && _selectedIds.Count > 0)
+                {
+                    foreach (var id in _selectedIds)
+                    {
+                        var match = _loadedStructure.FirstOrDefault(x => x.Item.Id == id);
+                        if (match.Item != null)
+                        {
+                            selectedItems.Add(new SQLAuditor.Agents.ScriptGenChecklistItem
+                            {
+                                ChecklistId = match.Item.Id,
+                                Category = match.Item.Category ?? "",
+                                CheckName = match.Item.Description,
+                                Scope = "",
+                                Description = match.Item.Description,
+                                ExpectedOutcome = match.Item.Description
+                            });
+                        }
+                    }
+                }
+
+                if (selectedItems.Count == 0)
+                {
+                    MessageBox.Show(this, "No checklist items selected. Please select items first.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                var confirm = MessageBox.Show(this,
+                    $"Generate scripts for {selectedItems.Count} selected checklist item(s)?\n\nThis will call the configured LLM to create T-SQL/PowerShell audit scripts.",
+                    "Generate Scripts", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (confirm != MessageBoxResult.Yes) return;
+
+                Log($"Starting script generation for {selectedItems.Count} items...");
+
+                var cts = new System.Threading.CancellationTokenSource();
+                var progress = new Progress<string>(msg => Log(msg));
+
+                var processor = new SQLAuditor.Agents.ChecklistItemProcessor(
+                    llmBaseUrl, llmApiKey, llmModel, promptsDir, llmTimeout, maxRetries: 3);
+                var validator = new SQLAuditor.Agents.ScriptOutputValidator();
+                var agent = new SQLAuditor.Agents.ScriptGeneratorAgent(processor, validator, basePath);
+
+                var result = await Task.Run(() => agent.RunAsync(progress, selectedItems, cts.Token));
+
+                Log($"Script generation complete — Generated: {result.Generated.Count}, Skipped: {result.Skipped.Count}, Failed: {result.Failed.Count}");
+
+                if (result.Skipped.Count > 0)
+                {
+                    var skippedMsg = string.Join("\n", result.Skipped.Select(s => $"  {s.ChecklistId}: {s.Reason}"));
+                    Log($"Skipped items:\n{skippedMsg}");
+                }
+
+                MessageBox.Show(this,
+                    $"Script generation complete.\n\nGenerated: {result.Generated.Count}\nSkipped: {result.Skipped.Count}\nFailed: {result.Failed.Count}\n\nScripts saved under Backend/checklist/scripts/",
+                    "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                Log($"Script generation error: {ex.Message}");
+                MessageBox.Show(this, $"Script generation failed:\n{ex.Message}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                GenerateScriptsBtn.IsEnabled = _checklistLoaded;
+            }
+        }
+
+        private static string? FindRepoRootFromCwd()
+        {
+            var dir = new System.IO.DirectoryInfo(System.IO.Directory.GetCurrentDirectory());
+            while (dir != null)
+            {
+                var candidate = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master-checklist.json");
+                if (System.IO.File.Exists(candidate)) return dir.FullName;
+                var alt = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master_checklist.json");
+                if (System.IO.File.Exists(alt)) return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
         }
 
         private void AreaCb_Unchecked(object? sender, RoutedEventArgs e)
@@ -1580,8 +1670,8 @@ namespace SQLAuditor.Wpf
 
                 // Allow loading checklist at any time (user action required)
                 LoadChecklistBtn.IsEnabled = true;
-                // Keep Generate Scripts disabled for now (feature temporarily inactive)
-                GenerateScriptsBtn.IsEnabled = false;
+                // Enable Generate Scripts when checklist is loaded and items are selected
+                GenerateScriptsBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
                 StartEvalBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
             }
             catch { }

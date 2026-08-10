@@ -1,6 +1,6 @@
 namespace SQLAuditor.Agents
 {
-    public class ChecklistItem
+    public class ScriptGenChecklistItem
     {
         public string ChecklistId { get; set; } = "";
 

@@ -66,7 +66,7 @@ namespace SQLAuditor.Agents
 
         public async Task<ScriptGenerationResponse>
             GenerateScriptAsync(
-                ChecklistItem item)
+                ScriptGenChecklistItem item)
         {
 
             var userPrompt =

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SQLAuditor.Agents
@@ -50,6 +51,14 @@ namespace SQLAuditor.Agents
 
         public async Task<AgentRunResult> RunAsync()
         {
+            return await RunAsync(null, null, CancellationToken.None);
+        }
+
+        public async Task<AgentRunResult> RunAsync(
+            IProgress<string>? progress,
+            IEnumerable<ScriptGenChecklistItem>? items = null,
+            CancellationToken cancellationToken = default)
+        {
             var sqlDir =
                 Path.Combine(
                     _basePath,
@@ -74,15 +83,21 @@ namespace SQLAuditor.Agents
             Directory.CreateDirectory(resultsDir);
 
 
-            var checklist =
-                LoadChecklist(
+            List<ScriptGenChecklistItem> checklist;
+            if (items != null)
+            {
+                checklist = new List<ScriptGenChecklistItem>(items);
+            }
+            else
+            {
+                checklist = LoadChecklist(
                     Path.Combine(
                         _basePath,
                         "checklist",
                         "master-checklist.json"));
+            }
 
-            Console.WriteLine(
-                $"[Agent] Loaded {checklist.Count} checklist items\n");
+            progress?.Report($"[Agent] Loaded {checklist.Count} checklist items");
 
 
             var runResult =
@@ -91,8 +106,9 @@ namespace SQLAuditor.Agents
 
             foreach (var item in checklist)
             {
-                Console.WriteLine(
-                    $"[Agent] {item.ChecklistId} - {item.CheckName}");
+                if (cancellationToken.IsCancellationRequested) break;
+
+                progress?.Report($"[Agent] {item.ChecklistId} - {item.CheckName}");
 
                 try
                 {
@@ -100,8 +116,7 @@ namespace SQLAuditor.Agents
                     // STEP 1 - CALL LLM (FEASIBILITY + SCRIPT)
                     // ==========================================
 
-                    Console.WriteLine(
-                        " Generating script via LLM...");
+                    progress?.Report($"  Generating script via LLM...");
 
                     var response =
                         await _processor
@@ -110,8 +125,7 @@ namespace SQLAuditor.Agents
 
                     if (!response.IsFeasible)
                     {
-                        Console.WriteLine(
-                            $" NOT FEASIBLE: {response.Reason}");
+                        progress?.Report($"  NOT FEASIBLE: {response.Reason}");
 
                         runResult.Skipped.Add(
                             new SkippedItem
@@ -159,8 +173,7 @@ namespace SQLAuditor.Agents
 
                     if (!validation.IsValid)
                     {
-                        Console.WriteLine(
-                            $" VALIDATION FAILED: {validation.Error}");
+                        progress?.Report($"  VALIDATION FAILED: {validation.Error}");
 
                         runResult.Failed.Add(
                             item.ChecklistId);
@@ -210,14 +223,8 @@ namespace SQLAuditor.Agents
                         scriptPath,
                         response.ScriptContent);
 
-                    Console.WriteLine(
-                        $" ✓ Script saved: {response.ScriptType}/{filename}");
-
-                    Console.WriteLine(
-                        $"   Scope: {response.Scope}");
-
-                    Console.WriteLine(
-                        $"   Scoring: {response.ScoringLogic}");
+                    progress?.Report($"  ✓ Script saved: {response.ScriptType}/{filename}");
+                    progress?.Report($"    Scope: {response.Scope} | Scoring: {response.ScoringLogic}");
 
 
                     // ==========================================
@@ -290,8 +297,7 @@ namespace SQLAuditor.Agents
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine(
-                        $" ERROR: {ex.Message}");
+                    progress?.Report($"  ERROR: {ex.Message}");
 
                     runResult.Failed.Add(
                         item.ChecklistId);
@@ -345,13 +351,30 @@ namespace SQLAuditor.Agents
                         WriteIndented = true
                     }));
 
+            // Merge generated mappings into the existing deterministic-script-mapping.json
+            // which uses format: { "id": ["path1", ..."] }
+            var existingMapping = new Dictionary<string, string[]>();
+            if (File.Exists(_mappingPath))
+            {
+                try
+                {
+                    var existing = JsonSerializer.Deserialize<Dictionary<string, string[]>>(
+                        File.ReadAllText(_mappingPath));
+                    if (existing != null) existingMapping = existing;
+                }
+                catch { /* If parse fails (e.g. different format), start fresh */ }
+            }
+
+            foreach (var m in _mappings)
+            {
+                var relativePath = $"Backend/checklist/scripts/{m.ScriptPath}";
+                existingMapping[m.ChecklistId] = new[] { relativePath };
+            }
+
             await File.WriteAllTextAsync(
                 _mappingPath,
                 JsonSerializer.Serialize(
-                    new
-                    {
-                        mappings = _mappings
-                    },
+                    existingMapping,
                     new JsonSerializerOptions
                     {
                         WriteIndented = true
@@ -359,28 +382,105 @@ namespace SQLAuditor.Agents
         }
 
 
-        private List<ChecklistItem>
+        private List<ScriptGenChecklistItem>
             LoadChecklist(string path)
         {
-            var json =
-                File.ReadAllText(path);
+            var json = File.ReadAllText(path);
 
-            return JsonSerializer
-                .Deserialize<ChecklistDocument>(
-                    json,
-                    new JsonSerializerOptions
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // Format 1: flat { "items": [...] } with ChecklistId, CheckName, etc.
+            if (root.TryGetProperty("items", out var itemsArr) && itemsArr.ValueKind == JsonValueKind.Array)
+            {
+                return JsonSerializer
+                    .Deserialize<ScriptGenChecklistDocument>(
+                        json,
+                        new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        })
+                    ?.Items
+                    ?? new();
+            }
+
+            // Format 2: nested { "areas": [ { "sub_areas": [ { "items": [ { "id", "text" } ] } ] } ] }
+            if (root.TryGetProperty("areas", out var areas) && areas.ValueKind == JsonValueKind.Array)
+            {
+                var result = new List<ScriptGenChecklistItem>();
+                foreach (var area in areas.EnumerateArray())
+                {
+                    var areaTitle = area.TryGetProperty("title", out var at) ? at.GetString() ?? "" : "";
+                    var areaId = area.TryGetProperty("id", out var aid) ? aid.GetString() ?? "" : "";
+
+                    if (!area.TryGetProperty("sub_areas", out var subAreas) || subAreas.ValueKind != JsonValueKind.Array)
+                        continue;
+
+                    foreach (var sub in subAreas.EnumerateArray())
                     {
-                        PropertyNameCaseInsensitive = true
-                    })
-                ?.Items
-                ?? new();
+                        var subTitle = sub.TryGetProperty("title", out var st) ? st.GetString() ?? "" : "";
+
+                        if (!sub.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+                            continue;
+
+                        foreach (var item in items.EnumerateArray())
+                        {
+                            var id = item.TryGetProperty("id", out var iid) ? iid.GetString() ?? "" : "";
+                            var text = item.TryGetProperty("text", out var txt)
+                                ? txt.GetString() ?? ""
+                                : item.TryGetProperty("description", out var dsc)
+                                    ? dsc.GetString() ?? ""
+                                    : "";
+
+                            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(text))
+                                continue;
+
+                            result.Add(new ScriptGenChecklistItem
+                            {
+                                ChecklistId = id,
+                                Category = subTitle,
+                                CheckName = text,
+                                Scope = "",
+                                Description = text,
+                                ExpectedOutcome = text
+                            });
+                        }
+                    }
+                }
+                return result;
+            }
+
+            // Format 3: plain array [{ "Id", "Description", ... }]
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                var result = new List<ScriptGenChecklistItem>();
+                foreach (var el in root.EnumerateArray())
+                {
+                    var id = el.TryGetProperty("Id", out var pid) ? pid.GetString() ?? "" : "";
+                    var desc = el.TryGetProperty("Description", out var pdesc) ? pdesc.GetString() ?? "" : "";
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+
+                    result.Add(new ScriptGenChecklistItem
+                    {
+                        ChecklistId = id,
+                        Category = el.TryGetProperty("Category", out var pcat) ? pcat.GetString() ?? "" : "",
+                        CheckName = desc,
+                        Scope = "",
+                        Description = desc,
+                        ExpectedOutcome = desc
+                    });
+                }
+                return result;
+            }
+
+            return new();
         }
     }
 
 
-    public class ChecklistDocument
+    public class ScriptGenChecklistDocument
     {
-        public List<ChecklistItem> Items { get; set; } = new();
+        public List<ScriptGenChecklistItem> Items { get; set; } = new();
     }
 
 
