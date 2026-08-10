@@ -37,7 +37,8 @@ Given a checklist item for SQL Server auditing, determine:
    - 1 = Partial Pass — Minimal evidence exists but largely incomplete
    - 2 = Mostly Pass — Good evidence/configuration with minor gaps
    - 3 = Pass — Fully compliant or strong evidence of compliance
-   - For partial-evidence checks: max score should be 2 since full compliance requires human review
+   - Score 3 MUST be used when the script can fully verify compliance (e.g., a configuration value is ON/OFF, a setting matches the expected value, a policy is enabled)
+   - Only cap at 2 when the script gathers indirect/proxy evidence and the final compliance decision genuinely requires human judgment beyond what the script checks
 
 5. **SQL script output format**:
    ```sql

@@ -338,6 +338,7 @@ namespace SQLAuditor.Wpf
                 // mark that user has explicitly loaded the checklist so UI actions become available
                 _checklistLoaded = true;
                 StartEvalBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
+                GenerateScriptsBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
                 Log("Checklist loaded.");
             }
             catch (Exception ex)

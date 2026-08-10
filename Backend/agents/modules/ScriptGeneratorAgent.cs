@@ -120,7 +120,7 @@ namespace SQLAuditor.Agents
 
                     var response =
                         await _processor
-                            .GenerateScriptAsync(item);
+                            .GenerateScriptAsync(item, progress);
 
 
                     if (!response.IsFeasible)

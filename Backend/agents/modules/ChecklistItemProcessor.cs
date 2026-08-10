@@ -66,7 +66,8 @@ namespace SQLAuditor.Agents
 
         public async Task<ScriptGenerationResponse>
             GenerateScriptAsync(
-                ScriptGenChecklistItem item)
+                ScriptGenChecklistItem item,
+                IProgress<string>? progress = null)
         {
 
             var userPrompt =
@@ -119,7 +120,9 @@ namespace SQLAuditor.Agents
 
                     temperature = 0.2,
 
-                    max_tokens = 4096
+                    max_tokens = 4096,
+
+                    stream = true
                 };
 
 
@@ -144,25 +147,17 @@ namespace SQLAuditor.Agents
                             Encoding.UTF8,
                             "application/json");
 
+                    // Use ResponseHeadersRead so the connection stays alive
+                    // while tokens stream in — prevents Cloudflare 524 timeouts.
                     var response =
-                        await _httpClient.SendAsync(request);
+                        await _httpClient.SendAsync(
+                            request,
+                            HttpCompletionOption.ResponseHeadersRead);
 
                     response.EnsureSuccessStatusCode();
 
-                    var json =
-                        await response.Content
-                        .ReadAsStringAsync();
-
-                    using var doc =
-                        JsonDocument.Parse(json);
-
                     content =
-                        doc.RootElement
-                        .GetProperty("choices")[0]
-                        .GetProperty("message")
-                        .GetProperty("content")
-                        .GetString()
-                        ?? "";
+                        await ReadSseStreamAsync(response);
 
                     break;
                 }
@@ -180,7 +175,176 @@ namespace SQLAuditor.Agents
                 }
             }
 
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                progress?.Report(
+                    "    ⚠ LLM returned empty content after all attempts.");
+            }
+            else
+            {
+                progress?.Report(
+                    $"    [Debug] LLM response length: {content.Length} chars");
+
+                bool hasMarkers = content.Contains("---SCRIPT_START---");
+                bool hasCodeFence = content.Contains("```");
+                bool hasThinkTag = content.Contains("<think>");
+                progress?.Report(
+                    $"    [Debug] Has SCRIPT_START: {hasMarkers} | Has code fence: {hasCodeFence} | Has <think>: {hasThinkTag}");
+            }
+
             return ParseResponse(content);
+        }
+
+
+        /// <summary>
+        /// Reads an OpenAI-compatible streaming response. Handles both true SSE
+        /// streams (text/event-stream) and servers that ignore the stream flag
+        /// and return a single JSON body (application/json).
+        /// </summary>
+        private static async Task<string>
+            ReadSseStreamAsync(HttpResponseMessage response)
+        {
+            var contentType =
+                response.Content.Headers.ContentType?.MediaType ?? "";
+
+            // Some servers ignore stream=true and return a normal JSON body.
+            if (contentType.Contains("application/json"))
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                try
+                {
+                    using var doc = JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("choices", out var ch) &&
+                        ch.GetArrayLength() > 0)
+                    {
+                        var choice = ch[0];
+                        if (choice.TryGetProperty("message", out var msg) &&
+                            msg.TryGetProperty("content", out var mc) &&
+                            mc.ValueKind == JsonValueKind.String)
+                            return mc.GetString() ?? "";
+                        if (choice.TryGetProperty("text", out var t) &&
+                            t.ValueKind == JsonValueKind.String)
+                            return t.GetString() ?? "";
+                    }
+                }
+                catch (JsonException) { }
+                return "";
+            }
+
+            var sb = new StringBuilder();
+
+            using var stream =
+                await response.Content.ReadAsStreamAsync();
+
+            using var reader =
+                new StreamReader(stream, Encoding.UTF8);
+
+            var rawSb = new StringBuilder();
+
+            while (true)
+            {
+                var line = await reader.ReadLineAsync();
+
+                if (line == null)
+                    break;
+
+                rawSb.AppendLine(line);
+
+                // SSE lines: "data: {...}" or "data:{...}" (some servers omit space)
+                string payload;
+                if (line.StartsWith("data: "))
+                    payload = line.Substring(6).Trim();
+                else if (line.StartsWith("data:"))
+                    payload = line.Substring(5).Trim();
+                else
+                    continue;
+
+                if (payload == "[DONE]")
+                    break;
+
+                if (payload.Length == 0)
+                    continue;
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(payload);
+                    var root = doc.RootElement;
+
+                    if (!root.TryGetProperty("choices", out var choices) ||
+                        choices.GetArrayLength() == 0)
+                        continue;
+
+                    var choice = choices[0];
+
+                    // Standard chat streaming: choices[0].delta.content
+                    if (choice.TryGetProperty("delta", out var delta))
+                    {
+                        if (delta.TryGetProperty("content", out var c) &&
+                            c.ValueKind == JsonValueKind.String)
+                        {
+                            var token = c.GetString();
+                            if (token != null)
+                                sb.Append(token);
+                        }
+                        continue;
+                    }
+
+                    // Legacy completions streaming: choices[0].text
+                    if (choice.TryGetProperty("text", out var t) &&
+                        t.ValueKind == JsonValueKind.String)
+                    {
+                        var token = t.GetString();
+                        if (token != null)
+                            sb.Append(token);
+                        continue;
+                    }
+
+                    // Non-streaming shape in SSE: choices[0].message.content
+                    if (choice.TryGetProperty("message", out var msg) &&
+                        msg.TryGetProperty("content", out var mc) &&
+                        mc.ValueKind == JsonValueKind.String)
+                    {
+                        var token = mc.GetString();
+                        if (token != null)
+                            sb.Append(token);
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Malformed chunk — skip
+                }
+            }
+
+            // Fallback: if SSE parsing yielded nothing, try parsing raw as JSON
+            if (sb.Length == 0)
+            {
+                var raw = rawSb.ToString().Trim();
+                if (raw.StartsWith("{"))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(raw);
+                        var root = doc.RootElement;
+                        if (root.TryGetProperty("choices", out var ch) &&
+                            ch.GetArrayLength() > 0)
+                        {
+                            var choice = ch[0];
+                            if (choice.TryGetProperty("message", out var msg) &&
+                                msg.TryGetProperty("content", out var mc) &&
+                                mc.ValueKind == JsonValueKind.String)
+                                return mc.GetString() ?? "";
+                        }
+                    }
+                    catch (JsonException) { }
+                }
+
+                Console.WriteLine(
+                    $"    ⚠ SSE stream produced no content. Raw length: {raw.Length}. " +
+                    $"Preview: {raw.Substring(0, Math.Min(300, raw.Length))}");
+            }
+
+            return sb.ToString();
         }
 
 
@@ -190,6 +354,19 @@ namespace SQLAuditor.Agents
 
             var response =
                 new ScriptGenerationResponse();
+
+
+            // ==========================================
+            // STRIP THINKING BLOCKS (Qwen, DeepSeek, etc.)
+            // ==========================================
+
+            content = Regex.Replace(
+                content,
+                @"<think>.*?</think>",
+                "",
+                RegexOptions.Singleline);
+
+            content = content.Trim();
 
 
             // ==========================================
@@ -246,6 +423,27 @@ namespace SQLAuditor.Agents
                     script.Groups[1]
                     .Value
                     .Trim();
+            }
+
+            // Fallback: extract from markdown code fences when markers are absent
+            if (string.IsNullOrWhiteSpace(response.ScriptContent))
+            {
+                var codeFence =
+                    Regex.Match(
+                        content,
+                        @"```(?:sql|powershell|ps1|tsql)?\s*\r?\n(.*?)```",
+                        RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (codeFence.Success)
+                {
+                    response.ScriptContent =
+                        codeFence.Groups[1]
+                        .Value
+                        .Trim();
+
+                    Console.WriteLine(
+                        "    ⚠ ---SCRIPT_START--- markers missing, extracted script from code fence");
+                }
             }
 
 
