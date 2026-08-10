@@ -1,0 +1,10 @@
+Evaluate the following checklist item for SQL Server auditing:
+
+**Checklist ID**: {checklist_id}
+**Category**: {category}
+**Check Name**: {check_name}
+**Description**: {description}
+**Expected Outcome**: {expected_outcome}
+**Declared Scope**: {scope}
+
+Determine if this check can be validated using a SQL or PowerShell script. If yes, generate the script following the required output format (Result + Score). If no, explain why it is not feasible.

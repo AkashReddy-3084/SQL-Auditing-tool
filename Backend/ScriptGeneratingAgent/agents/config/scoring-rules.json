@@ -1,0 +1,12 @@
+{
+  "scoringSystem": {
+    "scale": "0-3",
+    "levels": [
+      { "score": 0, "label": "Fail", "description": "Check completely fails or feature not configured" },
+      { "score": 1, "label": "Partial Pass", "description": "Some configuration exists but incomplete" },
+      { "score": 2, "label": "Mostly Pass", "description": "Good but has minor gaps" },
+      { "score": 3, "label": "Pass", "description": "Fully compliant" }
+    ],
+    "binaryRule": "If no partial state is possible, score is 0 (Fail) or 3 (Pass) only"
+  }
+}
