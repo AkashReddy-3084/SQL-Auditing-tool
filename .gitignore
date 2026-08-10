@@ -30,3 +30,12 @@ x86/
 
 # Logs
 *.log
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Generated audit output
+results/
+Backend/core/results/
