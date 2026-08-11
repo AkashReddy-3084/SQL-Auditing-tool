@@ -13,6 +13,8 @@ namespace SQLAuditor.Agents
 
         private readonly HttpClient _httpClient;
 
+        private readonly HttpClient _validationHttpClient;
+
         private readonly string _baseUrl;
 
         private readonly string _apiKey;
@@ -54,6 +56,12 @@ namespace SQLAuditor.Agents
                     Timeout = TimeSpan.FromSeconds(timeoutSeconds)
                 };
 
+            _validationHttpClient =
+                new HttpClient
+                {
+                    Timeout = TimeSpan.FromSeconds(timeoutSeconds)
+                };
+
             _systemPrompt =
                 File.ReadAllText(
                     Path.Combine(
@@ -83,7 +91,8 @@ namespace SQLAuditor.Agents
         public async Task<ScriptGenerationResponse>
             GenerateScriptAsync(
                 ScriptGenChecklistItem item,
-                IProgress<string>? progress = null)
+                IProgress<string>? progress = null,
+                string? previousFailureContext = null)
         {
 
             var userPrompt =
@@ -113,6 +122,15 @@ namespace SQLAuditor.Agents
                     "{scope}",
                     item.Scope ?? "");
 
+            // On retry, append the failure context so the LLM knows what went wrong
+            if (!string.IsNullOrWhiteSpace(previousFailureContext))
+            {
+                userPrompt += "\n\n--- PREVIOUS ATTEMPT FAILED ---\n"
+                    + previousFailureContext
+                    + "\n\nGenerate the script again, correcting the issues above. "
+                    + "Ensure you include the complete script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.";
+            }
+
 
             var requestBody =
                 new
@@ -138,7 +156,7 @@ namespace SQLAuditor.Agents
 
                     top_p = 1,
 
-                    max_tokens = 4096,
+                    max_tokens = 8192,
 
                     stream = true
                 };
@@ -204,13 +222,26 @@ namespace SQLAuditor.Agents
                     $"    [Debug] LLM response length: {content.Length} chars");
 
                 bool hasMarkers = content.Contains("---SCRIPT_START---");
+                bool hasEndMarker = content.Contains("---SCRIPT_END---");
                 bool hasCodeFence = content.Contains("```");
                 bool hasThinkTag = content.Contains("<think>");
                 progress?.Report(
-                    $"    [Debug] Has SCRIPT_START: {hasMarkers} | Has code fence: {hasCodeFence} | Has <think>: {hasThinkTag}");
+                    $"    [Debug] Has SCRIPT_START: {hasMarkers} | Has SCRIPT_END: {hasEndMarker} | Has code fence: {hasCodeFence} | Has <think>: {hasThinkTag}");
             }
 
-            return ParseResponse(content);
+            var parsed = ParseResponse(content);
+
+            // Log a diagnostic preview when content was received but script extraction failed
+            if (!string.IsNullOrWhiteSpace(content) && parsed.IsFeasible && string.IsNullOrWhiteSpace(parsed.ScriptContent))
+            {
+                var preview = content.Length > 500
+                    ? content.Substring(0, 500) + "...[truncated]"
+                    : content;
+                progress?.Report(
+                    $"    ⚠ Script extraction failed despite LLM returning content. Preview:\n{preview}");
+            }
+
+            return parsed;
         }
 
 
@@ -443,6 +474,59 @@ namespace SQLAuditor.Agents
                     .Trim();
             }
 
+            // Fallback: relaxed end-marker matching (handles whitespace/dash variations)
+            if (string.IsNullOrWhiteSpace(response.ScriptContent))
+            {
+                var relaxedScript =
+                    Regex.Match(
+                        content,
+                        @"---\s*SCRIPT[_\s]START\s*---(.*?)---\s*SCRIPT[_\s]END\s*---",
+                        RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (relaxedScript.Success)
+                {
+                    response.ScriptContent =
+                        relaxedScript.Groups[1]
+                        .Value
+                        .Trim();
+
+                    Console.WriteLine(
+                        "    ⚠ Used relaxed marker matching to extract script");
+                }
+            }
+
+            // Fallback: SCRIPT_START present but no matching end-marker —
+            // take everything after the start marker
+            if (string.IsNullOrWhiteSpace(response.ScriptContent) &&
+                content.Contains("---SCRIPT_START---"))
+            {
+                var startIdx = content.IndexOf("---SCRIPT_START---") + "---SCRIPT_START---".Length;
+                var remaining = content.Substring(startIdx).Trim();
+
+                // Strip a trailing end-marker line if present in any form
+                remaining = Regex.Replace(
+                    remaining,
+                    @"\s*---.*SCRIPT.*END.*---\s*$",
+                    "",
+                    RegexOptions.IgnoreCase).Trim();
+
+                // Strip trailing metadata lines that may follow the script
+                // (e.g. stray SCOPE:, SCORING_LOGIC: lines appended after the script)
+                remaining = Regex.Replace(
+                    remaining,
+                    @"\n(SCOPE|SCORING_LOGIC|SCRIPT_NAME|SCRIPT_TYPE|FEASIBLE|REASON):.*$",
+                    "",
+                    RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+
+                if (!string.IsNullOrWhiteSpace(remaining))
+                {
+                    response.ScriptContent = remaining;
+
+                    Console.WriteLine(
+                        "    ⚠ ---SCRIPT_END--- marker missing or malformed, extracted content after ---SCRIPT_START---");
+                }
+            }
+
             // Fallback: extract from markdown code fences when markers are absent
             if (string.IsNullOrWhiteSpace(response.ScriptContent))
             {
@@ -587,6 +671,10 @@ namespace SQLAuditor.Agents
                 IProgress<string>? progress = null)
         {
 
+            // Delay before validation to avoid provider rate-limiting
+            // (the generation call just completed on the same endpoint)
+            await Task.Delay(3000);
+
             var userPrompt =
                 _validationUserPromptTemplate
 
@@ -651,7 +739,7 @@ namespace SQLAuditor.Agents
 
                     top_p = 1,
 
-                    max_tokens = 4096,
+                    max_tokens = 8192,
 
                     stream = true
                 };
@@ -679,9 +767,12 @@ namespace SQLAuditor.Agents
                             "application/json");
 
                     var response =
-                        await _httpClient.SendAsync(
+                        await _validationHttpClient.SendAsync(
                             request,
                             HttpCompletionOption.ResponseHeadersRead);
+
+                    progress?.Report(
+                        $"    [Debug] Validation HTTP status: {(int)response.StatusCode} {response.ReasonPhrase}");
 
                     response.EnsureSuccessStatusCode();
 
@@ -692,13 +783,13 @@ namespace SQLAuditor.Agents
                 }
                 catch (TaskCanceledException) when (attempt < _maxRetries)
                 {
-                    Console.WriteLine(
+                    progress?.Report(
                         $"    ⚠ Validation LLM timeout (attempt {attempt}/{_maxRetries}), retrying...");
                     await Task.Delay(attempt * 3000);
                 }
                 catch (HttpRequestException ex) when (attempt < _maxRetries)
                 {
-                    Console.WriteLine(
+                    progress?.Report(
                         $"    ⚠ Validation LLM request failed (attempt {attempt}/{_maxRetries}): {ex.Message}");
                     await Task.Delay(attempt * 3000);
                 }

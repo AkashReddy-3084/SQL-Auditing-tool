@@ -30,31 +30,34 @@ namespace SQLAuditor.Wpf
 
         public void RunGeneration(Func<IProgress<string>, CancellationToken, Task<SQLAuditor.Agents.AgentRunResult>> work)
         {
-            var progress = new Progress<string>(msg =>
-            {
-                Dispatcher.Invoke(() => HandleProgressMessage(msg));
-            });
+            // Progress<string> already marshals callbacks to the UI thread via
+            // SynchronizationContext, so the handler runs directly on the UI —
+            // no Dispatcher.Invoke needed (and using it would deadlock).
+            var progress = new Progress<string>(HandleProgressMessage);
 
             _ = Task.Run(async () =>
             {
                 try
                 {
                     var result = await work(progress, _cts.Token);
-                    Dispatcher.Invoke(() => OnComplete(result));
+                    // Use BeginInvoke (non-blocking) to avoid deadlock if the
+                    // UI thread is busy inside Window_Closing or a modal pump.
+                    Dispatcher.BeginInvoke(new Action(() => OnComplete(result)));
                 }
                 catch (OperationCanceledException)
                 {
-                    Dispatcher.Invoke(() => OnCancelled());
+                    Dispatcher.BeginInvoke(new Action(() => OnCancelled()));
                 }
                 catch (Exception ex)
                 {
-                    Dispatcher.Invoke(() => OnError(ex));
+                    Dispatcher.BeginInvoke(new Action(() => OnError(ex)));
                 }
             });
         }
 
         private void HandleProgressMessage(string msg)
         {
+            // This runs on the UI thread (marshaled by Progress<T>).
             LogBox.AppendText(msg + "\n");
             LogBox.ScrollToEnd();
 
@@ -75,7 +78,7 @@ namespace SQLAuditor.Wpf
                 _skipped++;
                 UpdateCounters();
             }
-            else if (msg.TrimStart().StartsWith("VALIDATION FAILED:", StringComparison.OrdinalIgnoreCase)
+            else if (msg.TrimStart().StartsWith("FORMAT VALIDATION FAILED:", StringComparison.OrdinalIgnoreCase)
                 || msg.TrimStart().StartsWith("CONTENT VALIDATION FAILED:", StringComparison.OrdinalIgnoreCase)
                 || msg.TrimStart().StartsWith("CORRECTED SCRIPT FORMAT INVALID:", StringComparison.OrdinalIgnoreCase)
                 || msg.TrimStart().StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
@@ -120,6 +123,7 @@ namespace SQLAuditor.Wpf
             CurrentItemText.Text = $"{result.Generated.Count} generated, {result.Skipped.Count} skipped, {result.Failed.Count} failed";
 
             ActionButton.Content = "Close";
+            ActionButton.IsEnabled = true;
             ActionButton.Background = new System.Windows.Media.SolidColorBrush(
                 (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#FF0F4C81"));
             ActionButton.BorderBrush = ActionButton.Background;
@@ -131,6 +135,7 @@ namespace SQLAuditor.Wpf
             HeaderText.Text = "Generation Cancelled";
             CurrentItemText.Text = "Cancelled by user.";
             ActionButton.Content = "Close";
+            ActionButton.IsEnabled = true;
             ActionButton.Background = new System.Windows.Media.SolidColorBrush(
                 (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#FF0F4C81"));
             ActionButton.BorderBrush = ActionButton.Background;
@@ -142,6 +147,7 @@ namespace SQLAuditor.Wpf
             HeaderText.Text = "Generation Failed";
             CurrentItemText.Text = ex.Message;
             ActionButton.Content = "Close";
+            ActionButton.IsEnabled = true;
             ActionButton.Background = new System.Windows.Media.SolidColorBrush(
                 (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#FF0F4C81"));
             ActionButton.BorderBrush = ActionButton.Background;
@@ -156,6 +162,7 @@ namespace SQLAuditor.Wpf
             }
             else
             {
+                // Signal cancellation and update UI immediately
                 _cts.Cancel();
                 ActionButton.IsEnabled = false;
                 ActionButton.Content = "Cancelling...";
@@ -167,8 +174,11 @@ namespace SQLAuditor.Wpf
         {
             if (!_isComplete)
             {
-                // Block close while running — force user to click Cancel
-                e.Cancel = true;
+                // Don't block close — just trigger cancellation and let the
+                // background work finish. Blocking here causes a deadlock
+                // because the background thread's BeginInvoke needs the UI thread.
+                _cts.Cancel();
+                _isComplete = true;
             }
         }
     }

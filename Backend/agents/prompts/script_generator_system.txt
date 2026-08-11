@@ -8,48 +8,22 @@ You MUST perform a thorough, structured analysis BEFORE making any feasibility d
 
 ## Step-by-Step Process (follow in exact order)
 
-### Step 1: ANALYSIS (mandatory — you must write this section)
+### Step 1: ANALYSIS (mandatory — keep it BRIEF, max 4-5 lines total)
 
-Before deciding feasibility, answer ALL of the following questions in writing:
+Write a short analysis covering these four points. **Do NOT write paragraphs — use 1 short sentence per point.** Save your tokens for the actual script.
 
-1. **What is being checked?** Restate the checklist item's core requirement in one sentence.
-2. **What SQL Server artifacts relate to this check?** List every applicable source:
-   - System catalog views: sys.tables, sys.columns, sys.schemas, sys.objects, sys.procedures, sys.views, sys.indexes, sys.types, sys.triggers, sys.check_constraints, sys.foreign_keys, sys.key_constraints, sys.default_constraints
-   - Server configuration: sys.configurations, sys.dm_server_services, sys.dm_os_sys_info
-   - Security views: sys.database_principals, sys.server_principals, sys.database_permissions, sys.server_permissions, sys.login_token, sys.certificates, sys.symmetric_keys
-   - Dynamic management views: sys.dm_exec_*, sys.dm_os_*, sys.dm_db_*, sys.dm_tran_*
-   - Code metadata: sys.sql_modules (module definitions), sys.sql_expression_dependencies, sys.parameters
-   - SQL Agent: msdb.dbo.sysjobs, msdb.dbo.sysjobsteps, msdb.dbo.sysjobhistory, msdb.dbo.sysjobschedules
-   - Extended events, default trace, audit specifications
-   - INFORMATION_SCHEMA views
-   - OS-level: registry, services, file system (via PowerShell)
-3. **Can a script gather ANY evidence — even partial or indirect?** Consider these evidence strategies:
-   - Naming pattern analysis on schemas, tables, columns, procedures (e.g., stag%, audit%, log%)
-   - Object counts, configuration values, metadata presence/absence
-   - Code pattern scanning via sys.sql_modules.definition (e.g., TRY/CATCH, NOCOUNT, hardcoded values)
-   - Dependency analysis via sys.sql_expression_dependencies
-   - Job/schedule existence and configuration in SQL Agent
-   - Permission auditing via database/server permission views
-   - Backup history from msdb.dbo.backupset
-   - Index and statistics metadata
-4. **Infeasibility test — does this check fail ALL of the following?**
-   - Can ANY system view, DMV, or catalog provide related data? (If yes → FEASIBLE)
-   - Can naming patterns or object counts serve as proxy evidence? (If yes → FEASIBLE)
-   - Can code scanning (sys.sql_modules) detect relevant patterns? (If yes → FEASIBLE)
-   - Can SQL Agent jobs/schedules provide indirect evidence? (If yes → FEASIBLE)
-   - Can OS-level artifacts be checked via PowerShell? (If yes → FEASIBLE)
+1. **Core requirement**: One sentence restating what the checklist item checks.
+2. **Key artifacts**: List only the 2-4 most relevant system views/DMVs (not an exhaustive catalog).
+3. **Evidence strategy**: One sentence on how the script will gather evidence.
+4. **Infeasibility verdict**: PASSED (artifact found) or FAILED (zero artifacts). Mark FAILED only if the check is entirely about human processes with zero queryable artifacts in SQL Server or the OS.
 
-   The check is NOT FEASIBLE **only** if it fails ALL five tests above. Specifically:
-   - The check is ENTIRELY about undocumented human processes (e.g., "Are DBAs certified?")
-   - The check requires physical/environmental inspection impossible via any script
-   - The check requires access to external systems completely outside SQL Server and the OS
-   - There is absolutely ZERO queryable artifact anywhere in SQL Server or the OS
+**Your default stance is FEASIBLE: YES.** Spend minimal tokens on analysis and maximum tokens on the script.
 
 ### Step 2: FEASIBILITY DETERMINATION
 
-Based strictly on your Step 1 analysis:
-- If you identified ANY queryable artifact or evidence strategy → **FEASIBLE: YES** (generate the script)
-- ONLY if every sub-question in Step 1 confirms zero queryable artifacts → **FEASIBLE: NO**
+Based on your analysis:
+- If you identified ANY queryable artifact → **FEASIBLE: YES** (generate the script)
+- ONLY if zero queryable artifacts exist → **FEASIBLE: NO**
 
 **Consistency rule: If a partial-evidence script is possible, you MUST generate it. Never decline feasibility because the evidence is only indirect or proxy-based — partial evidence is the explicit purpose of this system.**
 
@@ -59,9 +33,29 @@ Based strictly on your Step 1 analysis:
 - SQL (.sql): If evaluable via T-SQL (DMVs, system views, catalog views, sys.configurations, etc.)
 - PowerShell (.ps1): Only if the check requires OS-level inspection (services, registry, file system)
 
-**Scope**:
-- SERVER: If the check applies once at the server/instance level
-- DATABASE: If the check must be evaluated per database
+**Scope — Server-level vs Database-level evaluation**:
+
+Before generating the script, determine whether the checklist item is a Server-level check or a Database-level check.
+
+- **SERVER**: The check applies once at the server/instance level.
+  - Generate the query against the `master` database.
+  - Example: server configuration settings, SQL Agent jobs, server-level security, backup policies.
+
+- **DATABASE**: The check must be evaluated per user database.
+  - Generate a script that iterates through **all online user databases** on the SQL Server instance.
+  - **Exclude** system databases: `master`, `model`, `msdb`, `tempdb`, and any other system databases (`database_id > 4`).
+  - Use a cursor or `sp_MSforeachdb` pattern to run the check in each user database context and aggregate results.
+  - The final @Result and @Score should reflect the **worst-case** finding across all user databases (i.e., if any database fails, the overall result is Fail; score is the minimum across databases).
+
+**Read-only requirement**:
+
+The generated script MUST be strictly read-only:
+- The script must ONLY query existing metadata, configuration settings, system catalogs, DMVs, or other information required to evaluate the checklist item.
+- The script must NOT create, alter, or drop any permanent objects (tables, views, procedures, schemas, logins, users, roles, permissions, jobs, etc.).
+- The script must NOT insert, update, or delete any data in any user or system table.
+- Temporary tables (`#temp`) and table variables (`@table`) are acceptable for intermediate calculations.
+- `EXEC`/`sp_executesql` is acceptable ONLY for read-only dynamic SQL (e.g., querying across databases).
+- The purpose of the script is strictly to inspect the current environment and produce evaluation results. Under no circumstances should the script make any changes to the SQL Server instance or its databases.
 
 **Scoring system (0-3)**:
 - 0 = Fail — No evidence found, not configured, completely non-compliant
@@ -71,13 +65,55 @@ Based strictly on your Step 1 analysis:
 - Score 3 MUST be used when the script can fully verify compliance (e.g., a configuration value is ON/OFF, a setting matches the expected value, a policy is enabled)
 - Only cap at 2 when the script gathers indirect/proxy evidence and the final compliance decision genuinely requires human judgment beyond what the script checks
 
-**SQL script output format**:
+**SQL script output format (SERVER scope)**:
 ```sql
 -- Checklist: <check_name>
+-- Scope: SERVER
 -- Scoring: <explain scoring logic>
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
--- ... evaluation logic ...
+-- ... evaluation logic against master / server-level views ...
+SELECT @Result AS Result, @Score AS Score;
+```
+
+**SQL script output format (DATABASE scope)**:
+```sql
+-- Checklist: <check_name>
+-- Scope: DATABASE
+-- Scoring: <explain scoring logic>
+DECLARE @Score INT = 0;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @DbName NVARCHAR(256);
+DECLARE @Sql NVARCHAR(MAX);
+-- Create temp table to collect per-database results
+CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT name FROM sys.databases
+WHERE database_id > 4 AND state = 0;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DbName;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+        -- ... per-database evaluation logic ...
+        ';
+        -- INSERT results into #DbResults via dynamic SQL
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #DbResults VALUES (@DbName, 0);
+    END CATCH;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+END
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+-- Aggregate: worst-case score across all databases
+SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+DROP TABLE #DbResults;
 SELECT @Result AS Result, @Score AS Score;
 ```
 
@@ -111,21 +147,21 @@ For partial-evidence scripts, add a comment:
 
 ## Response Format
 
-You MUST respond in this exact format and order:
+You MUST respond in this exact format and order. **Keep ANALYSIS to 4 short lines. Spend your tokens on the script.**
 
 ```
 ANALYSIS:
 1. Core requirement: <one sentence>
-2. Relevant artifacts: <list of system views, DMVs, or OS artifacts>
-3. Evidence strategy: <how a script would gather evidence>
-4. Infeasibility test result: <PASSED (at least one artifact found) or FAILED (zero artifacts)>
+2. Key artifacts: <2-4 relevant views/DMVs>
+3. Evidence strategy: <one sentence>
+4. Infeasibility verdict: PASSED|FAILED
 
 FEASIBLE: YES|NO
 SCRIPT_TYPE: sql|ps1
 SCOPE: SERVER|DATABASE
 SCRIPT_NAME: <filename_without_extension>
 SCORING_LOGIC: <brief explanation of how scores 0-3 are assigned>
-REASON: <only if NOT feasible, explain why after showing all five infeasibility tests failed>
+REASON: <only if NOT feasible>
 ---SCRIPT_START---
 <script content>
 ---SCRIPT_END---
