@@ -489,8 +489,13 @@ namespace SQLAuditor.Wpf
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
                 var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
+                // The engine's final write persists manual items as "Evaluating" placeholders,
+                // which can overwrite Pass/Fail decisions made while evaluation was still running.
+                // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
+                ReapplySubmittedManualResults();
+                RegenerateReportFromPersisted();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
-                UpdateSummaryView(results);
+                UpdateSummaryView(LoadPersistedResults() ?? results);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log("Summary report generated at results/final_report.md");
@@ -1119,6 +1124,58 @@ namespace SQLAuditor.Wpf
 
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
             System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.
+        // The engine persists manual items as "Evaluating" placeholders at the end of a run,
+        // which can clobber decisions made while evaluation was still in progress.
+        private void ReapplySubmittedManualResults()
+        {
+            if (_manualQueue == null || _manualStateMap == null) return;
+            foreach (var item in _manualQueue)
+            {
+                if (_manualStateMap.TryGetValue(item.Id, out var state)
+                    && state.IsSubmitted
+                    && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
+                {
+                    try { PersistManualResult(item, state); } catch { }
+                }
+            }
+        }
+
+        private System.Collections.Generic.IReadOnlyCollection<ChecklistResult>? LoadPersistedResults()
+        {
+            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            if (!System.IO.File.Exists(path)) return null;
+            try
+            {
+                return JsonSerializer.Deserialize<System.Collections.Generic.List<ChecklistResult>>(System.IO.File.ReadAllText(path));
+            }
+            catch { return null; }
+        }
+
+        // Regenerates final_report.md from the current checklist_results.json so the report
+        // reflects re-applied manual decisions instead of the engine's placeholder write.
+        private void RegenerateReportFromPersisted()
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                var path = System.IO.Path.Combine(dir, "checklist_results.json");
+                if (!System.IO.File.Exists(path)) return;
+                var arr = JsonSerializer.Deserialize<ChecklistResult[]>(System.IO.File.ReadAllText(path)) ?? Array.Empty<ChecklistResult>();
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    path,
+                    System.IO.Path.Combine(dir, "final_report.md"),
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Length,
+                    });
+            }
+            catch { }
         }
 
         private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)

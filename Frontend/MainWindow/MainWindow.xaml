@@ -5,8 +5,9 @@
         Title="SQL Auditor"
         Height="880"
         Width="1480"
-        MinHeight="780"
-        MinWidth="1280"
+        MinHeight="600"
+        MinWidth="1024"
+        WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="#FFF4F7FB"
         FontFamily="Segoe UI Variable Text, Segoe UI, Segoe UI">
@@ -67,6 +68,9 @@
             <Setter Property="Margin" Value="0" />
             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto" />
+            <!-- Pixel-based scrolling so the horizontal scrollbar pans wide item text. -->
+            <Setter Property="ScrollViewer.CanContentScroll" Value="False" />
+            <Setter Property="VirtualizingStackPanel.IsVirtualizing" Value="False" />
         </Style>
 
         <Style TargetType="ListBox">
@@ -243,8 +247,8 @@
                     <Grid Margin="4">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="*" />
-                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="4*" />
+                            <RowDefinition Height="1*" />
                         </Grid.RowDefinitions>
 
                         <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,16">
@@ -263,18 +267,16 @@
                             <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
                                     <TextBlock DockPanel.Dock="Top" Text="Checklist (select items to evaluate)" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
-                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PanningMode="Both">
-                                        <TreeView x:Name="ChecklistTree" />
-                                    </ScrollViewer>
+                                    <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
+                                    <TreeView x:Name="ChecklistTree" />
                                 </DockPanel>
                             </Border>
 
                             <Border Grid.Column="2" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
                                     <TextBlock DockPanel.Dock="Top" Text="Mapping Preview" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
-                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PanningMode="Both">
-                                        <TreeView x:Name="MappingTree" />
-                                    </ScrollViewer>
+                                    <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
+                                    <TreeView x:Name="MappingTree" />
                                 </DockPanel>
                             </Border>
                         </Grid>
@@ -282,15 +284,15 @@
                         <Border Grid.Row="2" Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,18,0,0">
                             <DockPanel>
                                 <TextBlock DockPanel.Dock="Top" Text="Live Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,10" />
-                                <TextBox x:Name="UiLogBox" Height="140" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+                                <TextBox x:Name="UiLogBox" MinHeight="90" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
                             </DockPanel>
                         </Border>
                     </Grid>
                 </TabItem>
 
                 <TabItem Header="3  Evaluate" x:Name="EvalTab">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalFirst">
-                        <Grid Margin="4">
+                    <!-- No outer ScrollViewer: keeps the tab height-bounded so each panel's TreeView scrolls with its own built-in ScrollViewer (consistent with the Checklist panel). -->
+                    <Grid Margin="4,4,4,16">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="1.05*" />
                                 <ColumnDefinition Width="24" />
@@ -300,9 +302,12 @@
                             <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
                                     <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
-                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
-                                        <TreeView x:Name="EvalTree" />
-                                    </ScrollViewer>
+                                    <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
+                                    <TreeView x:Name="EvalTree" Margin="0,0,0,6"
+                                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                              ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                              ScrollViewer.CanContentScroll="False"
+                                              VirtualizingStackPanel.IsVirtualizing="False" />
                                 </DockPanel>
                             </Border>
 
@@ -317,9 +322,9 @@
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="4*" />
                                             <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="1*" />
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
@@ -334,12 +339,13 @@
 
                                         <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Text="Manual Evaluation Guidance" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
 
-                                        <ScrollViewer Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" VerticalScrollBarVisibility="Auto" MaxHeight="300">
+                                        <!-- Guidance fills the available height (row 2 = *) with its own scrollbar; low MinHeight so it compresses at higher display scaling without clipping. -->
+                                        <ScrollViewer Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" VerticalScrollBarVisibility="Auto" MinHeight="120">
                                             <TextBlock x:Name="ManualStepsText" Text="" TextWrapping="Wrap" FontSize="14" LineHeight="22" />
                                         </ScrollViewer>
 
                                         <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Input / Evidence" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
-                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" Height="130" TextWrapping="Wrap" AcceptsReturn="True" TextChanged="ManualOutputBox_TextChanged" />
+                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="ManualOutputBox_TextChanged" />
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
                                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
@@ -355,7 +361,6 @@
                                 </Border>
                             </Grid>
                         </Grid>
-                    </ScrollViewer>
                 </TabItem>
 
                 <TabItem Header="4  Summary" x:Name="SummaryTab">
