@@ -107,14 +107,52 @@ namespace SQLAuditor.Lib
     public class Auditor
     {
         private string _connectionString;
-        private readonly SqlServerMcpEvaluator _mcpEvaluator;
-        private readonly ManualStepsGenerator _manualStepsGenerator;
+        private SqlServerMcpEvaluator? _mcpEvaluator;
+        private ManualStepsGenerator? _manualStepsGenerator;
 
         public Auditor(string connectionString)
         {
             _connectionString = connectionString;
-            _mcpEvaluator = SqlServerMcpEvaluator.CreateFromEnvironment();
-            _manualStepsGenerator = ManualStepsGenerator.CreateFromEnvironment();
+            // Evaluators are created tolerantly so the auditor can be built for SQL-only
+            // operations (connection verification, checklist loading) before the user has
+            // supplied LLM settings at runtime.
+            EnsureLlmEvaluators();
+        }
+
+        // Creates the LLM evaluators if they don't exist yet. Safe to call repeatedly;
+        // it is a no-op once the evaluators exist and silently skips when LLM settings
+        // are not yet configured.
+        public void EnsureLlmEvaluators()
+        {
+            try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
+            try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
+        }
+
+        // Supplies LLM provider settings at runtime (from the UI). Not persisted to disk;
+        // these values take precedence over any .env or environment variables.
+        public static void SetLlmConfig(string baseUrl, string apiKey, string model)
+            => ProviderConfig.SetRuntime(baseUrl, apiKey, model);
+
+        // Verifies the currently-configured LLM provider by issuing a minimal request.
+        public static async Task<(bool Ok, string Message)> VerifyLlmAsync(System.Threading.CancellationToken cancellationToken = default)
+        {
+            string baseUrl, apiKey, model;
+            try { baseUrl = ProviderConfig.BaseUrl; apiKey = ProviderConfig.ApiKey; model = ProviderConfig.Model; }
+            catch (Exception ex) { return (false, ex.Message); }
+
+            try
+            {
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+                var body = new { model, max_tokens = 1, messages = new[] { new { role = "user", content = "ping" } } };
+                using var content = new System.Net.Http.StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
+                using var resp = await http.PostAsync(baseUrl + "/chat/completions", content, cancellationToken);
+                if (resp.IsSuccessStatusCode) return (true, $"Connected to model '{model}'.");
+                var txt = await resp.Content.ReadAsStringAsync(cancellationToken);
+                if (txt.Length > 300) txt = txt.Substring(0, 300);
+                return (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {txt}");
+            }
+            catch (Exception ex) { return (false, ex.Message); }
         }
 
         // --- Remaining methods omitted for brevity; this Auditor is a lightweight stub for UI testing ---
@@ -526,6 +564,8 @@ namespace SQLAuditor.Lib
 
         public async Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default)
         {
+            // Ensure LLM evaluators reflect any runtime configuration provided after construction.
+            EnsureLlmEvaluators();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
 
@@ -625,7 +665,7 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                if (!string.IsNullOrWhiteSpace(_connectionString))
+                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString))
                 {
                     try
                     {
@@ -972,6 +1012,7 @@ namespace SQLAuditor.Lib
 
         public async Task<ChecklistResult?> TryEvaluateViaMcpAsync(ChecklistItem item)
         {
+            if (_mcpEvaluator == null) return null;
             return await _mcpEvaluator.EvaluateAsync(item, _connectionString);
         }
 
@@ -979,11 +1020,13 @@ namespace SQLAuditor.Lib
 
         public async Task<bool> IsAgentAvailableAsync(int timeoutMs = 5000)
         {
+            if (_mcpEvaluator == null) return false;
             return await _mcpEvaluator.IsAvailableAsync(timeoutMs);
         }
 
         public (string Provider, string Model, string Endpoint) GetAgentDetails()
         {
+            if (_mcpEvaluator == null) return (string.Empty, string.Empty, string.Empty);
             return (_mcpEvaluator.ProviderName, _mcpEvaluator.ModelName, _mcpEvaluator.Endpoint);
         }
 
@@ -997,13 +1040,16 @@ namespace SQLAuditor.Lib
         {
             try
             {
-                var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
-                if (!string.IsNullOrWhiteSpace(slm.Instructions))
+                if (_manualStepsGenerator != null)
                 {
-                    return slm;
-                }
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(slm.Instructions))
+                    {
+                        return slm;
+                    }
 
-                LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
+                    LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
+                }
             }
             catch (Exception ex)
             {

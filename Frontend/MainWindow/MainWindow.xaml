@@ -211,35 +211,58 @@
         <Border Grid.Row="1" Style="{StaticResource CardBorder}">
             <TabControl x:Name="MainTabs" PreviewMouseDown="MainTabs_PreviewMouseDown" Background="Transparent" BorderThickness="0" Style="{StaticResource BodyTabControl}">
                 <TabItem Header="1  Login">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalFirst">
-                        <Grid Margin="4">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                            </Grid.RowDefinitions>
-                            <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="760">
-                                <StackPanel>
-                                    <TextBlock Text="Connect to SQL Server" FontSize="24" FontWeight="Bold" />
-                                    <TextBlock Text="Enter the SQL Server FQDN and authentication details to verify access." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" />
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PanningMode="Both">
+                        <StackPanel Margin="4" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
 
-                                    <TextBlock Text="SQL Server FQDN" FontWeight="SemiBold" Margin="0,0,0,6" />
-                                    <TextBox x:Name="FqdnText" Width="520" />
+                                <!-- LLM provider card (left) -->
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" VerticalAlignment="Top" Width="420" Margin="0,0,24,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Connect to LLM Provider" FontSize="24" FontWeight="Bold" />
+                                        <TextBlock Text="Enter the LLM provider details and verify access." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" TextWrapping="Wrap" />
 
-                                    <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
-                                    <StackPanel Orientation="Horizontal">
-                                        <ComboBox x:Name="AuthMethodCombo" Width="220">
+                                        <TextBlock Text="Provider Base URL" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                        <TextBox x:Name="LlmBaseUrlText" />
+
+                                        <TextBlock Text="API Key" FontWeight="SemiBold" Margin="0,14,0,6" />
+                                        <PasswordBox x:Name="LlmApiKeyBox" />
+
+                                        <TextBlock Text="Model Name" FontWeight="SemiBold" Margin="0,14,0,6" />
+                                        <TextBox x:Name="LlmModelText" />
+
+                                        <TextBlock x:Name="LlmAccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <Button x:Name="VerifyLlmBtn" Content="Verify LLM Access" Style="{StaticResource ModernButton}" Width="200" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyLlmBtn_Click" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- SQL Server card (right) -->
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" VerticalAlignment="Top" Width="420">
+                                    <StackPanel>
+                                        <TextBlock Text="Connect to SQL Server" FontSize="24" FontWeight="Bold" />
+                                        <TextBlock Text="Enter the SQL Server FQDN and authentication details to verify access." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" TextWrapping="Wrap" />
+
+                                        <TextBlock Text="SQL Server FQDN" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                        <TextBox x:Name="FqdnText" />
+
+                                        <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
+                                        <ComboBox x:Name="AuthMethodCombo" Width="220" HorizontalAlignment="Left">
                                             <ComboBoxItem IsSelected="True">Windows Authentication</ComboBoxItem>
                                             <ComboBoxItem>SQL Login</ComboBoxItem>
                                         </ComboBox>
-                                        <TextBox x:Name="SqlUserBox" Width="180" Margin="12,0,0,0" Visibility="Collapsed" />
-                                        <PasswordBox x:Name="SqlPassBox" Width="180" Margin="12,0,0,0" Visibility="Collapsed" />
-                                    </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                            <TextBox x:Name="SqlUserBox" Width="170" Visibility="Collapsed" />
+                                            <PasswordBox x:Name="SqlPassBox" Width="170" Margin="12,0,0,0" Visibility="Collapsed" />
+                                        </StackPanel>
 
-                                    <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" />
-                                    <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" Click="VerifyBtn_Click" />
-                                </StackPanel>
-                            </Border>
-                        </Grid>
+                                        <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- Only this button navigates to the Checklist page; enabled once both connections verify. -->
+                            <Button x:Name="StartEvaluationBtn" Content="Start Evaluation" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
+                        </StackPanel>
                     </ScrollViewer>
                 </TabItem>
 
