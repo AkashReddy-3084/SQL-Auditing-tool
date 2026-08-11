@@ -7,17 +7,36 @@ internal static class ProviderConfig
 {
     private const int DefaultTimeoutSeconds = 240;
 
+    // Runtime overrides supplied via the UI. When set they take precedence over both
+    // .env and ambient environment variables, so a .env file is not required.
+    private static string? _baseUrlOverride;
+    private static string? _apiKeyOverride;
+    private static string? _modelOverride;
+
     static ProviderConfig()
     {
         var path = ResolveEnvFile();
         if (path != null) LoadEnvFile(path);
     }
 
-    public static string BaseUrl => Require("PROVIDER_BASE_URL").TrimEnd('/');
+    // Supplies LLM provider settings at runtime (from the UI). Not persisted to disk.
+    public static void SetRuntime(string baseUrl, string apiKey, string model)
+    {
+        _baseUrlOverride = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim();
+        _apiKeyOverride = string.IsNullOrWhiteSpace(apiKey) ? null : apiKey.Trim();
+        _modelOverride = string.IsNullOrWhiteSpace(model) ? null : model.Trim();
+    }
 
-    public static string ApiKey => Require("PROVIDER_API_KEY");
+    public static bool HasRuntimeConfig =>
+        !string.IsNullOrWhiteSpace(_baseUrlOverride)
+        && !string.IsNullOrWhiteSpace(_apiKeyOverride)
+        && !string.IsNullOrWhiteSpace(_modelOverride);
 
-    public static string Model => Require("MODEL");
+    public static string BaseUrl => (_baseUrlOverride ?? Require("PROVIDER_BASE_URL")).TrimEnd('/');
+
+    public static string ApiKey => _apiKeyOverride ?? Require("PROVIDER_API_KEY");
+
+    public static string Model => _modelOverride ?? Require("MODEL");
 
     public static TimeSpan Timeout
     {
