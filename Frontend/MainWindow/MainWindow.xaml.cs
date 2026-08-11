@@ -1577,27 +1577,42 @@ namespace SQLAuditor.Wpf
 
                 Log($"Starting script generation for {selectedItems.Count} items...");
 
-                var cts = new System.Threading.CancellationTokenSource();
-                var progress = new Progress<string>(msg => Log(msg));
+                var llmTimeoutCopy = llmTimeout;
+                var llmBaseUrlCopy = llmBaseUrl;
+                var llmApiKeyCopy = llmApiKey;
+                var llmModelCopy = llmModel;
+                var basePathCopy = basePath;
 
-                var processor = new SQLAuditor.Agents.ChecklistItemProcessor(
-                    llmBaseUrl, llmApiKey, llmModel, promptsDir, llmTimeout, maxRetries: 3);
-                var validator = new SQLAuditor.Agents.ScriptOutputValidator();
-                var agent = new SQLAuditor.Agents.ScriptGeneratorAgent(processor, validator, basePath);
+                var progressWindow = new ScriptGenerationProgressWindow(selectedItems.Count);
+                progressWindow.Owner = this;
 
-                var result = await Task.Run(() => agent.RunAsync(progress, selectedItems, cts.Token));
-
-                Log($"Script generation complete — Generated: {result.Generated.Count}, Skipped: {result.Skipped.Count}, Failed: {result.Failed.Count}");
-
-                if (result.Skipped.Count > 0)
+                progressWindow.RunGeneration(async (progress, ct) =>
                 {
-                    var skippedMsg = string.Join("\n", result.Skipped.Select(s => $"  {s.ChecklistId}: {s.Reason}"));
-                    Log($"Skipped items:\n{skippedMsg}");
-                }
+                    var processor = new SQLAuditor.Agents.ChecklistItemProcessor(
+                        llmBaseUrlCopy, llmApiKeyCopy, llmModelCopy, promptsDir, llmTimeoutCopy, maxRetries: 3);
+                    var validator = new SQLAuditor.Agents.ScriptOutputValidator();
+                    var agent = new SQLAuditor.Agents.ScriptGeneratorAgent(processor, validator, basePathCopy);
 
-                MessageBox.Show(this,
-                    $"Script generation complete.\n\nGenerated: {result.Generated.Count}\nSkipped: {result.Skipped.Count}\nFailed: {result.Failed.Count}\n\nScripts saved under Backend/checklist/scripts/",
-                    "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return await agent.RunAsync(progress, selectedItems, ct);
+                });
+
+                progressWindow.ShowDialog();
+
+                var result = progressWindow.Result;
+                if (result != null)
+                {
+                    Log($"Script generation complete — Generated: {result.Generated.Count}, Skipped: {result.Skipped.Count}, Failed: {result.Failed.Count}");
+
+                    if (result.Skipped.Count > 0)
+                    {
+                        var skippedMsg = string.Join("\n", result.Skipped.Select(s => $"  {s.ChecklistId}: {s.Reason}"));
+                        Log($"Skipped items:\n{skippedMsg}");
+                    }
+                }
+                else
+                {
+                    Log("Script generation was cancelled.");
+                }
             }
             catch (Exception ex)
             {
