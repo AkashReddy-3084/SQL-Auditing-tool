@@ -1,0 +1,19 @@
+Review the following generated audit script for correctness and relevance to the checklist item it is meant to validate:
+
+**Checklist ID**: {checklist_id}
+**Category**: {category}
+**Check Name**: {check_name}
+**Description**: {description}
+**Expected Outcome**: {expected_outcome}
+**Script Type**: {script_type}
+**Scope**: {scope}
+**Scoring Logic**: {scoring_logic}
+
+**Generated Script** (between markers):
+---SCRIPT_TO_VALIDATE_START---
+{script_content}
+---SCRIPT_TO_VALIDATE_END---
+
+Validate this script against ALL criteria (relevance, correctness, output format, scoring logic, safety, robustness) and return your verdict.
+
+If the script is INVALID and the issues are fixable, you MUST provide the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- markers. The corrected script must be a complete, working replacement — not a partial diff.

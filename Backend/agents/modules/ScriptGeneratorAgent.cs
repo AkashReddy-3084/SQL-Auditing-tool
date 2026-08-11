@@ -203,7 +203,105 @@ namespace SQLAuditor.Agents
 
 
                     // ==========================================
-                    // STEP 3 - SAVE SCRIPT TO DISK
+                    // STEP 3 - VALIDATE SCRIPT CONTENT VIA LLM
+                    // ==========================================
+
+                    progress?.Report($"  Validating script content via LLM...");
+
+                    var contentValidation =
+                        await _processor
+                            .ValidateScriptAsync(
+                                item, response, progress);
+
+                    if (!contentValidation.IsValid)
+                    {
+                        if (!string.IsNullOrWhiteSpace(
+                            contentValidation.CorrectedScript))
+                        {
+                            progress?.Report(
+                                $"  Script had issues, using corrected version from validator.");
+
+                            response.ScriptContent =
+                                contentValidation.CorrectedScript;
+
+                            // Re-validate corrected script format
+                            var revalidation =
+                                _validator.Validate(response);
+
+                            if (!revalidation.IsValid)
+                            {
+                                progress?.Report(
+                                    $"  CORRECTED SCRIPT FORMAT INVALID: {revalidation.Error}");
+
+                                runResult.Failed.Add(
+                                    item.ChecklistId);
+
+                                _executionResults.Add(
+                                    new ExecutionResultEntry
+                                    {
+                                        ChecklistId =
+                                            item.ChecklistId,
+
+                                        CheckName =
+                                            item.CheckName,
+
+                                        Category =
+                                            item.Category,
+
+                                        Status =
+                                            "Corrected Script Validation Failed",
+
+                                        Reason =
+                                            revalidation.Error
+                                    });
+
+                                await WriteResultsIteratively();
+                                continue;
+                            }
+
+                            progress?.Report(
+                                $"  ✓ Corrected script passed format validation");
+                        }
+                        else
+                        {
+                            progress?.Report(
+                                $"  CONTENT VALIDATION FAILED: {contentValidation.Issues}");
+
+                            runResult.Failed.Add(
+                                item.ChecklistId);
+
+                            _executionResults.Add(
+                                new ExecutionResultEntry
+                                {
+                                    ChecklistId =
+                                        item.ChecklistId,
+
+                                    CheckName =
+                                        item.CheckName,
+
+                                    Category =
+                                        item.Category,
+
+                                    Status =
+                                        "Content Validation Failed",
+
+                                    Reason =
+                                        contentValidation.Issues
+                                });
+
+                            await WriteResultsIteratively();
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        progress?.Report(
+                            $"  ✓ Script content validated successfully");
+                    }
+
+
+                    // ==========================================
+                    // STEP 4 - SAVE SCRIPT TO DISK
                     // ==========================================
 
                     var filename =
@@ -228,7 +326,7 @@ namespace SQLAuditor.Agents
 
 
                     // ==========================================
-                    // STEP 4 - RECORD MAPPING
+                    // STEP 5 - RECORD MAPPING
                     // ==========================================
 
                     _mappings.Add(
@@ -258,7 +356,7 @@ namespace SQLAuditor.Agents
 
 
                     // ==========================================
-                    // STEP 5 - RECORD RESULT
+                    // STEP 6 - RECORD RESULT
                     // ==========================================
 
                     _executionResults.Add(

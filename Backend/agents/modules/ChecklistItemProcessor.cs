@@ -25,6 +25,10 @@ namespace SQLAuditor.Agents
 
         private readonly int _maxRetries;
 
+        private readonly string _validationSystemPrompt;
+
+        private readonly string _validationUserPromptTemplate;
+
 
         public ChecklistItemProcessor(
             string baseUrl,
@@ -61,6 +65,18 @@ namespace SQLAuditor.Agents
                     Path.Combine(
                         promptsDir,
                         "script_generator_user.txt"));
+
+            _validationSystemPrompt =
+                File.ReadAllText(
+                    Path.Combine(
+                        promptsDir,
+                        "script_validation_system.txt"));
+
+            _validationUserPromptTemplate =
+                File.ReadAllText(
+                    Path.Combine(
+                        promptsDir,
+                        "script_validation_user.txt"));
         }
 
 
@@ -118,7 +134,9 @@ namespace SQLAuditor.Agents
                         }
                     },
 
-                    temperature = 0.2,
+                    temperature = 0.1,
+
+                    top_p = 1,
 
                     max_tokens = 4096,
 
@@ -559,6 +577,229 @@ namespace SQLAuditor.Agents
 
 
             return response;
+        }
+
+
+        public async Task<ScriptValidationResult>
+            ValidateScriptAsync(
+                ScriptGenChecklistItem item,
+                ScriptGenerationResponse generatedScript,
+                IProgress<string>? progress = null)
+        {
+
+            var userPrompt =
+                _validationUserPromptTemplate
+
+                .Replace(
+                    "{checklist_id}",
+                    item.ChecklistId)
+
+                .Replace(
+                    "{category}",
+                    item.Category)
+
+                .Replace(
+                    "{check_name}",
+                    item.CheckName)
+
+                .Replace(
+                    "{description}",
+                    item.Description)
+
+                .Replace(
+                    "{expected_outcome}",
+                    item.ExpectedOutcome)
+
+                .Replace(
+                    "{script_type}",
+                    generatedScript.ScriptType ?? "")
+
+                .Replace(
+                    "{scope}",
+                    generatedScript.Scope ?? "")
+
+                .Replace(
+                    "{scoring_logic}",
+                    generatedScript.ScoringLogic ?? "")
+
+                .Replace(
+                    "{script_content}",
+                    generatedScript.ScriptContent ?? "");
+
+
+            var requestBody =
+                new
+                {
+                    model = _model,
+
+                    messages = new[]
+                    {
+                        new
+                        {
+                            role = "system",
+                            content = _validationSystemPrompt
+                        },
+
+                        new
+                        {
+                            role = "user",
+                            content = userPrompt
+                        }
+                    },
+
+                    temperature = 0.1,
+
+                    top_p = 1,
+
+                    max_tokens = 4096,
+
+                    stream = true
+                };
+
+
+            string content = "";
+
+            for (int attempt = 1; attempt <= _maxRetries; attempt++)
+            {
+                try
+                {
+                    var request =
+                        new HttpRequestMessage(
+                            HttpMethod.Post,
+                            $"{_baseUrl}/chat/completions");
+
+                    request.Headers.Add(
+                        "Authorization",
+                        $"Bearer {_apiKey}");
+
+                    request.Content =
+                        new StringContent(
+                            JsonSerializer.Serialize(requestBody),
+                            Encoding.UTF8,
+                            "application/json");
+
+                    var response =
+                        await _httpClient.SendAsync(
+                            request,
+                            HttpCompletionOption.ResponseHeadersRead);
+
+                    response.EnsureSuccessStatusCode();
+
+                    content =
+                        await ReadSseStreamAsync(response);
+
+                    break;
+                }
+                catch (TaskCanceledException) when (attempt < _maxRetries)
+                {
+                    Console.WriteLine(
+                        $"    ⚠ Validation LLM timeout (attempt {attempt}/{_maxRetries}), retrying...");
+                    await Task.Delay(attempt * 3000);
+                }
+                catch (HttpRequestException ex) when (attempt < _maxRetries)
+                {
+                    Console.WriteLine(
+                        $"    ⚠ Validation LLM request failed (attempt {attempt}/{_maxRetries}): {ex.Message}");
+                    await Task.Delay(attempt * 3000);
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                progress?.Report(
+                    "    ⚠ Validation LLM returned empty content, defaulting to valid.");
+                return new ScriptValidationResult { IsValid = true };
+            }
+
+            progress?.Report(
+                $"    [Debug] Validation response length: {content.Length} chars");
+
+            return ParseValidationResponse(content);
+        }
+
+
+        private ScriptValidationResult
+            ParseValidationResponse(string content)
+        {
+
+            var result = new ScriptValidationResult();
+
+
+            // Strip thinking blocks (Qwen, DeepSeek, etc.)
+            content = Regex.Replace(
+                content,
+                @"<think>.*?</think>",
+                "",
+                RegexOptions.Singleline);
+
+            content = content.Trim();
+
+
+            // Check verdict
+            var verdict =
+                Regex.Match(
+                    content,
+                    @"VERDICT:\s*(VALID|INVALID)",
+                    RegexOptions.IgnoreCase);
+
+            if (verdict.Success)
+            {
+                result.IsValid =
+                    verdict.Groups[1]
+                    .Value
+                    .Equals(
+                        "VALID",
+                        StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                // No verdict marker found — default to valid
+                // to avoid blocking on parser failure
+                result.IsValid = true;
+                return result;
+            }
+
+
+            if (!result.IsValid)
+            {
+                // Extract issues
+                var issuesMatch =
+                    Regex.Match(
+                        content,
+                        @"ISSUES:\s*\n(.*?)(?=---CORRECTED_SCRIPT_START---|$)",
+                        RegexOptions.Singleline);
+
+                if (issuesMatch.Success)
+                {
+                    result.Issues =
+                        issuesMatch.Groups[1]
+                        .Value
+                        .Trim();
+                }
+
+                // Extract corrected script if provided
+                var corrected =
+                    Regex.Match(
+                        content,
+                        @"---CORRECTED_SCRIPT_START---(.*?)---CORRECTED_SCRIPT_END---",
+                        RegexOptions.Singleline);
+
+                if (corrected.Success)
+                {
+                    var correctedContent =
+                        corrected.Groups[1]
+                        .Value
+                        .Trim();
+
+                    if (!string.IsNullOrWhiteSpace(correctedContent))
+                    {
+                        result.CorrectedScript = correctedContent;
+                    }
+                }
+            }
+
+
+            return result;
         }
     }
 }

@@ -7,4 +7,10 @@ Evaluate the following checklist item for SQL Server auditing:
 **Expected Outcome**: {expected_outcome}
 **Declared Scope**: {scope}
 
-Determine if this check can be validated using a SQL or PowerShell script. If yes, generate the script following the required output format (Result + Score). If no, explain why it is not feasible.
+IMPORTANT: You MUST follow the step-by-step process defined in the system prompt.
+
+1. First, write the ANALYSIS section — identify the core requirement, list every relevant SQL Server artifact (system views, DMVs, catalog views, SQL Agent tables, OS artifacts), describe your evidence-gathering strategy, and run the infeasibility test.
+2. Only AFTER completing the analysis, write the FEASIBLE determination based on your analysis findings.
+3. If FEASIBLE: YES, generate the full script with proper Result + Score output.
+
+Do NOT skip the analysis. Do NOT default to NOT FEASIBLE unless your analysis proves zero queryable artifacts exist across all five infeasibility tests.
