@@ -65,14 +65,42 @@ The generated script MUST be strictly read-only:
 - Score 3 MUST be used when the script can fully verify compliance (e.g., a configuration value is ON/OFF, a setting matches the expected value, a policy is enabled)
 - Only cap at 2 when the script gathers indirect/proxy evidence and the final compliance decision genuinely requires human judgment beyond what the script checks
 
+**CRITICAL — Result/Score alignment rules (MUST follow)**:
+- `@Result` MUST always be derived from `@Score`. Never set them independently.
+- Use this exact mapping at the end of every script:
+  ```
+  SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+  ```
+- Score 0 or 1 → Result MUST be 'Fail'
+- Score 2 or 3 → Result MUST be 'Pass'
+- NEVER produce a script where @Score = 1 and @Result = 'Pass'. This is INVALID.
+- NEVER produce a script where the maximum achievable score is 1. If the check can only produce partial evidence, the maximum score must still be at least 2 when evidence is found.
+
+**CRITICAL — Platform compatibility rules**:
+- Scripts MUST work on BOTH on-premises SQL Server AND Azure SQL (DB / MI) unless the checklist item is explicitly Azure-only or on-prem-only.
+- If a system view only exists in Azure (e.g., `sys.database_service_objectives`), use `IF OBJECT_ID('viewname') IS NOT NULL` to check existence before querying.
+- If a system view only exists on-premises, do the same existence check.
+- When a view is missing, fall back to alternative evidence sources or degrade the score gracefully (e.g., score 1 instead of 0).
+
+**CRITICAL — Scoring must use the full 0-3 range**:
+- Every script must define clear conditions for ALL four scores (0, 1, 2, 3).
+- If the check can be fully automated (e.g., is a setting ON or OFF?), the maximum score MUST be 3.
+- If the check is proxy/indirect evidence, the maximum score should be 2 with a comment explaining why.
+- NEVER write a script where the maximum achievable score is only 1.
+
+**CRITICAL — Classification accuracy**:
+- Azure tier classification: Basic and S0 are low-tier. S1-S12, P1-P15, GP, BC, HS are all valid production tiers and MUST score 2+.
+- Environment detection: Use word-boundary matching where possible to avoid false positives (e.g., 'QA' matching 'AQUA').
+
 **SQL script output format (SERVER scope)**:
 ```sql
 -- Checklist: <check_name>
 -- Scope: SERVER
--- Scoring: <explain scoring logic>
+-- Scoring: <explain scoring logic for each score 0, 1, 2, 3>
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 -- ... evaluation logic against master / server-level views ...
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score;
 ```
 
@@ -80,7 +108,7 @@ SELECT @Result AS Result, @Score AS Score;
 ```sql
 -- Checklist: <check_name>
 -- Scope: DATABASE
--- Scoring: <explain scoring logic>
+-- Scoring: <explain scoring logic for each score 0, 1, 2, 3>
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
