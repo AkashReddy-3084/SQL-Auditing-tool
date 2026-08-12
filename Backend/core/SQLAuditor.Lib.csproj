@@ -14,6 +14,14 @@
   <ItemGroup>
     <Compile Include="..\agents\**\*.cs" Exclude="..\agents\ScriptGeneratingAgent\**" />
   </ItemGroup>
+  <!-- Program.cs is the console entry point owned by the Exe project only. -->
+  <ItemGroup>
+    <Compile Remove="Program.cs" />
+  </ItemGroup>
+  <!-- Interface host code (CLI/IDE) under application/ has its own projects. -->
+  <ItemGroup>
+    <Compile Remove="..\agents\modules\application\**\*.cs" />
+  </ItemGroup>
 
 </Project>
 

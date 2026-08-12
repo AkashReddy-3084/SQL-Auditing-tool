@@ -42,6 +42,7 @@ namespace SQLAuditor.Wpf
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
         private long _progressStreamPos = 0;
         private bool _isVerified = false;
+        private bool _isLlmVerified = false;
         private Auditor? _auditor;
         private System.Threading.CancellationTokenSource? _evaluationCts;
         private bool _isEvaluating = false;
@@ -490,8 +491,13 @@ namespace SQLAuditor.Wpf
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
                 var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
+                // The engine's final write persists manual items as "Evaluating" placeholders,
+                // which can overwrite Pass/Fail decisions made while evaluation was still running.
+                // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
+                ReapplySubmittedManualResults();
+                RegenerateReportFromPersisted();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
-                UpdateSummaryView(results);
+                UpdateSummaryView(LoadPersistedResults() ?? results);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log("Summary report generated at results/final_report.md");
@@ -1122,6 +1128,58 @@ namespace SQLAuditor.Wpf
             System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
         }
 
+        // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.
+        // The engine persists manual items as "Evaluating" placeholders at the end of a run,
+        // which can clobber decisions made while evaluation was still in progress.
+        private void ReapplySubmittedManualResults()
+        {
+            if (_manualQueue == null || _manualStateMap == null) return;
+            foreach (var item in _manualQueue)
+            {
+                if (_manualStateMap.TryGetValue(item.Id, out var state)
+                    && state.IsSubmitted
+                    && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
+                {
+                    try { PersistManualResult(item, state); } catch { }
+                }
+            }
+        }
+
+        private System.Collections.Generic.IReadOnlyCollection<ChecklistResult>? LoadPersistedResults()
+        {
+            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            if (!System.IO.File.Exists(path)) return null;
+            try
+            {
+                return JsonSerializer.Deserialize<System.Collections.Generic.List<ChecklistResult>>(System.IO.File.ReadAllText(path));
+            }
+            catch { return null; }
+        }
+
+        // Regenerates final_report.md from the current checklist_results.json so the report
+        // reflects re-applied manual decisions instead of the engine's placeholder write.
+        private void RegenerateReportFromPersisted()
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                var path = System.IO.Path.Combine(dir, "checklist_results.json");
+                if (!System.IO.File.Exists(path)) return;
+                var arr = JsonSerializer.Deserialize<ChecklistResult[]>(System.IO.File.ReadAllText(path)) ?? Array.Empty<ChecklistResult>();
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    path,
+                    System.IO.Path.Combine(dir, "final_report.md"),
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Length,
+                    });
+            }
+            catch { }
+        }
+
         private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)
         {
             if (MarkPassedBtn == null || MarkFailedBtn == null || SubmitBtn == null || ManualOutputBox == null)
@@ -1402,6 +1460,7 @@ namespace SQLAuditor.Wpf
             var fqdn = FqdnText.Text.Trim();
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
             AccessStatus.Text = "Testing connection...";
+            VerifyBtn.IsEnabled = false;
             try
             {
                 await EnsureAuditor(fqdn);
@@ -1410,20 +1469,7 @@ namespace SQLAuditor.Wpf
                 {
                     _isVerified = true;
                     AccessStatus.Text = $"Verified: {fqdn}";
-                    VerifyBtn.Content = "Configure Checklist";
-                    SetTabIndex(1);
-                    LoadChecklistBtn.IsEnabled = true;
                     Log($"Connection to {fqdn} verified.");
-                    // Auto-load the checklist structure after successful verification
-                    try
-                    {
-                        await PopulateChecklistStructureAsync();
-                        Log("Checklist auto-loaded after verification.");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log("Failed to auto-load checklist: " + ex.Message);
-                    }
                 }
                 else
                 {
@@ -1434,10 +1480,95 @@ namespace SQLAuditor.Wpf
             }
             catch (Exception ex)
             {
+                _isVerified = false;
                 AccessStatus.Text = "Error testing connection.";
                 Log("Verify error: " + ex.Message);
             }
+            finally
+            {
+                VerifyBtn.IsEnabled = true;
+                UpdateStartEvaluationEnabled();
+                UpdateStageIndicators();
+            }
+        }
+
+        // Verifies ONLY the LLM provider connection. Does not navigate.
+        private async void VerifyLlmBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var baseUrl = LlmBaseUrlText.Text.Trim();
+            var apiKey = LlmApiKeyBox.Password ?? string.Empty;
+            var model = LlmModelText.Text.Trim();
+            if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(model))
+            {
+                LlmAccessStatus.Text = "Enter Base URL, API Key, and Model.";
+                _isLlmVerified = false;
+                UpdateStartEvaluationEnabled();
+                return;
+            }
+
+            LlmAccessStatus.Text = "Verifying LLM access...";
+            VerifyLlmBtn.IsEnabled = false;
+            try
+            {
+                // Runtime-only configuration; never written to disk.
+                Auditor.SetLlmConfig(baseUrl, apiKey, model);
+                var (ok, message) = await Auditor.VerifyLlmAsync();
+                if (ok)
+                {
+                    _isLlmVerified = true;
+                    LlmAccessStatus.Text = "Verified: " + message;
+                    _auditor?.EnsureLlmEvaluators();
+                    Log("LLM provider verified (" + model + ").");
+                }
+                else
+                {
+                    _isLlmVerified = false;
+                    LlmAccessStatus.Text = "Failed: " + message;
+                    Log("LLM verification failed: " + message);
+                }
+            }
+            catch (Exception ex)
+            {
+                _isLlmVerified = false;
+                LlmAccessStatus.Text = "Error: " + ex.Message;
+                Log("LLM verify error: " + ex.Message);
+            }
+            finally
+            {
+                VerifyLlmBtn.IsEnabled = true;
+                UpdateStartEvaluationEnabled();
+            }
+        }
+
+        // The ONLY control that navigates from Login to the Checklist page.
+        private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_isVerified || !_isLlmVerified) return;
+
+            // Make sure the LLM evaluators reflect the verified runtime configuration.
+            _auditor?.EnsureLlmEvaluators();
+
+            SetTabIndex(1);
+            LoadChecklistBtn.IsEnabled = true;
+            Log("Proceeding to checklist.");
+            try
+            {
+                await PopulateChecklistStructureAsync();
+                Log("Checklist auto-loaded.");
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to auto-load checklist: " + ex.Message);
+            }
             UpdateStageIndicators();
+        }
+
+        private void UpdateStartEvaluationEnabled()
+        {
+            if (StartEvaluationBtn != null)
+            {
+                StartEvaluationBtn.IsEnabled = _isVerified && _isLlmVerified;
+            }
         }
 
         private void Send_Click(object sender, RoutedEventArgs e)

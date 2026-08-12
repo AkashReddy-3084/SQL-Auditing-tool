@@ -107,14 +107,52 @@ namespace SQLAuditor.Lib
     public class Auditor
     {
         private string _connectionString;
-        private readonly SqlServerMcpEvaluator _mcpEvaluator;
-        private readonly ManualStepsGenerator _manualStepsGenerator;
+        private SqlServerMcpEvaluator? _mcpEvaluator;
+        private ManualStepsGenerator? _manualStepsGenerator;
 
         public Auditor(string connectionString)
         {
             _connectionString = connectionString;
-            _mcpEvaluator = SqlServerMcpEvaluator.CreateFromEnvironment();
-            _manualStepsGenerator = ManualStepsGenerator.CreateFromEnvironment();
+            // Evaluators are created tolerantly so the auditor can be built for SQL-only
+            // operations (connection verification, checklist loading) before the user has
+            // supplied LLM settings at runtime.
+            EnsureLlmEvaluators();
+        }
+
+        // Creates the LLM evaluators if they don't exist yet. Safe to call repeatedly;
+        // it is a no-op once the evaluators exist and silently skips when LLM settings
+        // are not yet configured.
+        public void EnsureLlmEvaluators()
+        {
+            try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
+            try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
+        }
+
+        // Supplies LLM provider settings at runtime (from the UI). Not persisted to disk;
+        // these values take precedence over any .env or environment variables.
+        public static void SetLlmConfig(string baseUrl, string apiKey, string model)
+            => ProviderConfig.SetRuntime(baseUrl, apiKey, model);
+
+        // Verifies the currently-configured LLM provider by issuing a minimal request.
+        public static async Task<(bool Ok, string Message)> VerifyLlmAsync(System.Threading.CancellationToken cancellationToken = default)
+        {
+            string baseUrl, apiKey, model;
+            try { baseUrl = ProviderConfig.BaseUrl; apiKey = ProviderConfig.ApiKey; model = ProviderConfig.Model; }
+            catch (Exception ex) { return (false, ex.Message); }
+
+            try
+            {
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+                var body = new { model, max_tokens = 1, messages = new[] { new { role = "user", content = "ping" } } };
+                using var content = new System.Net.Http.StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
+                using var resp = await http.PostAsync(baseUrl + "/chat/completions", content, cancellationToken);
+                if (resp.IsSuccessStatusCode) return (true, $"Connected to model '{model}'.");
+                var txt = await resp.Content.ReadAsStringAsync(cancellationToken);
+                if (txt.Length > 300) txt = txt.Substring(0, 300);
+                return (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {txt}");
+            }
+            catch (Exception ex) { return (false, ex.Message); }
         }
 
         // --- Remaining methods omitted for brevity; this Auditor is a lightweight stub for UI testing ---
@@ -526,6 +564,8 @@ namespace SQLAuditor.Lib
 
         public async Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default)
         {
+            // Ensure LLM evaluators reflect any runtime configuration provided after construction.
+            EnsureLlmEvaluators();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
 
@@ -625,7 +665,7 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                if (!string.IsNullOrWhiteSpace(_connectionString))
+                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString))
                 {
                     try
                     {
@@ -833,6 +873,79 @@ namespace SQLAuditor.Lib
             return enrichedResults;
         }
 
+        // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview in the
+        // persisted results and regenerates the report. Used by the CLI --interactive
+        // flow and the IDE 'resolve_review' tool so manual items can be decided by a
+        // human without re-running the evaluation. Patches the JSON in place so no
+        // enrichment fields are lost.
+        public bool ResolveReview(string id, string decision, string? notes, out string newOutcome)
+        {
+            newOutcome = string.Empty;
+            var norm = decision?.Trim().ToLowerInvariant();
+            var outcome = norm switch
+            {
+                "pass" or "p" or "yes" or "y" => "Pass",
+                "fail" or "f" or "no" or "n" => "Fail",
+                "needsreview" or "review" or "r" => "NeedsReview",
+                _ => string.Empty
+            };
+            if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
+
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath)) return false;
+
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                return false;
+
+            System.Text.Json.Nodes.JsonObject? target = null;
+            foreach (var el in arr)
+            {
+                if (el is System.Text.Json.Nodes.JsonObject obj &&
+                    string.Equals(obj["Id"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = obj;
+                    break;
+                }
+            }
+            if (target == null) return false;
+
+            target["Outcome"] = outcome;
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
+                target["Evidence"] = string.IsNullOrWhiteSpace(existing)
+                    ? $"Manual decision: {outcome}. {notes}"
+                    : existing + $"\n\nManual decision: {outcome}. {notes}";
+                target["Finding"] = notes;
+            }
+
+            try
+            {
+                File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { return false; }
+
+            // Regenerate the Markdown report from the updated results.
+            try
+            {
+                var reportPath = Path.Combine(resultsDir, "final_report.md");
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
+            newOutcome = outcome;
+            return true;
+        }
+
         public async Task<bool> TestConnectionAsync()
         {
             if (string.IsNullOrWhiteSpace(_connectionString)) return false;
@@ -899,6 +1012,7 @@ namespace SQLAuditor.Lib
 
         public async Task<ChecklistResult?> TryEvaluateViaMcpAsync(ChecklistItem item)
         {
+            if (_mcpEvaluator == null) return null;
             return await _mcpEvaluator.EvaluateAsync(item, _connectionString);
         }
 
@@ -906,11 +1020,13 @@ namespace SQLAuditor.Lib
 
         public async Task<bool> IsAgentAvailableAsync(int timeoutMs = 5000)
         {
+            if (_mcpEvaluator == null) return false;
             return await _mcpEvaluator.IsAvailableAsync(timeoutMs);
         }
 
         public (string Provider, string Model, string Endpoint) GetAgentDetails()
         {
+            if (_mcpEvaluator == null) return (string.Empty, string.Empty, string.Empty);
             return (_mcpEvaluator.ProviderName, _mcpEvaluator.ModelName, _mcpEvaluator.Endpoint);
         }
 
@@ -924,13 +1040,16 @@ namespace SQLAuditor.Lib
         {
             try
             {
-                var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
-                if (!string.IsNullOrWhiteSpace(slm.Instructions))
+                if (_manualStepsGenerator != null)
                 {
-                    return slm;
-                }
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(slm.Instructions))
+                    {
+                        return slm;
+                    }
 
-                LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
+                    LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
+                }
             }
             catch (Exception ex)
             {

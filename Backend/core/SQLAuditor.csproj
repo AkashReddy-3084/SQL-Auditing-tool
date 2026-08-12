@@ -12,6 +12,11 @@
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.0" />
   </ItemGroup>
 
+  <!-- The Exe only provides the entry point; all engine types come from the Lib. -->
+  <ItemGroup>
+    <Compile Remove="Auditor.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="SQLAuditor.Lib.csproj" />
   </ItemGroup>
