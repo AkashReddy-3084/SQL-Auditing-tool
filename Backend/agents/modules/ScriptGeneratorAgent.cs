@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -19,9 +20,10 @@ namespace SQLAuditor.Agents
 
         private readonly string _mappingPath;
 
-        private readonly List<ScriptMapping> _mappings = new();
-
         private readonly List<ExecutionResultEntry> _executionResults = new();
+
+        // Tracks classification for ALL processed items (feasible and non-feasible)
+        private readonly Dictionary<string, (string? ScriptFile, bool IsAdminCheck, bool IsDocumentationCheck, bool McpFeasibility)> _classificationRegistry = new();
 
 
         public ScriptGeneratorAgent(
@@ -81,6 +83,24 @@ namespace SQLAuditor.Agents
             Directory.CreateDirectory(sqlDir);
             Directory.CreateDirectory(ps1Dir);
             Directory.CreateDirectory(resultsDir);
+
+            // Reset script directories and mapping file for a fresh generation run.
+            // This avoids stale scripts accumulating when new checklists are introduced.
+            foreach (var f in Directory.GetFiles(sqlDir))
+            {
+                try { File.Delete(f); } catch { }
+            }
+            foreach (var f in Directory.GetFiles(ps1Dir))
+            {
+                try { File.Delete(f); } catch { }
+            }
+
+            // Reset the mapping file so it only contains entries from this generation run.
+            try
+            {
+                File.WriteAllText(_mappingPath, "{}");
+            }
+            catch { }
 
 
             List<ScriptGenChecklistItem> checklist;
@@ -172,6 +192,12 @@ namespace SQLAuditor.Agents
                                     Reason =
                                         response.Reason
                                 });
+
+                            _classificationRegistry[item.ChecklistId] = (
+                                null,
+                                response.IsAdminCheck,
+                                response.IsDocumentationCheck,
+                                response.McpFeasibility);
 
                             await WriteResultsIteratively();
                             itemSucceeded = true; // not a failure, just skipped
@@ -344,8 +370,12 @@ namespace SQLAuditor.Agents
                         // STEP 4 - SAVE SCRIPT TO DISK
                         // ==========================================
 
+                        var safeName = Regex.Replace(
+                            item.CheckName ?? "",
+                            @"[^a-zA-Z0-9]+",
+                            "_").Trim('_');
                         var filename =
-                            $"{response.ScriptName}.{response.ScriptType}";
+                            $"{item.ChecklistId}_{safeName}.{response.ScriptType}";
 
                         var outputDir =
                             response.ScriptType == "sql"
@@ -369,30 +399,11 @@ namespace SQLAuditor.Agents
                         // STEP 5 - RECORD MAPPING
                         // ==========================================
 
-                        _mappings.Add(
-                            new ScriptMapping
-                            {
-                                ChecklistId =
-                                    item.ChecklistId,
-
-                                Name =
-                                    item.CheckName,
-
-                                Scope =
-                                    response.Scope,
-
-                                ScriptType =
-                                    response.ScriptType,
-
-                                ScriptPath =
-                                    $"{response.ScriptType}/{filename}",
-
-                                MaxScore =
-                                    3,
-
-                                ScoringLogic =
-                                    response.ScoringLogic
-                            });
+                        _classificationRegistry[item.ChecklistId] = (
+                            $"Backend/checklist/scripts/{response.ScriptType}/{filename}",
+                            response.IsAdminCheck,
+                            response.IsDocumentationCheck,
+                            response.McpFeasibility);
 
 
                         // ==========================================
@@ -502,30 +513,25 @@ namespace SQLAuditor.Agents
                         WriteIndented = true
                     }));
 
-            // Merge generated mappings into the existing deterministic-script-mapping.json
-            // which uses format: { "id": ["path1", ..."] }
-            var existingMapping = new Dictionary<string, string[]>();
-            if (File.Exists(_mappingPath))
-            {
-                try
-                {
-                    var existing = JsonSerializer.Deserialize<Dictionary<string, string[]>>(
-                        File.ReadAllText(_mappingPath));
-                    if (existing != null) existingMapping = existing;
-                }
-                catch { /* If parse fails (e.g. different format), start fresh */ }
-            }
+            // Write complete classification registry into the deterministic-script-mapping.json
+            // All processed items are included; non-feasible items have script_file = null.
+            var mappingDict = new Dictionary<string, object>();
 
-            foreach (var m in _mappings)
+            foreach (var entry in _classificationRegistry)
             {
-                var relativePath = $"Backend/checklist/scripts/{m.ScriptPath}";
-                existingMapping[m.ChecklistId] = new[] { relativePath };
+                mappingDict[entry.Key] = new
+                {
+                    script_file = entry.Value.ScriptFile,
+                    IsAdminCheck = entry.Value.IsAdminCheck,
+                    IsDocumentationCheck = entry.Value.IsDocumentationCheck,
+                    MCP_Feasibility = entry.Value.McpFeasibility
+                };
             }
 
             await File.WriteAllTextAsync(
                 _mappingPath,
                 JsonSerializer.Serialize(
-                    existingMapping,
+                    mappingDict,
                     new JsonSerializerOptions
                     {
                         WriteIndented = true

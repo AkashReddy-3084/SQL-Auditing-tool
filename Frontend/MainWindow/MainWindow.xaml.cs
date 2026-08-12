@@ -176,7 +176,41 @@ namespace SQLAuditor.Wpf
                     while (dir != null)
                     {
                         var candidate = Path.Combine(dir.FullName, "Backend", "checklist", "deterministic-script-mapping.json");
-                        if (File.Exists(candidate)) { root = dir.FullName; mappingFile = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]?>>(File.ReadAllText(candidate)) ?? new(); break; }
+                        if (File.Exists(candidate))
+                        {
+                            root = dir.FullName;
+                            using var mapDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(candidate));
+                            foreach (var prop in mapDoc.RootElement.EnumerateObject())
+                            {
+                                if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                {
+                                    var arr = new System.Collections.Generic.List<string>();
+                                    foreach (var el in prop.Value.EnumerateArray())
+                                    {
+                                        var s = el.GetString();
+                                        if (!string.IsNullOrWhiteSpace(s)) arr.Add(s);
+                                    }
+                                    mappingFile[prop.Name] = arr.ToArray();
+                                }
+                                else if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                {
+                                    if (prop.Value.TryGetProperty("script_file", out var sf))
+                                    {
+                                        if (sf.ValueKind == System.Text.Json.JsonValueKind.String)
+                                        {
+                                            var s = sf.GetString();
+                                            mappingFile[prop.Name] = string.IsNullOrWhiteSpace(s) ? null : new[] { s };
+                                        }
+                                        else
+                                        {
+                                            // script_file is null (non-feasible item)
+                                            mappingFile[prop.Name] = null;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
                         dir = dir.Parent;
                     }
                 }

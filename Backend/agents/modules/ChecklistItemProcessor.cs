@@ -449,6 +449,9 @@ namespace SQLAuditor.Agents
                         .Trim()
                     : "Not feasible";
 
+                // Parse classification fields even for non-feasible items
+                ParseClassificationFields(content, response);
+
                 return response;
             }
 
@@ -514,7 +517,7 @@ namespace SQLAuditor.Agents
                 // (e.g. stray SCOPE:, SCORING_LOGIC: lines appended after the script)
                 remaining = Regex.Replace(
                     remaining,
-                    @"\n(SCOPE|SCORING_LOGIC|SCRIPT_NAME|SCRIPT_TYPE|FEASIBLE|REASON):.*$",
+                    @"\n(SCOPE|SCORING_LOGIC|SCRIPT_NAME|SCRIPT_TYPE|FEASIBLE|REASON|IS_ADMIN_CHECK|IS_DOCUMENTATION_CHECK|MCP_FEASIBILITY):.*$",
                     "",
                     RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
 
@@ -660,7 +663,48 @@ namespace SQLAuditor.Agents
             }
 
 
+            // ==========================================
+            // CLASSIFICATION FIELDS
+            // ==========================================
+
+            ParseClassificationFields(content, response);
+
+
             return response;
+        }
+
+
+        private static void ParseClassificationFields(string content, ScriptGenerationResponse response)
+        {
+            var adminCheck =
+                Regex.Match(
+                    content,
+                    @"IS_ADMIN_CHECK:\s*(YES|NO)",
+                    RegexOptions.IgnoreCase);
+
+            response.IsAdminCheck =
+                adminCheck.Success &&
+                adminCheck.Groups[1].Value.Equals("YES", StringComparison.OrdinalIgnoreCase);
+
+            var docCheck =
+                Regex.Match(
+                    content,
+                    @"IS_DOCUMENTATION_CHECK:\s*(YES|NO)",
+                    RegexOptions.IgnoreCase);
+
+            response.IsDocumentationCheck =
+                docCheck.Success &&
+                docCheck.Groups[1].Value.Equals("YES", StringComparison.OrdinalIgnoreCase);
+
+            var mcpFeasibility =
+                Regex.Match(
+                    content,
+                    @"MCP_FEASIBILITY:\s*(YES|NO)",
+                    RegexOptions.IgnoreCase);
+
+            response.McpFeasibility =
+                mcpFeasibility.Success &&
+                mcpFeasibility.Groups[1].Value.Equals("YES", StringComparison.OrdinalIgnoreCase);
         }
 
 

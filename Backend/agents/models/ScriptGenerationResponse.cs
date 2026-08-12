@@ -15,5 +15,11 @@ namespace SQLAuditor.Agents
         public string ScriptContent { get; set; } = "";
 
         public string Reason { get; set; } = "";
+
+        public bool IsAdminCheck { get; set; }
+
+        public bool IsDocumentationCheck { get; set; }
+
+        public bool McpFeasibility { get; set; }
     }
 }

@@ -17,5 +17,11 @@ namespace SQLAuditor.Agents
         public int MaxScore { get; set; }
 
         public string ScoringLogic { get; set; } = "";
+
+        public bool IsAdminCheck { get; set; }
+
+        public bool IsDocumentationCheck { get; set; }
+
+        public bool McpFeasibility { get; set; }
     }
 }

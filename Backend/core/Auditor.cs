@@ -546,16 +546,22 @@ namespace SQLAuditor.Lib
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
-                System.Collections.Generic.Dictionary<string, string[]> mapping = new();
+                var mappingDict = new System.Collections.Generic.Dictionary<string, JsonElement>();
                 if (File.Exists(mapPath))
                 {
-                    try { mapping = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]>>(File.ReadAllText(mapPath)) ?? new(); } catch { mapping = new(); }
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(File.ReadAllText(mapPath));
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                            mappingDict[prop.Name] = prop.Value.Clone();
+                    }
+                    catch { mappingDict = new(); }
                 }
 
                 var rel = Path.Combine("Backend", "checklist", "scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
-                // Replace existing entry or append if missing
-                mapping[checklistId] = new[] { rel };
-                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mapping, new JsonSerializerOptions { WriteIndented = true }));
+                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
+                mappingDict[checklistId] = newEntry;
+                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mappingDict, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { /* best-effort only */ }
 
@@ -577,8 +583,31 @@ namespace SQLAuditor.Lib
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
-                if (File.Exists(mapPath)) mapping = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]>>(File.ReadAllText(mapPath)) ?? new();
-                // Normalize any legacy SQL/scripts/checks references to Backend/checklist/tools/sql
+                if (File.Exists(mapPath))
+                {
+                    var mapJson = File.ReadAllText(mapPath);
+                    using var mapDoc = JsonDocument.Parse(mapJson);
+                    foreach (var prop in mapDoc.RootElement.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.Array)
+                        {
+                            // Legacy format: { "id": ["path1", ...] }
+                            var arr = prop.Value.EnumerateArray()
+                                .Select(e => e.GetString() ?? string.Empty)
+                                .Where(s => !string.IsNullOrWhiteSpace(s))
+                                .ToArray();
+                            mapping[prop.Name] = arr;
+                        }
+                        else if (prop.Value.ValueKind == JsonValueKind.Object)
+                        {
+                            // New format: { "id": { "script_file": "path", ... } }
+                            var scriptFile = prop.Value.TryGetProperty("script_file", out var sf) ? sf.GetString() : null;
+                            if (!string.IsNullOrWhiteSpace(scriptFile))
+                                mapping[prop.Name] = new[] { scriptFile! };
+                        }
+                    }
+                }
+                // Normalize any legacy SQL/scripts/checks references to Backend/checklist/scripts/sql
                 var keys = mapping.Keys.ToArray();
                 foreach (var k in keys)
                 {

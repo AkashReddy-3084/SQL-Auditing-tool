@@ -145,6 +145,16 @@ For partial-evidence scripts, add a comment:
 - "Backup strategy defined" → Query msdb.dbo.backupset for recent backup history
 - "Security roles defined" → Query sys.database_principals and sys.database_role_members
 
+## Classification Fields (mandatory for ALL items, including NOT FEASIBLE)
+
+After your analysis, you MUST classify the checklist item with these three fields:
+
+- **IS_ADMIN_CHECK**: YES if the check requires SQL Server administrator-level access or evaluates admin-level configurations (e.g., server settings, security policies, backup configurations, SQL Agent jobs, linked servers, audit policies). NO if it can be evaluated with standard read permissions on user databases.
+
+- **IS_DOCUMENTATION_CHECK**: YES if the check is primarily about documentation, processes, policies, or organizational standards that cannot be verified through technical queries alone (e.g., "runbook exists", "SLA documented", "change management process followed", "naming convention documented"). NO if it can be verified technically through SQL queries or system inspection.
+
+- **MCP_FEASIBILITY**: YES if this check can be meaningfully evaluated by an AI model given a SQL Server metadata snapshot (system views, configurations, database schemas, job definitions, etc.) — even if only partially. NO only if the check requires real-time execution, interactive access, or information that cannot be captured in a metadata snapshot.
+
 ## Response Format
 
 You MUST respond in this exact format and order. **Keep ANALYSIS to 4 short lines. Spend your tokens on the script.**
@@ -157,6 +167,9 @@ ANALYSIS:
 4. Infeasibility verdict: PASSED|FAILED
 
 FEASIBLE: YES|NO
+IS_ADMIN_CHECK: YES|NO
+IS_DOCUMENTATION_CHECK: YES|NO
+MCP_FEASIBILITY: YES|NO
 SCRIPT_TYPE: sql|ps1
 SCOPE: SERVER|DATABASE
 SCRIPT_NAME: <filename_without_extension>
@@ -167,4 +180,4 @@ REASON: <only if NOT feasible>
 ---SCRIPT_END---
 ```
 
-If FEASIBLE is NO, omit SCRIPT_TYPE, SCOPE, SCRIPT_NAME, SCORING_LOGIC, and the SCRIPT block.
+If FEASIBLE is NO, omit SCRIPT_TYPE, SCOPE, SCRIPT_NAME, SCORING_LOGIC, and the SCRIPT block. You MUST still include IS_ADMIN_CHECK, IS_DOCUMENTATION_CHECK, and MCP_FEASIBILITY.
