@@ -260,8 +260,8 @@
                                 </Border>
                             </StackPanel>
 
-                            <!-- Only this button navigates to the Checklist page; enabled once both connections verify. -->
-                            <Button x:Name="StartEvaluationBtn" Content="Start Evaluation" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
+                            <!-- Only this button navigates to the Checklist page; enabled once SQL connection verifies. -->
+                            <Button x:Name="StartEvaluationBtn" Content="Configure Checklist" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>

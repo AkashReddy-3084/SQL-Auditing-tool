@@ -1542,7 +1542,7 @@ namespace SQLAuditor.Wpf
         // The ONLY control that navigates from Login to the Checklist page.
         private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
         {
-            if (!_isVerified || !_isLlmVerified) return;
+            if (!_isVerified) return;
 
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();
@@ -1566,7 +1566,7 @@ namespace SQLAuditor.Wpf
         {
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = _isVerified && _isLlmVerified;
+                StartEvaluationBtn.IsEnabled = _isVerified;
             }
         }
 

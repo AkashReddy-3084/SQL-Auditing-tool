@@ -142,7 +142,7 @@ namespace SQLAuditor.Lib
 
             try
             {
-                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(120) };
                 http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
                 var body = new { model, max_tokens = 1, messages = new[] { new { role = "user", content = "ping" } } };
                 using var content = new System.Net.Http.StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
