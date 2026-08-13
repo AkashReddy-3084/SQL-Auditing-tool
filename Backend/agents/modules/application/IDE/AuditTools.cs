@@ -6,9 +6,11 @@ using SQLAuditor.Lib;
 namespace SQLAuditor.Mcp;
 
 /// <summary>
-/// MCP tools that expose the SQL Auditor evaluation engine to the IDE
-/// (VS Code Copilot Chat). Each tool reuses <see cref="Auditor"/> directly so
-/// behavior matches the CLI and the WPF app.
+/// MCP tools that expose the SQL Auditor evaluation engine to GitHub Copilot Chat
+/// in VS Code. The server performs deterministic (script-based) checks and file I/O
+/// only — it makes no direct LLM/API calls. Copilot Chat is the AI that orchestrates
+/// the conversation and reviews items that need human judgement. Each tool reuses
+/// <see cref="Auditor"/> so behavior matches the CLI and the WPF app.
 /// </summary>
 [McpServerToolType]
 public static class AuditTools
@@ -18,7 +20,7 @@ public static class AuditTools
     public static async Task<string> EvaluateAsync(
         [Description("STEP 1: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 2: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
-        [Description("STEP 2b: SQL login username (only when authMethod='sql'). The password is read from the SQLAUDITOR_SQL_PASSWORD environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
+        [Description("STEP 2b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
         [Description("STEP 3: Comma-separated checklist item IDs to evaluate, e.g. '1.2.1,3.1.2'. If the user already named IDs earlier, reuse them here.")] string? items = null,
         CancellationToken cancellationToken = default)
     {
@@ -36,11 +38,12 @@ public static class AuditTools
                  + "Ask the user: \"Which authentication method should I use — 'windows' (Windows Integrated) or 'sql' (SQL Login)?\"\n"
                  + "Then call evaluate again with 'server' and 'authMethod' set.";
 
-        // STEP 2b — SQL login username (password stays in the environment, never in chat).
+        // STEP 2b — SQL login username (password stays in the session environment, never in chat).
         if (method == "sql" && string.IsNullOrWhiteSpace(sqlUser))
             return $"STEP 2b — SQL LOGIN USERNAME REQUIRED for server '{server}'.\n"
-                 + "Ask the user for the SQL login username. For security, the password must be set in the "
-                 + "SQLAUDITOR_SQL_PASSWORD environment variable and must never be typed in chat.\n"
+                 + "Ask the user for the SQL login username. For security, the password must NOT be typed in chat: "
+                 + "the user sets it once in their terminal session before launching VS Code "
+                 + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), and the server reads it at runtime.\n"
                  + "Then call evaluate again with 'server', authMethod='sql', and 'sqlUser' set.";
 
         // STEP 3 — Checklist items.
@@ -60,6 +63,12 @@ public static class AuditTools
         if (method == "sql")
         {
             var pass = Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+            if (string.IsNullOrEmpty(pass))
+                return $"STEP 2b — SQL PASSWORD NOT AVAILABLE for user '{sqlUser}' on server '{server}'.\n"
+                     + "The SQLAUDITOR_SQL_PASSWORD session environment variable is not set, so no SQL login can be made. "
+                     + "Do NOT ask for the password in chat. Ask the user to set it in the terminal session that launched VS Code "
+                     + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), restart the MCP server, then run evaluate again. "
+                     + "Alternatively, they can choose Windows authentication instead.";
             connectionString = $"Server={server};User Id={sqlUser};Password={pass};TrustServerCertificate=true;";
         }
         else
@@ -93,9 +102,9 @@ public static class AuditTools
                                   .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
             sb.AppendLine($"  {g.Key}: {g.Count()}");
 
-        // Manual-review items cannot be decided automatically. An MCP tool cannot
-        // prompt mid-run, so instruct the agent to elicit a pass/fail decision from
-        // the user for each item and record it via the resolve_review tool.
+        // Items not decided by deterministic scripts need review. This server makes no
+        // LLM calls, so Copilot Chat is the reviewer: it analyzes each item, guides the
+        // user, and records the decision via the resolve_review tool.
         var manualPending = results
             .Where(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)
                      && (r.Technique?.Contains("Manual", StringComparison.OrdinalIgnoreCase) ?? false))
@@ -104,17 +113,30 @@ public static class AuditTools
 
         if (manualPending.Count > 0)
         {
+            var itemLookup = structure.SelectMany(s => s.Items)
+                .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
             sb.AppendLine();
-            sb.AppendLine("=== ACTION REQUIRED: MANUAL REVIEW (do not stop here) ===");
-            sb.AppendLine($"{manualPending.Count} item(s) could not be decided automatically and REQUIRE a human Pass/Fail decision.");
-            sb.AppendLine("For EACH item below you MUST: (1) display the FULL 'Manual verification steps' shown for that item verbatim to the user (do not summarize, shorten, or omit them), (2) ask them to decide Pass or Fail (with optional notes), then (3) call the 'resolve_review' tool with their decision. Do NOT write a final summary or consider the task complete until every item has been resolved by the user.");
+            sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
+            sb.AppendLine($"{manualPending.Count} item(s) were not decided by the deterministic scripts and need review.");
+            sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. For EACH item below you MUST:");
+            sb.AppendLine("  1. Analyze what the item verifies and give the user SPECIFIC, tailored guidance (e.g. exact T-SQL to run, settings/objects to inspect in SSMS).");
+            sb.AppendLine("  2. Ask the user for their finding / evidence.");
+            sb.AppendLine("  3. Decide Pass or Fail together with the user, then call the 'resolve_review' tool.");
+            sb.AppendLine("Do NOT write a final summary until every item has been resolved.");
             foreach (var r in manualPending)
             {
                 sb.AppendLine();
                 sb.AppendLine($"--- {r.Id}: {r.Description} ---");
+                if (itemLookup.TryGetValue(r.Id, out var it))
+                {
+                    if (!string.IsNullOrWhiteSpace(it.Category)) sb.AppendLine($"Area/Category: {it.Category}");
+                    if (!string.IsNullOrWhiteSpace(it.Verification)) sb.AppendLine($"Verification objective: {it.Verification}");
+                }
                 if (!string.IsNullOrWhiteSpace(r.Evidence))
                 {
-                    sb.AppendLine("Manual verification steps / guidance:");
+                    sb.AppendLine("Baseline verification steps (augment with your own analysis; do not just echo them):");
                     sb.AppendLine(r.Evidence.Trim());
                 }
                 sb.AppendLine($"After the user decides, call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<user's rationale>\")");
@@ -189,4 +211,26 @@ public static class AuditTools
         return Task.FromResult(
             $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
     }
+}
+
+/// <summary>
+/// MCP prompts surfaced as slash commands in GitHub Copilot Chat. A prompt only
+/// instructs Copilot to drive the existing SQL Auditor tools; it contains no
+/// evaluation logic of its own.
+/// </summary>
+[McpServerPromptType]
+public static class AuditPrompts
+{
+    [McpServerPrompt(Name = "evaluate")]
+    [Description("Run a SQL Auditor checklist evaluation using the sql-auditor MCP tools.")]
+    public static string Evaluate() =>
+        "Start a SQL Auditor checklist evaluation using the sql-auditor MCP tools. "
+      + "Call the 'evaluate' tool and follow its step-by-step workflow exactly — it returns the next "
+      + "question to ask me: (1) the SQL Server name, (2) the authentication method ('windows' or 'sql'; "
+      + "for SQL Login ask the username, the password comes from the environment), then (3) the checklist "
+      + "item IDs to evaluate. Never guess the server or credentials. "
+      + "For any item that comes back as Needs Review, show its verification guidance, help me decide "
+      + "Pass or Fail, and record each decision with the 'resolve_review' tool. "
+      + "When everything is resolved, show the summary with 'show_reports'. "
+      + "Do not perform the evaluation yourself or duplicate its logic — always use the tools.";
 }

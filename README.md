@@ -79,6 +79,130 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 3. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
 4. **Summary** — generates the scored report and lets you export it.
 
+## Command-line interface (CLI)
+
+The same evaluation engine is available as a console command for automation and CI. It
+reuses the checklist, scoring, and report generation, and reads the same LLM configuration
+from `.env` (see [step 3](#3-fill-in-env) above).
+
+### Build
+
+```powershell
+dotnet build Backend/core/SQLAuditor.csproj
+```
+
+This produces `Backend/core/bin/Debug/net8.0/SQLAuditor.exe`.
+
+### Run an evaluation
+
+```powershell
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate [options]
+```
+
+Any option not supplied is prompted for interactively (SQL Server, then login details, then
+checklist IDs).
+
+| Option | Description |
+| --- | --- |
+| `--items <ids>` | Comma-separated checklist IDs to evaluate, e.g. `1.1.2,3.1.2` |
+| `--server <host>` | SQL Server FQDN / `host[,port]`. Or set `SQLAUDITOR_SERVER` |
+| `--user <name>` | SQL login username. Or set `SQLAUDITOR_SQL_USER`. Omit for Windows Integrated auth |
+| `--password <pw>` | SQL login password. Or set `SQLAUDITOR_SQL_PASSWORD` |
+| `--json <path>` | Also copy the results JSON to this path |
+| `--interactive` | Force prompting to mark manual-review items Pass/Fail (auto-enabled in an interactive terminal) |
+| `--help` | Show usage |
+
+LLM provider settings are read from `PROVIDER_BASE_URL`, `PROVIDER_API_KEY`, and `MODEL`
+(the same `.env`).
+
+Examples:
+
+```powershell
+# Fully interactive (prompts for server, auth, and items)
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate
+
+# Non-interactive with flags
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost
+
+# List the checklist structure without running an evaluation
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe --dump-checklist
+```
+
+### Manual review and output
+
+Script-based controls are decided automatically. Controls needing human judgement come back
+as **Needs Review**; in an interactive terminal (or with `--interactive`) the CLI shows the
+verification guidance and prompts you to mark each **Pass**, **Fail**, or **Skip** (with
+optional notes). Results are written to `results/checklist_results.json` and
+`results/final_report.md` (see [Output](#output)).
+
+The command returns an exit code for scripting: `0` success, `1` one or more controls
+failed, `2` usage/validation error, `3` unexpected error.
+
+## GitHub Copilot (VS Code) integration via MCP
+
+The auditor can be driven from **GitHub Copilot Chat** in VS Code through a Model Context
+Protocol (MCP) server. In this mode **Copilot Chat is the AI** — it orchestrates the
+conversation and reviews items that need judgement. The MCP server itself makes **no
+direct LLM/API calls**, so **no `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL` is
+required** for the IDE flow.
+
+### Tools exposed
+
+| Tool | Purpose |
+| --- | --- |
+| `load_checklist` | List checklist areas and item IDs (read-only; no SQL needed) |
+| `evaluate` | Run the ordered evaluation workflow and return outcomes |
+| `resolve_review` | Record a Pass/Fail decision for an item that needs review |
+| `show_reports` | Return the generated `final_report.md` or `checklist_results.json` |
+
+### Setup
+
+1. Build the MCP server:
+
+   ```powershell
+   dotnet build Backend/agents/modules/application/IDE/SQLAuditor.Mcp.csproj
+   ```
+
+2. Configure `.vscode/mcp.json` (at the workspace root). It launches the built server and
+   sets the working directory to `SQL-Auditing-tool` so the engine can find the checklist
+   and write `results/`. No LLM key and no SQL credentials are stored here. Windows
+   Integrated auth needs nothing extra; for SQL Login, set `SQLAUDITOR_SQL_PASSWORD` in the
+   terminal session that launches VS Code (PowerShell: `$env:SQLAUDITOR_SQL_PASSWORD='...'`)
+   so the server reads it at runtime without it ever living in this file or in chat:
+
+   ```jsonc
+   {
+     "servers": {
+       "sql-auditor": {
+         "type": "stdio",
+         "command": "<absolute path>/Backend/agents/modules/application/IDE/bin/Debug/net8.0/SQLAuditor.Mcp.exe",
+         "cwd": "<absolute path>/SQL-Auditing-tool"
+       }
+     }
+   }
+   ```
+
+3. In VS Code, **start/restart** the `sql-auditor` server from the MCP view (or the *Start*
+   code lens in `mcp.json`). Confirm the tools appear in Copilot's **Configure Tools** list.
+
+### Usage (Copilot Agent chat)
+
+Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mirrors the CLI:
+
+1. Copilot asks for the **SQL Server name**.
+2. Then the **authentication method** (`windows` or `sql`; for SQL Login it asks the
+   username — the password is read from the `SQLAUDITOR_SQL_PASSWORD` session environment
+   variable you set in your terminal, never typed in chat or stored in `mcp.json`).
+3. Then **which checklist items** to evaluate (e.g. `1.2.1, 3.1.2`).
+4. Copilot calls `evaluate`; script-based controls are decided deterministically.
+5. For **Needs Review** items, Copilot presents the verification guidance, helps you decide,
+   and records each decision via `resolve_review`.
+6. Copilot shows the final **summary/report** (`show_reports`).
+
+Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
+`mark 3.1.1 as pass, notes: verified naming standards`.
+
 ## Output
 
 Generated artefacts are written to `results/` in the working directory:
@@ -102,5 +226,7 @@ The `results/` folder is git-ignored, as it contains server names and connection
 
 ## Note on the console project
 
-`Backend/core/SQLAuditor.csproj` is a legacy console entry point and does not currently compile. Use the WPF application above.
+`Backend/core/SQLAuditor.csproj` builds the console executable used by the
+[CLI](#command-line-interface-cli) above (it also provides a lightweight interactive menu
+when run with no arguments).
 

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SQLAuditor.Lib;
 
 // The evaluation engine locates the checklist and writes results/ relative to the
 // current working directory. When VS Code launches this server, set the working
@@ -11,6 +12,10 @@ if (!string.IsNullOrWhiteSpace(repoRoot) && Directory.Exists(repoRoot))
 {
     Directory.SetCurrentDirectory(repoRoot);
 }
+
+// GitHub Copilot Chat is the AI for the IDE flow. Disable the engine's LLM evaluators
+// so this server makes NO direct LLM/API calls, regardless of any .env or env vars.
+Auditor.DisableLlmEvaluators();
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -24,6 +29,7 @@ builder.Logging.AddConsole(options =>
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly()
+    .WithPromptsFromAssembly();
 
 await builder.Build().RunAsync();

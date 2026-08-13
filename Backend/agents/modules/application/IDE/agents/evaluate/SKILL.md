@@ -34,8 +34,11 @@ CLI `evaluate` command and reuses the same evaluation engine.
 - Paths to the generated JSON + report.
 
 ## Configuration (no hardcoded secrets)
-- SQL: `SQLAUDITOR_SERVER`, `SQLAUDITOR_SQL_USER`, `SQLAUDITOR_SQL_PASSWORD`.
-- LLM provider: `PROVIDER_BASE_URL`, `PROVIDER_API_KEY`, `MODEL`.
+- SQL: `SQLAUDITOR_SERVER`, `SQLAUDITOR_SQL_USER`. The SQL Login password is read at
+  runtime from the `SQLAUDITOR_SQL_PASSWORD` session environment variable only — it is
+  never stored in `mcp.json`, source, logs, result files, or chat.
+- LLM provider: not used by the IDE/MCP flow (Copilot Chat is the AI); `PROVIDER_BASE_URL`,
+  `PROVIDER_API_KEY`, and `MODEL` are ignored here.
 
 ## Reuses
 - `SQLAuditor.Lib.Auditor.RunChecklistAsync(progress, requestUserInput: null, selectedIds, ct)`
