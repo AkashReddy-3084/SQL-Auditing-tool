@@ -13,10 +13,13 @@
   "servers": {
     "sql-auditor": {
       "type": "stdio",
-      "command": "C:\\Users\\v-utiwari\\Downloads\\SQL Auditor Project\\SQL-Auditing-tool\\Backend\\agents\\modules\\application\\IDE\\bin\\Debug\\net8.0\\SQLAuditor.Mcp.exe",
+      // Portable path: ${workspaceFolder} resolves to wherever this repo is
+      // cloned, so it works on any machine/username. Build the server first:
+      //   dotnet build "Backend/agents/modules/application/IDE/SQLAuditor.Mcp.csproj"
+      "command": "${workspaceFolder}\\Backend\\agents\\modules\\application\\IDE\\bin\\Debug\\net10.0\\SQLAuditor.Mcp.exe",
       // Run from the repo folder so the engine can locate the checklist and
       // write results/ (final_report.md, checklist_results.json).
-      "cwd": "C:\\Users\\v-utiwari\\Downloads\\SQL Auditor Project\\SQL-Auditing-tool"
+      "cwd": "${workspaceFolder}"
     }
   }
 }
