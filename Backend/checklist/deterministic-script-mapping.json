@@ -1,116 +1,722 @@
-﻿{
-    "backup":  [
-                   "Backend/checklist/scripts/sql/backup.sql"
-               ],
-    "9.1.1":  [
-                  "Backend/checklist/scripts/sql/9.1.1_Backup_strategy_defined_and_matches_RPO_full_differential_log_or_PaaS_automated.sql"
-              ],
-    "6.2.2":  [
-                  "Backend/checklist/scripts/sql/6.2.2_tls_enforced_for_data_in_transit_encrypt_true_minimum_tls_version_set.sql"
-              ],
-    "tde":  [
-                "Backend/checklist/scripts/sql/tde.sql"
-            ],
-    "9.1.5":  [
-                  "Backend/checklist/scripts/sql/9.1.5_backups_stored_redundantly_geo_redundant_where_required.sql"
-              ],
-    "10.4.1":  [
-                   "Backend/checklist/scripts/sql/10.4.1_etl_job_run_history_captured_and_retained.sql"
-               ],
-    "4.5.4":  [
-                  "Backend/checklist/scripts/sql/4.5.4_check_constraints_enforce_domain_rules_where_practical.sql"
-              ],
-    "4.5.1":  [
-                  "Backend/checklist/scripts/sql/4.5.1_Primary_keys_defined_on_all_tables.sql"
-              ],
-    "14.5.2":  [
-                   "Backend/checklist/scripts/sql/14.5.2_auto_create_statistics_enabled_where_appropriate.sql"
-               ],
-    "4.2.3":  [
-                  "Backend/checklist/scripts/sql/4.2.3_fact_tables_contain_only_foreign_keys_and_measures_no_descriptive_attr.sql"
-              ],
-    "10.2.2":  [
-                   "Backend/checklist/scripts/sql/10.2.2_query_store_used_to_detect_regressions_and_force_plans_where_needed.sql"
-               ],
-    "deadlock":  [
-                     "Backend/checklist/scripts/sql/deadlock.sql"
-                 ],
-    "4.5.2":  [
-                  "Backend/checklist/scripts/sql/4.5.2_foreign_keys_enforced_where_integrity_matters_or_documented_trusted_by.sql"
-              ],
-    "2.1.3":  [
-                  "Backend/checklist/scripts/sql/2.1.3_etl_is_parameterized_no_hardcoded_servers_paths_dates_or_credentials.sql"
-              ],
-    "10.4.4":  [
-                   "Backend/checklist/scripts/sql/10.4.4_sql_agent_scheduler_jobs_inventoried_and_owned.sql"
-               ],
-    "14.5.5":  [
-                   "Backend/checklist/scripts/sql/14.5.5_query_store_used_to_force_stable_plans_where_regressions_occur.sql"
-               ],
-    "12.2.4":  [
-                   "Backend/checklist/scripts/sql/12.2.4_backup_storage_costs_monitored_retention_tuned.sql"
-               ],
-    "6.2.1":  [
-                  "Backend/checklist/scripts/sql/6.2.1_Transparent_Data_Encryption_TDE_enabled_for_encryption_at_rest.sql"
-              ],
-    "9.1.3":  [
-                  "Backend/checklist/scripts/sql/9.1.3_backups_restore_tested_regularly_not_just_taken.sql"
-              ],
-    "6.2.4":  [
-                  "Backend/checklist/scripts/sql/6.2.4_dynamic_data_masking_applied_to_sensitive_columns_where_appropriate.sql"
-              ],
-    "10.3.2":  [
-                   "Backend/checklist/scripts/sql/10.3.2_Deadlock_capture_configured.sql"
-               ],
-    "14.3.2":  [
-                   "Backend/checklist/scripts/sql/14.3.2_deadlocks_captured_extended_events_and_resolved.sql"
-               ],
-    "6.4.2":  [
-                  "Backend/checklist/scripts/sql/6.4.2_No_credentials_hardcoded_in_ETL_packages_scripts_or_linked_servers.sql"
-              ],
-    "11.3.5":  [
-                   "Backend/checklist/scripts/sql/11.3.5_non_prod_data_masking_subsetting_applied_where_sensitive.sql"
-               ],
-    "9.2.11":  [
-                   "Backend/checklist/scripts/sql/9.2.11_backup_preference_configured_backups_taken_from_the_preferred_secondar.sql"
-               ],
-    "3.1.2":  [
-                  "Backend/checklist/scripts/sql/3.1.2_No_SELECT_in_production_code_explicit_column_lists.sql"
-              ],
-    "6.2.7":  [
-                  "Backend/checklist/scripts/sql/6.2.7_backups_are_encrypted.sql"
-              ],
-    "4.5.6":  [
-                  "Backend/checklist/scripts/sql/4.5.6_not_null_applied_to_mandatory_columns.sql"
-              ],
-    "3.1.7":  [
-                  "Backend/checklist/scripts/sql/3.1.7_no_hardcoded_literals_for_environment_specific_values.sql"
-              ],
-    "10.2.1":  [
-                   "Backend/checklist/scripts/sql/10.2.1_Query_Store_enabled_and_configured_appropriately.sql"
-               ],
-    "4.5.3":  [
-                  "Backend/checklist/scripts/sql/4.5.3_unique_constraints_on_natural_business_keys_where_appropriate.sql"
-              ],
-    "10.4.2":  [
-                   "Backend/checklist/scripts/sql/10.4.2_Job_failures_alert_the_responsible_team.sql"
-               ],
-    "14.5.1":  [
-                   "Backend/checklist/scripts/sql/14.5.1_Statistics_kept_current_auto_update_on_plus_manual_updates_after_large_loads.sql"
-               ],
-    "9.3.1":  [
-                  "Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql"
-              ],
-    "3.3.5":  [
-                  "Backend/checklist/scripts/sql/3.3.5_deadlock_prone_patterns_avoided_retry_logic_where_needed.sql"
-              ],
-    "query-store":  [
-                        "Backend/checklist/scripts/sql/query-store.sql"
-                    ],
-    "9.1.6":  [
-                  "Backend/checklist/scripts/sql/9.1.6_backup_failures_alerted_and_monitored.sql"
-              ],
-    "query-store,backup,deadlock,dbcc-checkdb,tde":  [
-                                                         "Backend/checklist/scripts/sql/query-store,backup,deadlock,dbcc-checkdb,tde.sql"
-                                                     ]
+{
+  "1.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.1_Deployment_model_is_deliberate_and_documented_SQL_Server_Azure_SQL_MI_Azure_SQL_DB_with_rationale.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "1.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.2_Environment_separation_exists_Dev_Test_Prod_with_isolated_instances_or_databases.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.1.3": {
+    "script_file": null,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.4_Compute_tier_service_tier_appropriate_for_workload_vCore_DTU_Business_Critical_General_Purpose.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.1.5": {
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.6_Single_source_of_truth_no_duplicate_warehouses_serving_the_same_purpose.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.1.7": {
+    "script_file": null,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.1_Clear_layering_defined_staging_ODS_integration_dimensional_DW_data_marts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.2_Each_layer_has_a_defined_purpose_and_transformation_responsibility.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.3_Staging_area_is_transient_isolated_and_not_queried_by_consumers.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.4_Data_flow_lineage_is_traceable_end_to_end_from_source_to_mart.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.5_Schema_separation_used_to_organize_layers_domains_dedicated_schemas_not_all_in_dbo.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.6_Audit_metadata_captured_on_load_load_date_source_system_batch_id.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.2.7": {
+    "script_file": "Backend/checklist/scripts/sql/1.2.7_Historical_archival_strategy_defined_for_the_DW.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.1_HA_approach_defined_and_matches_SLA_Always_On_AG_failover_cluster_zone_redundant_failover_groups.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.2_Redundancy_configured_for_the_production_database_replicas_zone_redundancy.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.3_Read_scale_replicas_used_for_reporting_where_appropriate.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.4": {
+    "script_file": null,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.5_Connection_strings_use_listener_failover_group_endpoints_not_a_single_node.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.6": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.6_Maintenance_windows_and_patching_approach_defined_or_Microsoft_managed_for_PaaS.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "1.3.7": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.7_Application_connection_endpoint_is_a_failover_aware_AG_Listener_FCI_virtual_network_name_not_a_static_client_alias_or_DNS_CNAME_that_must_be_manually_repointed_on_failover_verify_what_the_alias_C1SVPMLSQLAPP01_actually_resolves_to.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.3.8": {
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.3.9": {
+    "script_file": null,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "1.3.10": {
+    "script_file": "Backend/checklist/scripts/sql/1.3.10_HA_node_configuration_parity_verified_both_nodes_have_identical_instance_configuration_trace_flags_MAXDOP_memory_logins_SQL_Agent_jobs_linked_servers_and_certificates.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.2_ETL_packages_pipelines_follow_consistent_naming_conventions.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.3_ETL_is_parameterized_no_hardcoded_servers_paths_dates_or_credentials.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.4_Orchestration_dependency_management_exists_master_package_pipeline_or_scheduler.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.5_Reusable_templated_ETL_components_no_copy_paste_per_table.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.6_ETL_is_metadata_driven_or_well_modularized_where_appropriate.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.1.7": {
+    "script_file": "Backend/checklist/scripts/sql/2.1.7_ETL_is_logically_documented_data_flow_transformations_source_to_target_mappings.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "2.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.1_Incremental_load_implemented_where_applicable_watermark_CDC_Change_Tracking.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.2_Full_load_reserved_for_small_reference_dimension_tables_or_initial_loads.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.3_Watermark_control_values_persisted_reliably_control_table_not_volatile.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.4_CDC_Change_Tracking_configured_and_maintained_correctly_where_used.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.5_Insert_Update_Delete_operations_handled_correctly_MERGE_or_equivalent.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/2.2.6_Late_arriving_out_of_order_data_handled_without_corruption.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.1_ETL_has_structured_error_handling_TRY_CATCH_event_handlers_failure_paths.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.2_Failed_loads_are_restartable_from_point_of_failure_not_full_re_run.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.3_Bad_rejected_rows_routed_to_a_quarantine_error_table_not_silently_dropped_or_failing_the_batch.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.4": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.4_Retry_logic_exists_for_transient_failures.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.5_ETL_runs_are_idempotent_re_run_does_not_duplicate_data.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.3.6": {
+    "script_file": "Backend/checklist/scripts/sql/2.3.6_Failures_trigger_notifications_email_alert_monitoring.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.1": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.1_Bulk_load_patterns_used_BULK_INSERT_bcp_minimal_logging_for_large_loads.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.2": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.2_Set_based_operations_preferred_over_row_by_row_processing.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.3": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.3_Indexes_constraints_managed_during_large_loads_disable_rebuild_where_beneficial.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.4": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.4_ETL_windows_avoid_contention_with_reporting_query_workloads.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.5": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.5_ETL_execution_times_monitored_and_baselined.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "2.4.6": {
+    "script_file": "Backend/checklist/scripts/sql/2.4.6_Parallelism_used_appropriately_no_unnecessary_serial_execution.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.1_Consistent_formatting_and_naming_conventions_across_objects.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.2_No_SELECT_in_production_code_explicit_column_lists.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.3_Schema_qualified_object_references_dbo_Table_not_Table.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.4_SET_NOCOUNT_ON_and_appropriate_SET_options_in_procedures.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.5_No_deprecated_syntax_features_e_g_old_style_joins_TEXT_NTEXT.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.6_Code_is_commented_for_complex_logic_business_rules_explained.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "3.1.7": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.7_No_hardcoded_literals_for_environment_specific_values.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.1_Business_transformation_logic_encapsulated_in_stored_procedures_functions_not_ad_hoc_scripts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.2_Set_based_logic_used_cursors_WHILE_loops_avoided_except_where_justified.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.3_Scalar_UDFs_avoided_in_hot_paths_inlined_replaced_where_they_hurt_performance.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.4_Views_used_appropriately_no_deeply_nested_view_chains_that_hide_cost.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.5_Dynamic_SQL_where_used_is_parameterized_sp_executesql_no_injection_risk.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/3.2.6_Temp_tables_vs_table_variables_chosen_appropriately_for_cardinality.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.1_Transactions_scoped_correctly_not_held_open_across_long_operations.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.2_TRY_CATCH_with_proper_error_raising_logging_THROW_RAISERROR.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.3_XACT_ABORT_transaction_state_handling_correct_on_error.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.4": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.4_Appropriate_isolation_levels_used_no_unnecessary_SERIALIZABLE_RCSI_considered.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.5_Deadlock_prone_patterns_avoided_retry_logic_where_needed.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.3.6": {
+    "script_file": "Backend/checklist/scripts/sql/3.3.6_Multi_step_operations_maintain_consistency_on_partial_failure.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.1_Modeling_approach_is_deliberate_3NF_integration_layer_and_or_dimensional_marts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.2_Naming_conventions_consistent_for_tables_columns_and_schemas.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.3_Data_types_appropriate_and_right_sized_no_oversized_varchar_correct_numeric_precision.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.4_No_stringly_typed_dates_numbers_correct_temporal_types.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.5_Audit_columns_present_where_needed_created_modified_source_batch.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/4.1.6_Schemas_used_to_organize_objects_by_layer_domain.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.1_Star_schema_implemented_fact_dimension_tables_not_flat_wide_tables.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.2_Fact_table_grain_clearly_defined_and_documented_per_fact.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.3_Fact_tables_contain_only_foreign_keys_and_measures_no_descriptive_attributes.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.4_Surrogate_keys_used_for_dimensions_IDENTITY_sequence_not_business_keys_in_facts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.5_Conformed_dimensions_shared_across_facts_no_duplicate_versions.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.6_Date_Time_dimension_exists_with_required_attributes.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.7": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.7_SCD_strategy_defined_and_implemented_per_dimension_Type_1_2_3.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.2.8": {
+    "script_file": "Backend/checklist/scripts/sql/4.2.8_SCD_Type_2_valid_from_valid_to_is_current_maintained_correctly_where_used.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.1_Every_table_has_an_appropriate_clustered_index_or_deliberate_heap_justification.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.2_Columnstore_indexes_used_for_large_fact_tables_analytical_workloads_where_appropriate.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.3_Nonclustered_indexes_align_with_query_workload_patterns_not_arbitrary.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.4": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.4_No_redundant_duplicate_overlapping_indexes.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.5_Unused_indexes_identified_and_removed_DMV_evidence.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.6": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.6_Missing_index_recommendations_reviewed_not_blindly_applied.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.7": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.7_Fill_factor_and_index_options_set_deliberately_where_needed.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.3.8": {
+    "script_file": "Backend/checklist/scripts/sql/4.3.8_Index_maintenance_rebuild_reorganize_scheduled_based_on_fragmentation.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.1": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.1_Partitioning_strategy_defined_for_large_tables_by_date_range_where_beneficial.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.2": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.2_Partition_alignment_supports_fast_load_switch_and_purge_sliding_window.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.3": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.3_Filegroups_used_to_organize_storage_where_applicable_SQL_Server_MI.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.4": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.4_Data_compression_row_page_columnstore_applied_where_beneficial.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.5": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.5_tempdb_configured_appropriately_multiple_files_sizing_SQL_Server_MI.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.6": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.6_Storage_growth_monitored_autogrowth_settings_sane_fixed_size_not_tiny.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.4.7": {
+    "script_file": "Backend/checklist/scripts/sql/4.4.7_Archival_purge_process_exists_for_aged_data.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.1": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.1_Primary_keys_defined_on_all_tables.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.2": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.2_Foreign_keys_enforced_where_integrity_matters_or_documented_trusted_by_ETL_exceptions.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.3": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.3_Unique_constraints_on_natural_business_keys_where_appropriate.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.4": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.4_Check_constraints_enforce_domain_rules_where_practical.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.5": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.5_Constraints_are_TRUSTED_not_disabled_untrusted_which_hurts_the_optimizer.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "4.5.6": {
+    "script_file": "Backend/checklist/scripts/sql/4.5.6_NOT_NULL_applied_to_mandatory_columns.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.1_Data_quality_framework_formally_defined_with_rules_ownership_and_scoring.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.2_DQ_rules_codified_config_driven_or_reusable_procedures_not_ad_hoc_manual_checks.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.3_DQ_KPIs_defined_completeness_accuracy_timeliness_consistency_uniqueness_validity.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.4_DQ_results_logged_and_trended_over_time.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.5_DQ_remediation_workflow_exists_alert_investigate_fix_verify.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.6_DQ_SLAs_defined_per_data_product_mart.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.7": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.7_DQ_failures_halt_progression_where_critical_bad_data_not_silently_promoted.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.1.8": {
+    "script_file": "Backend/checklist/scripts/sql/5.1.8_Quarantine_pattern_failed_rows_routed_to_error_tables_with_failure_reason.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.1_Schema_validation_on_inbound_data_column_presence_types.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.2_Completeness_all_expected_sources_batches_received.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.3_Record_count_reconciliation_vs_source_control_counts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.4_Duplicate_detection_across_batches.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.5_Null_empty_handling_unexpected_nulls_flagged.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.6_Corrupt_malformed_rows_isolated_not_failing_the_entire_batch.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.2.7": {
+    "script_file": "Backend/checklist/scripts/sql/5.2.7_Source_metadata_captured_load_timestamp_source_batch_ID.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.1_Referential_integrity_validated_FKs_in_facts_match_dimensions.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.2_Business_rule_validation_applied_domain_rules_ranges.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.3_Deduplication_verified_no_duplicate_business_keys_after_load.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  }
 }
