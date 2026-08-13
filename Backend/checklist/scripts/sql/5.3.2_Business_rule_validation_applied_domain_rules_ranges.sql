@@ -1,6 +1,3 @@
--- Checklist: No SELECT * in production code; explicit column lists
--- Scope: DATABASE
--- Scoring: 3=0 occurrences, 2=1-3 occurrences, 1=4-10 occurrences, 0=>10 occurrences
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
@@ -18,14 +15,20 @@ WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
         SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @Count INT = 0;
-        SELECT @Count = COUNT(*) FROM sys.sql_modules m
-        JOIN sys.objects o ON m.object_id = o.object_id
-        WHERE o.type IN (''P'',''V'',''TF'',''IF'',''TR'',''FN'')
-        AND o.is_ms_shipped = 0
-        AND (m.definition LIKE ''%SELECT *%'' OR m.definition LIKE ''%SELECT  *%'');
-        INSERT INTO #DbResults VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', CASE WHEN @Count = 0 THEN 3 WHEN @Count <= 3 THEN 2 WHEN @Count <= 10 THEN 1 ELSE 0 END);';
-        EXEC sp_executesql @Sql;
+        DECLARE @ConstraintCount INT = 0;
+        SELECT @ConstraintCount = COUNT(*) FROM sys.check_constraints;
+        SELECT @ConstraintCount = @ConstraintCount + COUNT(*) FROM sys.default_constraints;
+        
+        DECLARE @DbScore INT = 0;
+        IF @ConstraintCount = 0 SET @DbScore = 0;
+        ELSE IF @ConstraintCount <= 10 SET @DbScore = 1;
+        ELSE IF @ConstraintCount <= 50 SET @DbScore = 2;
+        ELSE SET @DbScore = 3;
+        
+        IF @DbScore > 2 SET @DbScore = 2;
+        
+        INSERT INTO #DbResults VALUES (@DbNameParam, @DbScore);';
+        EXEC sp_executesql @Sql, N'@DbNameParam NVARCHAR(256)', @DbNameParam = @DbName;
     END TRY
     BEGIN CATCH
         INSERT INTO #DbResults VALUES (@DbName, 0);
@@ -35,7 +38,6 @@ END
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
--- Aggregate: worst-case score across all databases
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 DROP TABLE #DbResults;
