@@ -346,5 +346,300 @@
   ],
   "5.3.3": [
     "Backend/checklist/scripts/sql/5.3.3_Deduplication_verified_no_duplicate_business_keys_after_load.sql"
+  ],
+  "5.3.4": [
+    "Backend/checklist/scripts/sql/5.3.4_Aggregate_consistency_detail_sums_equal_aggregate_totals.sql"
+  ],
+  "5.3.5": [
+    "Backend/checklist/scripts/sql/5.3.5_Cross_layer_reconciliation_mart_vs_integration_vs_source_counts.sql"
+  ],
+  "5.3.6": [
+    "Backend/checklist/scripts/sql/5.3.6_Unknown_default_dimension_member_usage_monitored.sql"
+  ],
+  "5.3.7": [
+    "Backend/checklist/scripts/sql/5.3.7_No_duplicate_grain_in_fact_tables.sql"
+  ],
+  "5.3.8": [
+    "Backend/checklist/scripts/sql/5.3.8_Freshness_validation_marts_updated_within_SLA.sql"
+  ],
+  "5.4.1": [
+    "Backend/checklist/scripts/sql/5.4.1_Dates_valid_ranges_consistent_handling_no_invalid_future_dates_where_prohibited.sql"
+  ],
+  "5.4.2": [
+    "Backend/checklist/scripts/sql/5.4.2_Numeric_Financial_precision_preserved_no_rounding_errors_currency_codes_valid.sql"
+  ],
+  "5.4.3": [
+    "Backend/checklist/scripts/sql/5.4.3_String_Text_encoding_collation_consistent_max_length_respected_no_silent_truncation.sql"
+  ],
+  "5.4.4": [
+    "Backend/checklist/scripts/sql/5.4.4_Sensitive_data_masked_protected_where_required_format_validation_applied.sql"
+  ],
+  "5.4.5": [
+    "Backend/checklist/scripts/sql/5.4.5_Categorical_Enum_values_within_expected_domain_no_invalid_codes.sql"
+  ],
+  "5.4.6": [
+    "Backend/checklist/scripts/sql/5.4.6_Identifiers_Keys_uniqueness_verified_format_consistent_no_nulls_in_keys.sql"
+  ],
+  "5.4.7": [
+    "Backend/checklist/scripts/sql/5.4.7_Boolean_Flag_only_expected_values_consistent_representation_across_tables.sql"
+  ],
+  "6.1.1": [
+    "Backend/checklist/scripts/sql/6.1.1_Microsoft_Entra_ID_Azure_AD_authentication_used_where_possible_over_SQL_auth.sql"
+  ],
+  "6.1.2": [
+    "Backend/checklist/scripts/sql/6.1.2_Principle_of_least_privilege_applied_to_logins_users_no_broad_db_owner_sysadmin.sql"
+  ],
+  "6.1.3": [
+    "Backend/checklist/scripts/sql/6.1.3_Database_roles_used_for_permission_grants_not_per_user_grants.sql"
+  ],
+  "6.1.4": [
+    "Backend/checklist/scripts/sql/6.1.4_Application_connects_via_a_dedicated_least_privilege_service_account_identity_Managed_Identity_preferred.sql"
+  ],
+  "6.1.5": [
+    "Backend/checklist/scripts/sql/6.1.5_No_shared_generic_accounts_for_administrative_or_application_access.sql"
+  ],
+  "6.1.6": [
+    "Backend/checklist/scripts/sql/6.1.6_Guest_contractor_access_explicitly_governed_and_time_bound.sql"
+  ],
+  "6.1.7": [
+    "Backend/checklist/scripts/sql/6.1.7_Regular_access_reviews_scheduled_and_documented.sql"
+  ],
+  "6.1.8": [
+    "Backend/checklist/scripts/sql/6.1.8_Schema_object_level_permissions_align_with_least_privilege.sql"
+  ],
+  "6.2.1": [
+    "Backend/checklist/scripts/sql/6.2.1_Transparent_Data_Encryption_TDE_enabled_for_encryption_at_rest.sql"
+  ],
+  "6.2.2": [
+    "Backend/checklist/scripts/sql/6.2.2_TLS_enforced_for_data_in_transit_Encrypt_true_minimum_TLS_version_set.sql"
+  ],
+  "6.2.3": [
+    "Backend/checklist/scripts/sql/6.2.3_Always_Encrypted_used_for_highly_sensitive_columns_where_required.sql"
+  ],
+  "6.2.4": [
+    "Backend/checklist/scripts/sql/6.2.4_Dynamic_Data_Masking_applied_to_sensitive_columns_where_appropriate.sql"
+  ],
+  "6.2.5": [
+    "Backend/checklist/scripts/sql/6.2.5_Row_Level_Security_implemented_where_multi_tenant_segmented_access_is_required.sql"
+  ],
+  "6.2.6": [
+    "Backend/checklist/scripts/sql/6.2.6_Sensitive_data_classified_SQL_Data_Discovery_Classification_labels.sql"
+  ],
+  "6.2.7": [
+    "Backend/checklist/scripts/sql/6.2.7_Backups_are_encrypted.sql"
+  ],
+  "6.2.8": [
+    "Backend/checklist/scripts/sql/6.2.8_Customer_managed_keys_CMK_BYOK_used_where_policy_requires.sql"
+  ],
+  "6.3.1": [
+    "Backend/checklist/scripts/sql/6.3.1_Firewall_network_rules_restrict_access_to_known_sources.sql"
+  ],
+  "6.3.2": [
+    "Backend/checklist/scripts/sql/6.3.2_Private_endpoints_VNet_integration_used_Azure_SQL_or_network_isolation_SQL_Server.sql"
+  ],
+  "6.3.3": [
+    "Backend/checklist/scripts/sql/6.3.3_Public_network_access_disabled_or_tightly_restricted_Azure_SQL.sql"
+  ],
+  "6.3.4": [
+    "Backend/checklist/scripts/sql/6.3.4_No_broad_allow_Azure_services_0_0_0_0_firewall_rules.sql"
+  ],
+  "6.3.5": [
+    "Backend/checklist/scripts/sql/6.3.5_Jump_host_bastion_or_controlled_path_for_administrative_access.sql"
+  ],
+  "6.4.1": [
+    "Backend/checklist/scripts/sql/6.4.1_Connection_strings_secrets_stored_in_a_secret_store_Key_Vault_not_config_files_or_code.sql"
+  ],
+  "6.4.2": [
+    "Backend/checklist/scripts/sql/6.4.2_No_credentials_hardcoded_in_ETL_packages_scripts_or_linked_servers.sql"
+  ],
+  "6.4.3": [
+    "Backend/checklist/scripts/sql/6.4.3_Managed_Identity_used_for_service_to_service_auth_where_supported.sql"
+  ],
+  "6.4.4": [
+    "Backend/checklist/scripts/sql/6.4.4_Credential_key_rotation_policy_defined_and_automated.sql"
+  ],
+  "6.4.5": [
+    "Backend/checklist/scripts/sql/6.4.5_Linked_servers_external_data_sources_use_least_privilege_non_personal_credentials.sql"
+  ],
+  "7.1.1": [
+    "Backend/checklist/scripts/sql/7.1.1_Applicable_regulatory_compliance_regime_s_identified_and_documented.sql"
+  ],
+  "7.1.2": [
+    "Backend/checklist/scripts/sql/7.1.2_In_scope_regulated_data_categories_identified_and_inventoried.sql"
+  ],
+  "7.1.3": [],
+  "7.1.4": [
+    "Backend/checklist/scripts/sql/7.1.4_Data_residency_regional_processing_requirements_identified_and_met.sql"
+  ],
+  "7.1.5": [],
+  "7.1.6": [
+    "Backend/checklist/scripts/sql/7.1.6_Breach_incident_notification_process_documented.sql"
+  ],
+  "7.2.1": [
+    "Backend/checklist/scripts/sql/7.2.1_Segregation_of_Duties_enforced_developer_deployer_approver.sql"
+  ],
+  "7.2.2": [
+    "Backend/checklist/scripts/sql/7.2.2_All_schema_code_changes_go_through_formal_change_management.sql"
+  ],
+  "7.2.3": [
+    "Backend/checklist/scripts/sql/7.2.3_Audit_trail_for_changes_to_financial_relevant_data.sql"
+  ],
+  "7.2.4": [
+    "Backend/checklist/scripts/sql/7.2.4_Access_control_changes_logged_and_reviewable.sql"
+  ],
+  "7.2.5": [
+    "Backend/checklist/scripts/sql/7.2.5_Transformation_logic_documented_and_reproducible.sql"
+  ],
+  "7.2.6": [
+    "Backend/checklist/scripts/sql/7.2.6_Source_to_target_reconciliation_exists_for_financial_data.sql"
+  ],
+  "7.2.7": [
+    "Backend/checklist/scripts/sql/7.2.7_Retention_of_historical_financial_data_per_policy.sql"
+  ],
+  "7.3.1": [],
+  "7.3.2": [
+    "Backend/checklist/scripts/sql/7.3.2_Data_minimization_applied_only_necessary_personal_data_stored.sql"
+  ],
+  "7.3.3": [
+    "Backend/checklist/scripts/sql/7.3.3_Right_to_erasure_rectification_technically_achievable.sql"
+  ],
+  "7.3.4": [
+    "Backend/checklist/scripts/sql/7.3.4_Data_retention_policies_defined_per_data_category.sql"
+  ],
+  "7.3.5": [
+    "Backend/checklist/scripts/sql/7.3.5_Consent_purpose_tracking_integrated_where_applicable.sql"
+  ],
+  "7.3.6": [],
+  "7.4.1": [
+    "Backend/checklist/scripts/sql/7.4.1_SQL_Audit_server_database_enabled_for_sensitive_operations.sql"
+  ],
+  "7.4.2": [
+    "Backend/checklist/scripts/sql/7.4.2_Login_permission_changes_captured_and_reviewable.sql"
+  ],
+  "7.4.3": [
+    "Backend/checklist/scripts/sql/7.4.3_Data_access_to_sensitive_tables_auditable_who_accessed_what_when.sql"
+  ],
+  "7.4.4": [
+    "Backend/checklist/scripts/sql/7.4.4_Audit_logs_retained_per_compliance_requirement.sql"
+  ],
+  "7.4.5": [
+    "Backend/checklist/scripts/sql/7.4.5_Audit_logs_stored_in_a_tamper_resistant_location_separate_store_immutable.sql"
+  ],
+  "7.4.6": [
+    "Backend/checklist/scripts/sql/7.4.6_Temporal_tables_change_tracking_used_for_data_history_where_required.sql"
+  ],
+  "8.1.1": [
+    "Backend/checklist/scripts/sql/8.1.1_Source_to_target_lineage_documented_ETL_mappings.sql"
+  ],
+  "8.1.2": [
+    "Backend/checklist/scripts/sql/8.1.2_Enterprise_catalog_e_g_Microsoft_Purview_integrated_or_planned.sql"
+  ],
+  "8.1.3": [
+    "Backend/checklist/scripts/sql/8.1.3_Objects_tagged_classified_with_business_domain_and_owner.sql"
+  ],
+  "8.1.4": [
+    "Backend/checklist/scripts/sql/8.1.4_Dependencies_documented_linked_servers_cross_database_references.sql"
+  ],
+  "8.1.5": [
+    "Backend/checklist/scripts/sql/8.1.5_Extended_properties_documentation_on_key_objects.sql"
+  ],
+  "8.2.1": [
+    "Backend/checklist/scripts/sql/8.2.1_Every_table_dataset_has_a_defined_data_owner.sql"
+  ],
+  "8.2.2": [
+    "Backend/checklist/scripts/sql/8.2.2_Data_stewards_assigned_per_domain_subject_area.sql"
+  ],
+  "8.2.3": [
+    "Backend/checklist/scripts/sql/8.2.3_Ownership_documented_not_tribal_knowledge.sql"
+  ],
+  "8.2.4": [
+    "Backend/checklist/scripts/sql/8.2.4_Escalation_path_for_data_quality_issues_defined.sql"
+  ],
+  "8.2.5": [],
+  "8.3.1": [
+    "Backend/checklist/scripts/sql/8.3.1_Data_dictionary_exists_for_DW_mart_tables.sql"
+  ],
+  "8.3.2": [
+    "Backend/checklist/scripts/sql/8.3.2_Technical_metadata_schema_captured_and_current.sql"
+  ],
+  "8.3.3": [
+    "Backend/checklist/scripts/sql/8.3.3_Business_definitions_rules_documented_and_current.sql"
+  ],
+  "8.3.4": [
+    "Backend/checklist/scripts/sql/8.3.4_Metadata_accessible_to_consumers_discoverable.sql"
+  ],
+  "8.3.5": [
+    "Backend/checklist/scripts/sql/8.3.5_Business_glossary_terminology_maintained.sql"
+  ],
+  "9.1.1": [
+    "Backend/checklist/scripts/sql/9.1.1_Backup_strategy_defined_and_matches_RPO_full_differential_log_or_PaaS_automated.sql"
+  ],
+  "9.1.2": [
+    "Backend/checklist/scripts/sql/9.1.2_Point_in_time_restore_capability_verified_retention_period_appropriate.sql"
+  ],
+  "9.1.3": [
+    "Backend/checklist/scripts/sql/9.1.3_Backups_restore_tested_regularly_not_just_taken.sql"
+  ],
+  "9.1.4": [
+    "Backend/checklist/scripts/sql/9.1.4_Long_term_retention_LTR_configured_where_required.sql"
+  ],
+  "9.1.5": [
+    "Backend/checklist/scripts/sql/9.1.5_Backups_stored_redundantly_geo_redundant_where_required.sql"
+  ],
+  "9.1.6": [
+    "Backend/checklist/scripts/sql/9.1.6_Backup_failures_alerted_and_monitored.sql"
+  ],
+  "9.1.7": [
+    "Backend/checklist/scripts/sql/9.1.7_Recovery_model_appropriate_Full_Simple_Bulk_logged_SQL_Server_MI.sql"
+  ],
+  "9.2.1": [
+    "Backend/checklist/scripts/sql/9.2.1_RTO_and_RPO_defined_and_documented.sql"
+  ],
+  "9.2.2": [
+    "Backend/checklist/scripts/sql/9.2.2_HA_solution_matches_SLA_Always_On_AG_failover_groups_zone_redundancy.sql"
+  ],
+  "9.2.3": [
+    "Backend/checklist/scripts/sql/9.2.3_Geo_replication_failover_group_configured_for_DR_where_required.sql"
+  ],
+  "9.2.4": [],
+  "9.2.5": [
+    "Backend/checklist/scripts/sql/9.2.5_Failover_tested_at_least_annually.sql"
+  ],
+  "9.2.6": [
+    "Backend/checklist/scripts/sql/9.2.6_Secondary_region_replica_capacity_provisioned_or_evaluated.sql"
+  ],
+  "9.2.7": [],
+  "9.2.8": [
+    "Backend/checklist/scripts/sql/9.2.8_Availability_mode_synchronous_vs_asynchronous_commit_and_failover_mode_automatic_vs_manual_documented_and_aligned_to_RPO_RTO.sql"
+  ],
+  "9.2.9": [
+    "Backend/checklist/scripts/sql/9.2.9_AG_cluster_health_and_replica_synchronization_state_actively_monitored_unhealthy_or_not_synchronizing_replicas_alerted.sql"
+  ],
+  "9.2.10": [
+    "Backend/checklist/scripts/ps1/9.2.10_WSFC_quorum_witness_configured_correctly_for_the_node_count_avoids_split_brain_quorum_model_documented.ps1"
+  ],
+  "9.2.11": [
+    "Backend/checklist/scripts/sql/9.2.11_Backup_preference_configured_backups_taken_from_the_preferred_secondary_replica_where_used_and_validated_across_failover.sql"
+  ],
+  "9.2.12": [
+    "Backend/checklist/scripts/sql/9.2.12_Listener_alias_failover_tested_end_to_end_applications_reconnect_transparently_with_no_manual_intervention.sql"
+  ],
+  "9.3.1": [
+    "Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql"
+  ],
+  "9.3.2": [
+    "Backend/checklist/scripts/sql/9.3.2_Page_verification_set_to_CHECKSUM.sql"
+  ],
+  "9.3.3": [
+    "Backend/checklist/scripts/sql/9.3.3_Corruption_detection_alerting_in_place.sql"
+  ],
+  "9.3.4": [
+    "Backend/checklist/scripts/sql/9.3.4_ETL_is_idempotent_safe_to_re_run_after_failure.sql"
+  ],
+  "9.3.5": [
+    "Backend/checklist/scripts/sql/9.3.5_Multi_step_operations_maintain_integrity_on_partial_failure.sql"
+  ],
+  "9.4.1": [
+    "Backend/checklist/scripts/sql/9.4.1_Data_freshness_SLAs_defined_per_mart_data_product.sql"
   ]
 }
