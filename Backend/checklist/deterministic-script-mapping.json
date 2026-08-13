@@ -718,5 +718,263 @@
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
+  },
+  "5.3.4": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.4_Aggregate_consistency_detail_sums_equal_aggregate_totals.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.5_Cross_layer_reconciliation_mart_vs_integration_vs_source_counts.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.6": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.6_Unknown_default_dimension_member_usage_monitored.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.7": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.7_No_duplicate_grain_in_fact_tables.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.3.8": {
+    "script_file": "Backend/checklist/scripts/sql/5.3.8_Freshness_validation_marts_updated_within_SLA.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.1": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.1_Dates_valid_ranges_consistent_handling_no_invalid_future_dates_where_prohibited.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.2": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.2_Numeric_Financial_precision_preserved_no_rounding_errors_currency_codes_valid.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.3": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.3_String_Text_encoding_collation_consistent_max_length_respected_no_silent_truncation.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.4": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.4_Sensitive_data_masked_protected_where_required_format_validation_applied.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.5": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.5_Categorical_Enum_values_within_expected_domain_no_invalid_codes.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.6": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.6_Identifiers_Keys_uniqueness_verified_format_consistent_no_nulls_in_keys.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "5.4.7": {
+    "script_file": "Backend/checklist/scripts/sql/5.4.7_Boolean_Flag_only_expected_values_consistent_representation_across_tables.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.1_Microsoft_Entra_ID_Azure_AD_authentication_used_where_possible_over_SQL_auth.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.2_Principle_of_least_privilege_applied_to_logins_users_no_broad_db_owner_sysadmin.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.3_Database_roles_used_for_permission_grants_not_per_user_grants.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.4_Application_connects_via_a_dedicated_least_privilege_service_account_identity_Managed_Identity_preferred.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.5_No_shared_generic_accounts_for_administrative_or_application_access.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.1.6": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.6_Guest_contractor_access_explicitly_governed_and_time_bound.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "6.1.7": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.7_Regular_access_reviews_scheduled_and_documented.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "6.1.8": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.8_Schema_object_level_permissions_align_with_least_privilege.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.1": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.1_Transparent_Data_Encryption_TDE_enabled_for_encryption_at_rest.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.2": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.2_TLS_enforced_for_data_in_transit_Encrypt_true_minimum_TLS_version_set.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.3": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.3_Always_Encrypted_used_for_highly_sensitive_columns_where_required.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.4": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.4_Dynamic_Data_Masking_applied_to_sensitive_columns_where_appropriate.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.5": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.5_Row_Level_Security_implemented_where_multi_tenant_segmented_access_is_required.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.6": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.6_Sensitive_data_classified_SQL_Data_Discovery_Classification_labels.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.7": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.7_Backups_are_encrypted.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.2.8": {
+    "script_file": "Backend/checklist/scripts/sql/6.2.8_Customer_managed_keys_CMK_BYOK_used_where_policy_requires.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.3.1": {
+    "script_file": "Backend/checklist/scripts/sql/6.3.1_Firewall_network_rules_restrict_access_to_known_sources.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.3.2": {
+    "script_file": "Backend/checklist/scripts/sql/6.3.2_Private_endpoints_VNet_integration_used_Azure_SQL_or_network_isolation_SQL_Server.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.3.3": {
+    "script_file": "Backend/checklist/scripts/sql/6.3.3_Public_network_access_disabled_or_tightly_restricted_Azure_SQL.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.3.4": {
+    "script_file": "Backend/checklist/scripts/sql/6.3.4_No_broad_allow_Azure_services_0_0_0_0_firewall_rules.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.3.5": {
+    "script_file": "Backend/checklist/scripts/sql/6.3.5_Jump_host_bastion_or_controlled_path_for_administrative_access.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.4.1": {
+    "script_file": "Backend/checklist/scripts/sql/6.4.1_Connection_strings_secrets_stored_in_a_secret_store_Key_Vault_not_config_files_or_code.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.4.2": {
+    "script_file": "Backend/checklist/scripts/sql/6.4.2_No_credentials_hardcoded_in_ETL_packages_scripts_or_linked_servers.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.4.3": {
+    "script_file": "Backend/checklist/scripts/sql/6.4.3_Managed_Identity_used_for_service_to_service_auth_where_supported.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "6.4.4": {
+    "script_file": "Backend/checklist/scripts/sql/6.4.4_Credential_key_rotation_policy_defined_and_automated.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "6.4.5": {
+    "script_file": "Backend/checklist/scripts/sql/6.4.5_Linked_servers_external_data_sources_use_least_privilege_non_personal_credentials.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "7.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/7.1.1_Applicable_regulatory_compliance_regime_s_identified_and_documented.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "7.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/7.1.2_In_scope_regulated_data_categories_identified_and_inventoried.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "7.1.3": {
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
+  },
+  "7.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/7.1.4_Data_residency_regional_processing_requirements_identified_and_met.sql",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "7.1.5": {
+    "script_file": null,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   }
 }
