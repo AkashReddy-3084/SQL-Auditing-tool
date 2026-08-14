@@ -1,0 +1,25 @@
+{
+  // VS Code MCP configuration for the SQL Auditor evaluation server.
+  // GitHub Copilot Chat is the AI: it invokes these tools and orchestrates the
+  // conversation. The server makes NO direct LLM/API calls, so no PROVIDER_* /
+  // MODEL / API key is needed here.
+  //
+  // No SQL credentials are stored here. Windows Authentication needs nothing.
+  // For SQL Authentication, set SQLAUDITOR_SQL_PASSWORD in your own terminal
+  // session before launching VS Code (e.g. `$env:SQLAUDITOR_SQL_PASSWORD='...'`).
+  // The server reads it from the session environment at runtime, so the password
+  // never lives in this file, in chat, in source, in logs, or in result files.
+  // Reload/Restart the server from the MCP view after editing this file.
+  "servers": {
+    "sql-auditor": {
+      "type": "stdio",
+      // Portable path: ${workspaceFolder} resolves to wherever this repo is
+      // cloned, so it works on any machine/username. Build the server first:
+      //   dotnet build "Backend/agents/modules/IDE/SQLAuditor.Mcp.csproj"
+      "command": "${workspaceFolder}\\Backend\\agents\\modules\\IDE\\bin\\Debug\\net10.0\\SQLAuditor.Mcp.exe",
+      // Run from the repo folder so the engine can locate the checklist and
+      // write results/ (final_report.md, checklist_results.json).
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

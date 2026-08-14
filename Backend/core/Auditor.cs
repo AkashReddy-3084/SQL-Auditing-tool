@@ -124,9 +124,16 @@ namespace SQLAuditor.Lib
         // are not yet configured.
         public void EnsureLlmEvaluators()
         {
+            if (_llmDisabled) return;
             try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
             try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
         }
+
+        // When set, the auditor never creates LLM evaluators (even if .env or env vars
+        // are present). The IDE/MCP server calls this so GitHub Copilot Chat is the AI
+        // and the server makes no direct LLM/API calls. CLI and WPF do not set it.
+        private static bool _llmDisabled;
+        public static void DisableLlmEvaluators() => _llmDisabled = true;
 
         // Supplies LLM provider settings at runtime (from the UI). Not persisted to disk;
         // these values take precedence over any .env or environment variables.
