@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -124,219 +125,305 @@ namespace SQLAuditor.Agents
                 new AgentRunResult();
 
 
-            foreach (var item in checklist)
+            const int batchSize = 10;
+
+            for (int batchStart = 0;
+                batchStart < checklist.Count;
+                batchStart += batchSize)
             {
-                if (cancellationToken.IsCancellationRequested) break;
+                if (cancellationToken.IsCancellationRequested)
+                    break;
 
-                progress?.Report($"[Agent] {item.ChecklistId} - {item.CheckName}");
+                var batch =
+                    checklist
+                        .Skip(batchStart)
+                        .Take(batchSize)
+                        .ToList();
 
-                const int maxGenerationAttempts = 3;
-                bool itemSucceeded = false;
-                string? retryContext = null;
+                progress?.Report(
+                    $"[Agent] Starting batch {(batchStart / batchSize) + 1} " +
+                    $"with {batch.Count} checklist items");
 
-                for (int genAttempt = 1; genAttempt <= maxGenerationAttempts; genAttempt++)
+                // ==========================================================
+                // PROCESS ALL ITEMS IN THIS BATCH CONCURRENTLY
+                // Each item gets its own independent LLM request/session.
+                // ==========================================================
+
+                var tasks =
+                    batch.Select(item =>
+                        ProcessItemAsync(
+                            item,
+                            sqlDir,
+                            ps1Dir,
+                            progress,
+                            cancellationToken))
+                    .ToArray();
+
+                // Wait until ALL items in this batch have completed.
+                var batchResults =
+                    await Task.WhenAll(tasks);
+
+                // ==========================================================
+                // MERGE RESULTS AFTER ALL 10 ITEMS ARE COMPLETE
+                // ==========================================================
+
+                foreach (var result in batchResults)
                 {
-                    if (cancellationToken.IsCancellationRequested) break;
+                    if (result == null)
+                        continue;
 
-                    try
+                    // Generated item
+                    if (result.Generated)
                     {
-                        // ==========================================
-                        // STEP 1 - CALL LLM (FEASIBILITY + SCRIPT)
-                        // ==========================================
+                        runResult.Generated.Add(
+                            result.ChecklistId);
+                    }
 
-                        if (genAttempt == 1)
-                            progress?.Report($"  Generating script via LLM...");
-                        else
-                            progress?.Report($"  Retry {genAttempt}/{maxGenerationAttempts}: Regenerating script via LLM...");
+                    // Failed item
+                    if (result.Failed)
+                    {
+                        runResult.Failed.Add(
+                            result.ChecklistId);
+                    }
 
-                        var response =
-                            await _processor
-                                .GenerateScriptAsync(
-                                    item,
-                                    progress,
-                                    genAttempt > 1 ? retryContext : null);
+                    // Skipped item
+                    if (result.Skipped != null)
+                    {
+                        runResult.Skipped.Add(
+                            result.Skipped);
+                    }
+
+                    // Execution result
+                    if (result.ExecutionResult != null)
+                    {
+                        _executionResults.Add(
+                            result.ExecutionResult);
+                    }
+
+                    // Classification / deterministic mapping
+                    _classificationRegistry[result.ChecklistId] =
+                        (
+                            result.ScriptFile,
+                            result.IsAdminCheck,
+                            result.IsDocumentationCheck,
+                            result.McpFeasibility
+                        );
+                }
+
+                // ==========================================================
+                // WRITE ONCE AFTER THE ENTIRE BATCH IS COMPLETE
+                // ==========================================================
+
+                await WriteResultsIteratively();
+
+                progress?.Report(
+                    $"[Agent] Completed batch {(batchStart / batchSize) + 1} " +
+                    $"({batchResults.Length} items)");
+
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+            }
+            return runResult;
+        }
+        
 
 
-                        if (!response.IsFeasible)
+
+        private async Task<ItemProcessingResult> ProcessItemAsync(
+            ScriptGenChecklistItem item,
+            string sqlDir,
+            string ps1Dir,
+            IProgress<string>? progress,
+            CancellationToken cancellationToken)
+        {
+            const int maxGenerationAttempts = 3;
+
+            string? retryContext = null;
+
+            var result =
+                new ItemProcessingResult
+                {
+                    ChecklistId = item.ChecklistId
+                };
+
+            for (int genAttempt = 1;
+                 genAttempt <= maxGenerationAttempts;
+                 genAttempt++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return result;
+
+                try
+                {
+                    // ==========================================================
+                    // STEP 1 - CALL LLM
+                    // This is an independent chat/request for THIS item only.
+                    // ==========================================================
+
+                    progress?.Report(
+                        $"[{item.ChecklistId}] " +
+                        $"{(genAttempt == 1 ? "Generating" : $"Retry {genAttempt}/{maxGenerationAttempts}: Regenerating")} script via LLM...");
+
+                    var response =
+                        await _processor.GenerateScriptAsync(
+                            item,
+                            progress,
+                            genAttempt > 1
+                                ? retryContext
+                                : null);
+
+                    // ==========================================================
+                    // NOT FEASIBLE
+                    // ==========================================================
+
+                    if (!response.IsFeasible)
+                    {
+                        progress?.Report(
+                            $"[{item.ChecklistId}] NOT FEASIBLE: {response.Reason}");
+
+                        result.Skipped =
+                            new SkippedItem
+                            {
+                                ChecklistId =
+                                    item.ChecklistId,
+
+                                CheckName =
+                                    item.CheckName,
+
+                                Reason =
+                                    response.Reason
+                            };
+
+                        result.ExecutionResult =
+                            new ExecutionResultEntry
+                            {
+                                ChecklistId =
+                                    item.ChecklistId,
+
+                                CheckName =
+                                    item.CheckName,
+
+                                Category =
+                                    item.Category,
+
+                                Status =
+                                    "Not Feasible",
+
+                                Reason =
+                                    response.Reason
+                            };
+
+                        result.ScriptFile = null;
+                        result.IsAdminCheck = response.IsAdminCheck;
+                        result.IsDocumentationCheck = response.IsDocumentationCheck;
+                        result.McpFeasibility = response.McpFeasibility;
+
+                        return result;
+                    }
+
+                    // ==========================================================
+                    // STEP 2 - LOCAL FORMAT VALIDATION
+                    // ==========================================================
+
+                    var validation =
+                        _validator.Validate(response);
+
+                    if (!validation.IsValid)
+                    {
+                        progress?.Report(
+                            $"[{item.ChecklistId}] FORMAT VALIDATION FAILED: {validation.Error}");
+
+                        if (genAttempt < maxGenerationAttempts)
                         {
-                            progress?.Report($"  NOT FEASIBLE: {response.Reason}");
+                            retryContext =
+                                $"Format validation failed: {validation.Error}";
 
-                            runResult.Skipped.Add(
-                                new SkippedItem
-                                {
-                                    ChecklistId =
-                                        item.ChecklistId,
+                            await Task.Delay(
+                                2000,
+                                cancellationToken);
 
-                                    CheckName =
-                                        item.CheckName,
-
-                                    Reason =
-                                        response.Reason
-                                });
-
-                            _executionResults.Add(
-                                new ExecutionResultEntry
-                                {
-                                    ChecklistId =
-                                        item.ChecklistId,
-
-                                    CheckName =
-                                        item.CheckName,
-
-                                    Category =
-                                        item.Category,
-
-                                    Status =
-                                        "Not Feasible",
-
-                                    Reason =
-                                        response.Reason
-                                });
-
-                            _classificationRegistry[item.ChecklistId] = (
-                                null,
-                                response.IsAdminCheck,
-                                response.IsDocumentationCheck,
-                                response.McpFeasibility);
-
-                            await WriteResultsIteratively();
-                            itemSucceeded = true; // not a failure, just skipped
-                            break;
+                            continue;
                         }
 
+                        result.Failed = true;
 
-                        // ==========================================
-                        // STEP 2 - VALIDATE GENERATED SCRIPT FORMAT
-                        // ==========================================
+                        result.ExecutionResult =
+                            new ExecutionResultEntry
+                            {
+                                ChecklistId =
+                                    item.ChecklistId,
 
-                        var validation =
-                            _validator.Validate(response);
+                                CheckName =
+                                    item.CheckName,
 
-                        if (!validation.IsValid)
+                                Category =
+                                    item.Category,
+
+                                Status =
+                                    "Validation Failed",
+
+                                Reason =
+                                    $"Failed after {maxGenerationAttempts} attempts. " +
+                                    $"Last error: {validation.Error}"
+                            };
+
+                        return result;
+                    }
+
+                    // ==========================================================
+                    // STEP 3 - CONTENT VALIDATION VIA LLM
+                    // This is another independent request for THIS item.
+                    // ==========================================================
+
+                    progress?.Report(
+                        $"[{item.ChecklistId}] Validating script content via LLM...");
+
+                    var contentValidation =
+                        await _processor.ValidateScriptAsync(
+                            item,
+                            response,
+                            progress);
+
+                    if (!contentValidation.IsValid)
+                    {
+                        if (!string.IsNullOrWhiteSpace(
+                            contentValidation.CorrectedScript))
                         {
-                            progress?.Report($"  FORMAT VALIDATION FAILED: {validation.Error}");
+                            progress?.Report(
+                                $"[{item.ChecklistId}] Script had issues, " +
+                                $"using corrected version from validator.");
 
-                            if (genAttempt < maxGenerationAttempts)
-                            {
-                                retryContext = $"Format validation failed: {validation.Error}";
-                                progress?.Report($"  Will retry generation with feedback...");
-                                await Task.Delay(2000);
-                                continue;
-                            }
+                            response.ScriptContent =
+                                contentValidation.CorrectedScript;
 
-                            // Final attempt failed
-                            runResult.Failed.Add(
-                                item.ChecklistId);
+                            var revalidation =
+                                _validator.Validate(response);
 
-                            _executionResults.Add(
-                                new ExecutionResultEntry
-                                {
-                                    ChecklistId =
-                                        item.ChecklistId,
-
-                                    CheckName =
-                                        item.CheckName,
-
-                                    Category =
-                                        item.Category,
-
-                                    Status =
-                                        "Validation Failed",
-
-                                    Reason =
-                                        $"Failed after {maxGenerationAttempts} attempts. Last error: {validation.Error}"
-                                });
-
-                            await WriteResultsIteratively();
-                            break;
-                        }
-
-
-                        // ==========================================
-                        // STEP 3 - VALIDATE SCRIPT CONTENT VIA LLM
-                        // ==========================================
-
-                        progress?.Report($"  Validating script content via LLM...");
-
-                        var contentValidation =
-                            await _processor
-                                .ValidateScriptAsync(
-                                    item, response, progress);
-
-                        if (!contentValidation.IsValid)
-                        {
-                            if (!string.IsNullOrWhiteSpace(
-                                contentValidation.CorrectedScript))
+                            if (!revalidation.IsValid)
                             {
                                 progress?.Report(
-                                    $"  Script had issues, using corrected version from validator.");
-
-                                response.ScriptContent =
-                                    contentValidation.CorrectedScript;
-
-                                // Re-validate corrected script format
-                                var revalidation =
-                                    _validator.Validate(response);
-
-                                if (!revalidation.IsValid)
-                                {
-                                    progress?.Report(
-                                        $"  CORRECTED SCRIPT FORMAT INVALID: {revalidation.Error}");
-
-                                    if (genAttempt < maxGenerationAttempts)
-                                    {
-                                        retryContext = $"Content validation found issues: {contentValidation.Issues}\nValidator provided a corrected script but it also failed format validation: {revalidation.Error}";
-                                        progress?.Report($"  Will retry generation with feedback...");
-                                        await Task.Delay(2000);
-                                        continue;
-                                    }
-
-                                    runResult.Failed.Add(
-                                        item.ChecklistId);
-
-                                    _executionResults.Add(
-                                        new ExecutionResultEntry
-                                        {
-                                            ChecklistId =
-                                                item.ChecklistId,
-
-                                            CheckName =
-                                                item.CheckName,
-
-                                            Category =
-                                                item.Category,
-
-                                            Status =
-                                                "Corrected Script Validation Failed",
-
-                                            Reason =
-                                                $"Failed after {maxGenerationAttempts} attempts. Last error: {revalidation.Error}"
-                                        });
-
-                                    await WriteResultsIteratively();
-                                    break;
-                                }
-
-                                progress?.Report(
-                                    $"  ✓ Corrected script passed format validation");
-                            }
-                            else
-                            {
-                                progress?.Report(
-                                    $"  CONTENT VALIDATION FAILED: {contentValidation.Issues}");
+                                    $"[{item.ChecklistId}] " +
+                                    $"CORRECTED SCRIPT FORMAT INVALID: {revalidation.Error}");
 
                                 if (genAttempt < maxGenerationAttempts)
                                 {
-                                    retryContext = $"Content validation failed: {contentValidation.Issues}";
-                                    progress?.Report($"  Will retry generation with feedback...");
-                                    await Task.Delay(2000);
+                                    retryContext =
+                                        $"Content validation found issues: " +
+                                        $"{contentValidation.Issues}\n" +
+                                        $"Validator provided a corrected script " +
+                                        $"but it also failed format validation: " +
+                                        $"{revalidation.Error}";
+
+                                    await Task.Delay(
+                                        2000,
+                                        cancellationToken);
+
                                     continue;
                                 }
 
-                                runResult.Failed.Add(
-                                    item.ChecklistId);
+                                result.Failed = true;
 
-                                _executionResults.Add(
+                                result.ExecutionResult =
                                     new ExecutionResultEntry
                                     {
                                         ChecklistId =
@@ -349,146 +436,232 @@ namespace SQLAuditor.Agents
                                             item.Category,
 
                                         Status =
-                                            "Content Validation Failed",
+                                            "Corrected Script Validation Failed",
 
                                         Reason =
-                                            $"Failed after {maxGenerationAttempts} attempts. Last issues: {contentValidation.Issues}"
-                                    });
+                                            $"Failed after {maxGenerationAttempts} attempts. " +
+                                            $"Last error: {revalidation.Error}"
+                                    };
 
-                                await WriteResultsIteratively();
-                                break;
+                                return result;
                             }
+
+                            progress?.Report(
+                                $"[{item.ChecklistId}] " +
+                                $"✓ Corrected script passed format validation");
                         }
                         else
                         {
                             progress?.Report(
-                                $"  ✓ Script content validated successfully");
+                                $"[{item.ChecklistId}] " +
+                                $"CONTENT VALIDATION FAILED: {contentValidation.Issues}");
+
+                            if (genAttempt < maxGenerationAttempts)
+                            {
+                                retryContext =
+                                    $"Content validation failed: " +
+                                    $"{contentValidation.Issues}";
+
+                                await Task.Delay(
+                                    2000,
+                                    cancellationToken);
+
+                                continue;
+                            }
+
+                            result.Failed = true;
+
+                            result.ExecutionResult =
+                                new ExecutionResultEntry
+                                {
+                                    ChecklistId =
+                                        item.ChecklistId,
+
+                                    CheckName =
+                                        item.CheckName,
+
+                                    Category =
+                                        item.Category,
+
+                                    Status =
+                                        "Content Validation Failed",
+
+                                    Reason =
+                                        $"Failed after {maxGenerationAttempts} attempts. " +
+                                        $"Last issues: {contentValidation.Issues}"
+                                };
+
+                            return result;
                         }
+                    }
+                    else
+                    {
+                        progress?.Report(
+                            $"[{item.ChecklistId}] " +
+                            $"✓ Script content validated successfully");
+                    }
 
+                    // ==========================================================
+                    // STEP 4 - SAVE SCRIPT
+                    // ==========================================================
 
-                        // ==========================================
-                        // STEP 4 - SAVE SCRIPT TO DISK
-                        // ==========================================
-
-                        var safeName = Regex.Replace(
+                    var safeName =
+                        Regex.Replace(
                             item.CheckName ?? "",
                             @"[^a-zA-Z0-9]+",
-                            "_").Trim('_');
-                        var filename =
-                            $"{item.ChecklistId}_{safeName}.{response.ScriptType}";
+                            "_")
+                        .Trim('_');
 
-                        var outputDir =
-                            response.ScriptType == "sql"
+                    var filename =
+                        $"{item.ChecklistId}_{safeName}.{response.ScriptType}";
+
+                    var outputDir =
+                        response.ScriptType == "sql"
                             ? sqlDir
                             : ps1Dir;
 
-                        var scriptPath =
-                            Path.Combine(
-                                outputDir,
-                                filename);
+                    var scriptPath =
+                        Path.Combine(
+                            outputDir,
+                            filename);
 
-                        await File.WriteAllTextAsync(
-                            scriptPath,
-                            response.ScriptContent);
+                    await File.WriteAllTextAsync(
+                        scriptPath,
+                        response.ScriptContent,
+                        cancellationToken);
 
-                        progress?.Report($"  ✓ Script saved: {response.ScriptType}/{filename}");
-                        progress?.Report($"    Scope: {response.Scope} | Scoring: {response.ScoringLogic}");
+                    progress?.Report(
+                        $"[{item.ChecklistId}] ✓ Script saved: " +
+                        $"{response.ScriptType}/{filename}");
 
+                    progress?.Report(
+                        $"[{item.ChecklistId}] " +
+                        $"Scope: {response.Scope} | " +
+                        $"Scoring: {response.ScoringLogic}");
 
-                        // ==========================================
-                        // STEP 5 - RECORD MAPPING
-                        // ==========================================
+                    // ==========================================================
+                    // STEP 5 + STEP 6
+                    // DO NOT MODIFY SHARED COLLECTIONS HERE.
+                    // Return the result to RunAsync instead.
+                    // ==========================================================
 
-                        _classificationRegistry[item.ChecklistId] = (
-                            $"Backend/checklist/scripts/{response.ScriptType}/{filename}",
-                            response.IsAdminCheck,
-                            response.IsDocumentationCheck,
-                            response.McpFeasibility);
+                    result.Generated = true;
 
+                    result.ScriptFile =
+                        $"Backend/checklist/scripts/" +
+                        $"{response.ScriptType}/{filename}";
 
-                        // ==========================================
-                        // STEP 6 - RECORD RESULT
-                        // ==========================================
+                    result.IsAdminCheck =
+                        response.IsAdminCheck;
 
-                        _executionResults.Add(
-                            new ExecutionResultEntry
-                            {
-                                ChecklistId =
-                                    item.ChecklistId,
+                    result.IsDocumentationCheck =
+                        response.IsDocumentationCheck;
 
-                                CheckName =
-                                    item.CheckName,
+                    result.McpFeasibility =
+                        response.McpFeasibility;
 
-                                Category =
-                                    item.Category,
+                    result.ExecutionResult =
+                        new ExecutionResultEntry
+                        {
+                            ChecklistId =
+                                item.ChecklistId,
 
-                                Scope =
-                                    response.Scope,
+                            CheckName =
+                                item.CheckName,
 
-                                Status =
-                                    genAttempt > 1
+                            Category =
+                                item.Category,
+
+                            Scope =
+                                response.Scope,
+
+                            Status =
+                                genAttempt > 1
                                     ? $"Script Generated (attempt {genAttempt})"
                                     : "Script Generated",
 
-                                ScriptType =
-                                    response.ScriptType,
+                            ScriptType =
+                                response.ScriptType,
 
-                                ScriptPath =
-                                    $"{response.ScriptType}/{filename}",
+                            ScriptPath =
+                                $"{response.ScriptType}/{filename}",
 
-                                ScoringLogic =
-                                    response.ScoringLogic
-                            });
+                            ScoringLogic =
+                                response.ScoringLogic
+                        };
 
+                    return result;
+                }
+                catch (OperationCanceledException)
+                    when (cancellationToken.IsCancellationRequested)
+                {
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    progress?.Report(
+                        $"[{item.ChecklistId}] ERROR: {ex.Message}");
 
-                        runResult.Generated.Add(
-                            item.ChecklistId);
-
-                        await WriteResultsIteratively();
-                        itemSucceeded = true;
-                        break; // success — exit retry loop
-                    }
-                    catch (Exception ex)
+                    if (genAttempt < maxGenerationAttempts)
                     {
-                        progress?.Report($"  ERROR: {ex.Message}");
+                        retryContext =
+                            $"Exception during generation: {ex.Message}";
 
-                        if (genAttempt < maxGenerationAttempts)
-                        {
-                            retryContext = $"Exception during generation: {ex.Message}";
-                            progress?.Report($"  Will retry generation...");
-                            await Task.Delay(2000);
-                            continue;
-                        }
+                        await Task.Delay(
+                            2000,
+                            cancellationToken);
 
-                        runResult.Failed.Add(
-                            item.ChecklistId);
-
-                        _executionResults.Add(
-                            new ExecutionResultEntry
-                            {
-                                ChecklistId =
-                                    item.ChecklistId,
-
-                                CheckName =
-                                    item.CheckName,
-
-                                Category =
-                                    item.Category,
-
-                                Status =
-                                    "Failed",
-
-                                Reason =
-                                    $"Failed after {maxGenerationAttempts} attempts. Last error: {ex.Message}"
-                            });
-
-                        await WriteResultsIteratively();
+                        continue;
                     }
+
+                    result.Failed = true;
+
+                    result.ExecutionResult =
+                        new ExecutionResultEntry
+                        {
+                            ChecklistId =
+                                item.ChecklistId,
+
+                            CheckName =
+                                item.CheckName,
+
+                            Category =
+                                item.Category,
+
+                            Status =
+                                "Failed",
+
+                            Reason =
+                                $"Failed after {maxGenerationAttempts} attempts. " +
+                                $"Last error: {ex.Message}"
+                        };
+
+                    return result;
                 }
             }
 
+            return result;
+        }
 
-            return runResult;
+        private sealed class ItemProcessingResult
+        {
+            public string ChecklistId { get; set; } = "";
+
+            public bool Generated { get; set; }
+
+            public bool Failed { get; set; }
+
+            public SkippedItem? Skipped { get; set; }
+
+            public ExecutionResultEntry? ExecutionResult { get; set; }
+
+            public string? ScriptFile { get; set; }
+
+            public bool IsAdminCheck { get; set; }
+
+            public bool IsDocumentationCheck { get; set; }
+
+            public bool McpFeasibility { get; set; }
         }
 
 
