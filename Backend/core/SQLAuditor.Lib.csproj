@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <!-- <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
@@ -18,9 +18,10 @@
   <ItemGroup>
     <Compile Remove="Program.cs" />
   </ItemGroup>
-  <!-- Interface host code (CLI/IDE) under application/ has its own projects. -->
+  <!-- Interface host code (CLI/IDE) has its own projects. -->
   <ItemGroup>
-    <Compile Remove="..\agents\modules\application\**\*.cs" />
+    <Compile Remove="..\agents\modules\CLI\**\*.cs" />
+    <Compile Remove="..\agents\modules\IDE\**\*.cs" />
   </ItemGroup>
 
 </Project>

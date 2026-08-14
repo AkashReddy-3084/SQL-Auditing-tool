@@ -8,7 +8,7 @@ results without leaving VS Code. Read-only over files the engine already writes.
 
 ## Trigger (intended)
 - Chat usage, e.g. `/show_reports` or `/show_reports summary`.
-- Exposed as an MCP tool named `show_reports` from the IDE host under `application/IDE/`.
+- Exposed as an MCP tool named `show_reports` from the IDE host under `IDE/`.
 
 ## Inputs
 | Name   | Required | Description                                                       |
