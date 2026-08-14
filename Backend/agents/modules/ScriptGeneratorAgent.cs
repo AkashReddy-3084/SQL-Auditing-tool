@@ -216,6 +216,42 @@ namespace SQLAuditor.Agents
 
                 await WriteResultsIteratively();
 
+                // ==========================================================
+                // REPORT AUTHORITATIVE BATCH RESULTS TO THE UI
+                // The UI must update counters/progress only from this message.
+                // Intermediate validation failures during retries are NOT counted.
+                // ==========================================================
+
+                var batchProcessed =
+                    batchResults.Count(r =>
+                        r != null &&
+                        (
+                            r.Generated ||
+                            r.Failed ||
+                            r.Skipped != null
+                        ));
+
+                var batchGenerated =
+                    batchResults.Count(r =>
+                        r != null && r.Generated);
+
+                var batchSkipped =
+                    batchResults.Count(r =>
+                        r != null && r.Skipped != null);
+
+                var batchFailed =
+                    batchResults.Count(r =>
+                        r != null && r.Failed);
+
+                progress?.Report(
+                    $"[Agent] Batch {(batchStart / batchSize) + 1} complete | " +
+                    $"Processed: {batchProcessed} | " +
+                    $"Generated: {batchGenerated} | " +
+                    $"Skipped: {batchSkipped} | " +
+                    $"Failed: {batchFailed}");
+                    
+                    
+
                 progress?.Report(
                     $"[Agent] Completed batch {(batchStart / batchSize) + 1} " +
                     $"({batchResults.Length} items)");

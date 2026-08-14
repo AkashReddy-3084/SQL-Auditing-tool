@@ -60,36 +60,102 @@ namespace SQLAuditor.Wpf
             // This runs on the UI thread (marshaled by Progress<T>).
             LogBox.AppendText(msg + "\n");
             LogBox.ScrollToEnd();
-
-            // Detect item start: "[Agent] 1.2.3 - Check Name"
-            if (msg.StartsWith("[Agent] ") && !msg.StartsWith("[Agent] Loaded"))
+        
+            // ==========================================================
+            // LIVE LOG ONLY
+            // Do NOT update Generated / Skipped / Failed / Progress here.
+            //
+            // Those values are updated only after an entire batch finishes.
+            // This prevents retry attempts from being counted as failures.
+            // ==========================================================
+        
+            // Show the currently active checklist item in the header.
+            // Current ProcessItemAsync messages look like:
+            // [10.4.2] Generating script via LLM...
+            // [10.4.2] Validating script content via LLM...
+            // [10.4.2] Retry 2/3: Regenerating script via LLM...
+            if (msg.StartsWith("[") &&
+                !msg.StartsWith("[Agent]", StringComparison.OrdinalIgnoreCase))
             {
-                _processedItems++;
-                UpdateProgress();
-
-                var itemLabel = msg.Substring(8);
-                if (itemLabel.Length > 80) itemLabel = itemLabel.Substring(0, 77) + "...";
-                CurrentItemText.Text = itemLabel;
+                var closingBracket = msg.IndexOf(']');
+        
+                if (closingBracket > 1)
+                {
+                    var itemLabel =
+                        msg.Substring(
+                            0,
+                            Math.Min(msg.Length, closingBracket + 1));
+        
+                    if (itemLabel.Length > 80)
+                        itemLabel = itemLabel.Substring(0, 77) + "...";
+        
+                    CurrentItemText.Text = itemLabel;
+                }
             }
-
-            // Detect outcomes from step results
-            if (msg.TrimStart().StartsWith("NOT FEASIBLE:", StringComparison.OrdinalIgnoreCase))
+        
+            // ==========================================================
+            // AUTHORITATIVE BATCH RESULT
+            //
+            // Expected format:
+            //
+            // [Agent] Batch 3 complete | Processed: 10 |
+            // Generated: 8 | Skipped: 1 | Failed: 1
+            //
+            // Only this message updates progress/counters during execution.
+            // ==========================================================
+        
+            if (msg.StartsWith(
+                    "[Agent] Batch ",
+                    StringComparison.OrdinalIgnoreCase) &&
+                msg.Contains(
+                    " complete | ",
+                    StringComparison.OrdinalIgnoreCase))
             {
-                _skipped++;
-                UpdateCounters();
-            }
-            else if (msg.TrimStart().StartsWith("FORMAT VALIDATION FAILED:", StringComparison.OrdinalIgnoreCase)
-                || msg.TrimStart().StartsWith("CONTENT VALIDATION FAILED:", StringComparison.OrdinalIgnoreCase)
-                || msg.TrimStart().StartsWith("CORRECTED SCRIPT FORMAT INVALID:", StringComparison.OrdinalIgnoreCase)
-                || msg.TrimStart().StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
-            {
-                _failed++;
-                UpdateCounters();
-            }
-            else if (msg.TrimStart().StartsWith("\u2713 Script saved:", StringComparison.Ordinal))
-            {
-                _generated++;
-                UpdateCounters();
+                var parts = msg.Split('|');
+        
+                if (parts.Length >= 5)
+                {
+                    var processedText =
+                        parts[1].Replace("Processed:", "").Trim();
+        
+                    var generatedText =
+                        parts[2].Replace("Generated:", "").Trim();
+        
+                    var skippedText =
+                        parts[3].Replace("Skipped:", "").Trim();
+        
+                    var failedText =
+                        parts[4].Replace("Failed:", "").Trim();
+        
+                    if (int.TryParse(processedText, out var processed))
+                    {
+                        _processedItems += processed;
+                    }
+        
+                    if (int.TryParse(generatedText, out var generated))
+                    {
+                        _generated += generated;
+                    }
+        
+                    if (int.TryParse(skippedText, out var skipped))
+                    {
+                        _skipped += skipped;
+                    }
+        
+                    if (int.TryParse(failedText, out var failed))
+                    {
+                        _failed += failed;
+                    }
+        
+                    UpdateProgress();
+                    UpdateCounters();
+        
+                    CurrentItemText.Text =
+                        $"Batch complete — " +
+                        $"{_generated} generated, " +
+                        $"{_skipped} skipped, " +
+                        $"{_failed} failed";
+                }
             }
         }
 
