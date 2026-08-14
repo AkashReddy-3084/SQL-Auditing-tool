@@ -121,7 +121,23 @@ public static class AuditTools
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
             sb.AppendLine($"{manualPending.Count} item(s) were not decided by the deterministic scripts and need review.");
             sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. For EACH item below you MUST:");
-            sb.AppendLine("  1. Analyze what the item verifies and give the user SPECIFIC, tailored guidance (e.g. exact T-SQL to run, settings/objects to inspect in SSMS).");
+            sb.AppendLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content — exact T-SQL to run, settings/objects to inspect in SSMS):");
+            sb.AppendLine("       Checklist: <checklist title>");
+            sb.AppendLine("       Objective: <one sentence explaining what is being verified>");
+            sb.AppendLine("       ");
+            sb.AppendLine("       ## Manual Verification Steps:");
+            sb.AppendLine("       1. ...");
+            sb.AppendLine("       2. ... (include SQL queries in ```sql code blocks whenever required)");
+            sb.AppendLine("       ");
+            sb.AppendLine("       ## What indicates a PASS and a FAIL");
+            sb.AppendLine("       Pass:");
+            sb.AppendLine("       - ...");
+            sb.AppendLine("       Fail:");
+            sb.AppendLine("       - ...");
+            sb.AppendLine("       ");
+            sb.AppendLine("       ## Recommended Actions (if failed)");
+            sb.AppendLine("       - ...");
+            sb.AppendLine("     Do NOT add extra sections or headings outside this format.");
             sb.AppendLine("  2. Ask the user for their finding / evidence.");
             sb.AppendLine("  3. Decide Pass or Fail together with the user, then call the 'resolve_review' tool.");
             sb.AppendLine("Do NOT write a final summary until every item has been resolved.");
@@ -136,7 +152,7 @@ public static class AuditTools
                 }
                 if (!string.IsNullOrWhiteSpace(r.Evidence))
                 {
-                    sb.AppendLine("Baseline verification steps (augment with your own analysis; do not just echo them):");
+                    sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
                     sb.AppendLine(r.Evidence.Trim());
                 }
                 sb.AppendLine($"After the user decides, call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<user's rationale>\")");

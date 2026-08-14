@@ -9,7 +9,7 @@ CLI `evaluate` command and reuses the same evaluation engine.
 
 ## Trigger (intended)
 - Chat/slash usage, e.g. `/evaluate 1.1.2,3.1.2`
-- Exposed as an MCP tool named `evaluate` from the IDE host under `application/IDE/`.
+- Exposed as an MCP tool named `evaluate` from the IDE host under `IDE/`.
 
 ## Inputs
 | Name    | Required | Description                                              |

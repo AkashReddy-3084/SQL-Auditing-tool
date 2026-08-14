@@ -9,11 +9,27 @@ namespace SQLAuditor
     {
         static async Task<int> Main(string[] args)
         {
+            // The CLI never calls an LLM: Copilot CLI is the AI layer. Disabling the
+            // engine's evaluators guarantees no .env / PROVIDER_* dependency here.
+            SQLAuditor.Lib.Auditor.DisableLlmEvaluators();
+
             // Non-interactive CLI subcommand: evaluate specific checklist items and exit.
             // Example: sqlauditor evaluate --items 1.1.2,3.1.2 --server myhost\\sqlexpress
             if (args.Length > 0 && string.Equals(args[0], "evaluate", StringComparison.OrdinalIgnoreCase))
             {
                 return await RunEvaluateCommandAsync(args);
+            }
+
+            // Record a review decision for a NeedsReview item (used by the Copilot CLI skill).
+            if (args.Length > 0 && string.Equals(args[0], "resolve_review", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunResolveReviewCommand(args);
+            }
+
+            // Print a previously-generated report (summary Markdown or raw JSON).
+            if (args.Length > 0 && (string.Equals(args[0], "show_reports", StringComparison.OrdinalIgnoreCase) || args.Contains("--show-reports")))
+            {
+                return RunShowReportsCommand(args);
             }
 
             Console.WriteLine("SQL Auditor — lightweight console interface");
@@ -142,6 +158,10 @@ namespace SQLAuditor
                 return 0;
             }
 
+            // Copilot mode: the CLI stays non-interactive and surfaces NeedsReview items
+            // so the Copilot CLI skill can generate guidance and record decisions.
+            bool copilotMode = opts.ContainsKey("copilot");
+
             // Values come from flags/env first; anything missing is prompted for,
             // one detail at a time. Secrets are never hardcoded.
 
@@ -161,17 +181,27 @@ namespace SQLAuditor
 
             if (string.IsNullOrWhiteSpace(user))
             {
-                // No username supplied: ask which authentication method to use.
-                var authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-                if (authChoice.Trim() == "2")
+                // No username supplied. In Copilot mode we never prompt: default to
+                // Windows Integrated auth (pass --user for SQL Login instead).
+                if (!copilotMode)
                 {
-                    user = Prompt("SQL username:");
-                    pass = PromptSecret("SQL password:");
+                    var authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
+                    if (authChoice.Trim() == "2")
+                    {
+                        user = Prompt("SQL username:");
+                        pass = PromptSecret("SQL password:");
+                    }
                 }
             }
             else if (string.IsNullOrWhiteSpace(pass))
             {
-                // Username provided up front but no password: ask for it securely.
+                // Username provided up front but no password. In Copilot mode the password
+                // must come from the SQLAUDITOR_SQL_PASSWORD session env var (never chat).
+                if (copilotMode)
+                {
+                    Console.Error.WriteLine($"Error: SQL Login user '{user}' supplied but no password. Set SQLAUDITOR_SQL_PASSWORD in your session, or omit --user for Windows auth.");
+                    return 2;
+                }
                 pass = PromptSecret($"SQL password for '{user}':");
             }
 
@@ -210,6 +240,11 @@ namespace SQLAuditor
                 Console.Error.WriteLine("Error: none of the requested checklist IDs exist.");
                 return 2;
             }
+
+            // Item metadata (Category/Verification) for the Copilot review block, keyed by Id.
+            var itemLookup = structure.SelectMany(s => s.Items)
+                .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
             Console.WriteLine($"Evaluating {validIds.Length} checklist item(s): {string.Join(", ", validIds)}");
             Console.WriteLine($"Target server: {server}");
@@ -257,11 +292,47 @@ namespace SQLAuditor
                 Console.CancelKeyPress -= onCancel;
             }
 
+            // Always surface the manual verification guidance in the terminal for any
+            // item that needs manual review, regardless of interactive/non-interactive
+            // mode. The same guidance is persisted to the results files, but printing it
+            // here means operators (and CI logs) can see the steps without opening them.
+            var manualReviewItems = results
+                .Where(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)
+                         && (r.Technique?.Contains("Manual", StringComparison.OrdinalIgnoreCase) ?? false))
+                .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Non-Copilot runs print the plain listing here. In Copilot mode the enriched
+            // review block below is the single on-screen guidance, so this is skipped to
+            // avoid printing the same steps twice.
+            if (!copilotMode && manualReviewItems.Count > 0 && !cts.IsCancellationRequested)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"Manual verification steps for {manualReviewItems.Count} item(s) needing review:");
+                foreach (var r in manualReviewItems)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"--- {r.Id}: {r.Description} ---");
+                    if (!string.IsNullOrWhiteSpace(r.Evidence))
+                        Console.WriteLine(r.Evidence.Trim());
+                    else
+                        Console.WriteLine("(No guidance was generated for this item.)");
+                }
+            }
+
+            // In Copilot mode, surface the NeedsReview items in a clearly delimited block
+            // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide).
+            if (copilotMode)
+            {
+                PrintNeedsReviewForCopilot(results, validIds, itemLookup);
+            }
+
             // Optional: let the operator mark manual-review items as pass/fail inline.
             // Enabled explicitly with --interactive, or automatically when running in a
             // real terminal (stdin not redirected) so a hands-on session is always asked.
             // Scripted/CI runs (redirected stdin) stay non-blocking unless --interactive.
-            bool interactive = opts.ContainsKey("interactive") || opts.ContainsKey("i") || !Console.IsInputRedirected;
+            bool interactive = !copilotMode
+                && (opts.ContainsKey("interactive") || opts.ContainsKey("i") || !Console.IsInputRedirected);
             if (interactive && !cts.IsCancellationRequested)
             {
                 var manualPending = results
@@ -274,16 +345,12 @@ namespace SQLAuditor
                 {
                     Console.WriteLine();
                     Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail, or skip to keep NeedsReview.");
+                    Console.WriteLine("(Manual verification steps are listed above.)");
                     var updated = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var r in manualPending)
                     {
                         Console.WriteLine();
                         Console.WriteLine($"--- {r.Id}: {r.Description} ---");
-                        if (!string.IsNullOrWhiteSpace(r.Evidence))
-                        {
-                            Console.WriteLine("Guidance:");
-                            Console.WriteLine(r.Evidence.Trim());
-                        }
                         var ans = Prompt("Mark item (p=Pass, f=Fail, s=Skip) [s]:").Trim().ToLowerInvariant();
                         string decision = ans switch { "p" or "pass" => "Pass", "f" or "fail" => "Fail", _ => string.Empty };
                         if (decision.Length == 0)
@@ -359,13 +426,154 @@ namespace SQLAuditor
             Console.WriteLine("  --json <path>       Also copy results JSON to this path.");
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
+            Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
+            Console.WriteLine("                      Copilot CLI skill to review via 'resolve_review'.");
             Console.WriteLine("  --help              Show this help.");
             Console.WriteLine();
-            Console.WriteLine("Provider config (LLM) is read from PROVIDER_BASE_URL, PROVIDER_API_KEY, MODEL.");
+            Console.WriteLine("The CLI performs no LLM calls: Copilot CLI is the AI layer. No .env or");
+            Console.WriteLine("PROVIDER_BASE_URL / PROVIDER_API_KEY / MODEL configuration is required.");
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
             Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost");
+        }
+
+        // Emits NeedsReview items in a clearly delimited block so the Copilot CLI skill
+        // can generate tailored verification guidance, help the user decide, and record
+        // each decision with 'resolve_review'. Mirrors the MCP server's review format and
+        // reuses the same baseline guidance (from the shared engine). The CLI makes no AI calls.
+        static void PrintNeedsReviewForCopilot(
+            SQLAuditor.Lib.ChecklistResult[] results,
+            string[] requestedOrder,
+            System.Collections.Generic.IReadOnlyDictionary<string, SQLAuditor.Lib.ChecklistItem> itemLookup)
+        {
+            // Preserve the order the user requested via --items.
+            var order = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < requestedOrder.Length; i++) order[requestedOrder[i]] = i;
+
+            var pending = results
+                .Where(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)
+                         && (r.Technique?.Contains("Manual", StringComparison.OrdinalIgnoreCase) ?? false))
+                .OrderBy(r => order.TryGetValue(r.Id, out var idx) ? idx : int.MaxValue)
+                .ThenBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            Console.WriteLine();
+            Console.WriteLine("=== COPILOT REVIEW REQUIRED ===");
+            if (pending.Count == 0)
+            {
+                Console.WriteLine("No items need manual review.");
+                Console.WriteLine("=== END COPILOT REVIEW REQUIRED ===");
+                return;
+            }
+
+            Console.WriteLine($"{pending.Count} item(s) were not decided by the deterministic scripts and need review.");
+            Console.WriteLine("This CLI performs NO AI/LLM calls — YOU (GitHub Copilot CLI) are the reviewer. For EACH item below you MUST:");
+            Console.WriteLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content — exact T-SQL to run, settings/objects to inspect in SSMS):");
+            Console.WriteLine("       Checklist: <checklist title>");
+            Console.WriteLine("       Objective: <one sentence explaining what is being verified>");
+            Console.WriteLine("       ");
+            Console.WriteLine("       ## Manual Verification Steps:");
+            Console.WriteLine("       1. ...");
+            Console.WriteLine("       2. ... (include SQL queries in ```sql code blocks whenever required)");
+            Console.WriteLine("       ");
+            Console.WriteLine("       ## What indicates a PASS and a FAIL");
+            Console.WriteLine("       Pass:");
+            Console.WriteLine("       - ...");
+            Console.WriteLine("       Fail:");
+            Console.WriteLine("       - ...");
+            Console.WriteLine("       ");
+            Console.WriteLine("       ## Recommended Actions (if failed)");
+            Console.WriteLine("       - ...");
+            Console.WriteLine("     Do NOT add extra sections or headings outside this format.");
+            Console.WriteLine("  2. Ask the user for their finding / evidence.");
+            Console.WriteLine("  3. Decide Pass or Fail together with the user, then record it with the resolve_review command.");
+            Console.WriteLine("Do NOT write a final summary until every item has been resolved.");
+
+            foreach (var r in pending)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"--- {r.Id}: {r.Description} ---");
+                if (itemLookup.TryGetValue(r.Id, out var it))
+                {
+                    if (!string.IsNullOrWhiteSpace(it.Category)) Console.WriteLine($"Area/Category: {it.Category}");
+                    if (!string.IsNullOrWhiteSpace(it.Verification)) Console.WriteLine($"Verification objective: {it.Verification}");
+                }
+                if (!string.IsNullOrWhiteSpace(r.Evidence))
+                {
+                    Console.WriteLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
+                    Console.WriteLine(r.Evidence.Trim());
+                }
+                else
+                {
+                    Console.WriteLine("(No baseline guidance was generated for this item.)");
+                }
+                Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail> --notes \"<user's rationale>\"");
+            }
+            Console.WriteLine("=== END COPILOT REVIEW REQUIRED ===");
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `resolve_review` subcommand
+        // Reuses Auditor.ResolveReview to patch results/checklist_results.json and
+        // regenerate results/final_report.md. Used by the Copilot CLI skill to record
+        // Pass/Fail decisions without re-running the evaluation.
+        // ---------------------------------------------------------------------
+        static int RunResolveReviewCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview> [--notes <text>]");
+                return 0;
+            }
+
+            var id = GetOption(opts, "id");
+            var decision = GetOption(opts, "decision");
+            var notes = GetOption(opts, "notes");
+
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                Console.Error.WriteLine("Error: --id is required.");
+                return 2;
+            }
+            if (string.IsNullOrWhiteSpace(decision))
+            {
+                Console.Error.WriteLine("Error: --decision is required (pass, fail, or needsreview).");
+                return 2;
+            }
+
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
+            {
+                Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json and results/final_report.md regenerated.");
+                return 0;
+            }
+
+            Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+            return 2;
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `show_reports` subcommand (also via --show-reports)
+        // ---------------------------------------------------------------------
+        static int RunShowReportsCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            var kind = GetOption(opts, "kind") ?? "summary";
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var path = string.Equals(kind, "json", StringComparison.OrdinalIgnoreCase)
+                ? Path.Combine(resultsDir, "checklist_results.json")
+                : Path.Combine(resultsDir, "final_report.md");
+
+            if (!File.Exists(path))
+            {
+                Console.Error.WriteLine($"No report found at {path}. Run 'evaluate' first.");
+                return 2;
+            }
+
+            Console.WriteLine(File.ReadAllText(path));
+            return 0;
         }
 
         static System.Collections.Generic.Dictionary<string, string> ParseOptions(string[] args)

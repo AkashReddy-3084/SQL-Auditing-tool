@@ -9,8 +9,8 @@ High-level architecture and flow documentation: see `ARCHITECTURE.md`.
 | Requirement | Version | Notes |
 | --- | --- | --- |
 | Windows | 10 or later | The UI is WPF; it does not run on Linux or macOS |
-| .NET SDK | 8.0 or later | Projects target `net8.0`; verified on SDK 10.0.302 |
-| .NET Desktop Runtime | 8.0 or later | Ships with the SDK |
+| .NET SDK | 10.0 or later | Projects target `net10.0`; verified on SDK 10.0.302 |
+| .NET Desktop Runtime | 10.0 or later | Ships with the SDK |
 | SQL Server | 2016 or later | Local or remote; SQL Server Express is fine |
 | Git | any recent version | To clone the repository |
 
@@ -82,8 +82,10 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 ## Command-line interface (CLI)
 
 The same evaluation engine is available as a console command for automation and CI. It
-reuses the checklist, scoring, and report generation, and reads the same LLM configuration
-from `.env` (see [step 3](#3-fill-in-env) above).
+reuses the checklist, scoring, and report generation. The CLI makes **no LLM/API calls**
+and needs **no `.env` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL`**. Controls that
+need human judgement come back as **Needs Review** for a person — or GitHub Copilot CLI — to
+decide.
 
 ### Build
 
@@ -91,12 +93,12 @@ from `.env` (see [step 3](#3-fill-in-env) above).
 dotnet build Backend/core/SQLAuditor.csproj
 ```
 
-This produces `Backend/core/bin/Debug/net8.0/SQLAuditor.exe`.
+This produces `Backend/core/bin/Debug/net10.0/SQLAuditor.exe`.
 
 ### Run an evaluation
 
 ```powershell
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate [options]
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate [options]
 ```
 
 Any option not supplied is prompted for interactively (SQL Server, then login details, then
@@ -110,22 +112,27 @@ checklist IDs).
 | `--password <pw>` | SQL login password. Or set `SQLAUDITOR_SQL_PASSWORD` |
 | `--json <path>` | Also copy the results JSON to this path |
 | `--interactive` | Force prompting to mark manual-review items Pass/Fail (auto-enabled in an interactive terminal) |
+| `--copilot` | Non-interactive; emit `Needs Review` items in a `COPILOT REVIEW REQUIRED` block for the GitHub Copilot CLI skill to review and decide via `resolve_review` |
 | `--help` | Show usage |
 
-LLM provider settings are read from `PROVIDER_BASE_URL`, `PROVIDER_API_KEY`, and `MODEL`
-(the same `.env`).
+Related subcommands: `resolve_review --id <id> --decision <pass\|fail\|needsreview> [--notes <text>]`
+records a decision for a `Needs Review` item and regenerates the report; `show_reports [--kind json]`
+prints the latest report; `--dump-checklist` lists the checklist structure.
 
 Examples:
 
 ```powershell
 # Fully interactive (prompts for server, auth, and items)
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate
 
 # Non-interactive with flags
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost
+
+# Copilot CLI mode: surface Needs Review items for Copilot to review
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost
 
 # List the checklist structure without running an evaluation
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe --dump-checklist
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe --dump-checklist
 ```
 
 ### Manual review and output
@@ -138,6 +145,27 @@ optional notes). Results are written to `results/checklist_results.json` and
 
 The command returns an exit code for scripting: `0` success, `1` one or more controls
 failed, `2` usage/validation error, `3` unexpected error.
+
+## GitHub Copilot CLI integration (skill)
+
+The auditor can be driven from **GitHub Copilot CLI** using the `sql-auditor` skill in
+`.github/skills/sql-auditor/`. In this mode **Copilot CLI itself is the AI layer** — signed
+in with the same GitHub Copilot account used by `/login`. The `SQLAuditor` CLI runs the
+evaluation engine only and makes **no LLM/API calls**; **no `.env` / `PROVIDER_BASE_URL` /
+`PROVIDER_API_KEY` / `MODEL`** is used or requested.
+
+Workflow:
+
+1. `/login` to GitHub Copilot CLI, then invoke the `sql-auditor` skill's `evaluate` command
+   (it runs `SQLAuditor.exe evaluate --copilot`).
+2. The CLI asks for the **SQL Server** and **authentication** (Windows Integrated, or SQL
+   Login via `--user` with the password in the `SQLAUDITOR_SQL_PASSWORD` session environment
+   variable — never typed in chat), then evaluates the requested checklist items.
+3. Script-based controls are decided deterministically. **Needs Review** items are emitted in
+   a `COPILOT REVIEW REQUIRED` block.
+4. For each item, **Copilot CLI generates the item-specific manual verification guidance**,
+   helps you decide **Pass/Fail**, and records it with the skill's `resolve_review` command.
+5. Copilot shows the final **summary/report** via `show_reports`.
 
 ## GitHub Copilot (VS Code) integration via MCP
 
@@ -161,7 +189,7 @@ required** for the IDE flow.
 1. Build the MCP server:
 
    ```powershell
-   dotnet build Backend/agents/modules/application/IDE/SQLAuditor.Mcp.csproj
+   dotnet build Backend/agents/modules/IDE/SQLAuditor.Mcp.csproj
    ```
 
 2. Configure `.vscode/mcp.json` (at the workspace root). It launches the built server and
@@ -176,7 +204,7 @@ required** for the IDE flow.
      "servers": {
        "sql-auditor": {
          "type": "stdio",
-         "command": "<absolute path>/Backend/agents/modules/application/IDE/bin/Debug/net8.0/SQLAuditor.Mcp.exe",
+         "command": "<absolute path>/Backend/agents/modules/IDE/bin/Debug/net10.0/SQLAuditor.Mcp.exe",
          "cwd": "<absolute path>/SQL-Auditing-tool"
        }
      }

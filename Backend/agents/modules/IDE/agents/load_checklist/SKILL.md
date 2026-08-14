@@ -8,7 +8,7 @@ before running `evaluate`. Read-only; requires no SQL Server or LLM provider.
 
 ## Trigger (intended)
 - Chat usage, e.g. `/load_checklist` or `/load_checklist 3` (filter by area).
-- Exposed as an MCP tool named `load_checklist` from the IDE host under `application/IDE/`.
+- Exposed as an MCP tool named `load_checklist` from the IDE host under `IDE/`.
 
 ## Inputs
 | Name   | Required | Description                                                    |
