@@ -12,12 +12,17 @@ You MUST evaluate ALL of the following:
 - Does the script actually check what the checklist item requires?
 - Does the evidence gathered by the script relate to the checklist description?
 - Would the script's Pass/Fail result meaningfully indicate compliance with the checklist item?
+- Does the `Finding` field contain concrete evidence produced by the script rather than a generic statement about the check?
+- Is the Finding sufficient to explain why the reported Result and Score were assigned?
+- Does the Finding identify the actual non-compliant setting/status or objects when the check fails?
 
 ### 2. Scope Correctness
 - If the checklist item is a **Server-level** check, does the script query against server-level views (e.g., sys.configurations, sys.databases, server-level DMVs) without unnecessarily iterating databases?
-- If the checklist item is a **Database-level** check, does the script iterate through **all online user databases** (database_id > 4, state = 0) and evaluate each one?
+- If the checklist item is a **Database-level** check on SQL Server or Azure SQL Managed Instance, does the script iterate through **all online user databases** (database_id > 4, state = 0) and evaluate each one?
+- If the checklist item is a **Database-level** check on Azure SQL Database, does the script evaluate the current connected database without attempting cross-database iteration?
 - For Database-level checks, does the script **exclude** system databases (master, model, msdb, tempdb)?
-- For Database-level checks, does the final @Score reflect the **worst-case** (MIN) across all user databases?
+- For SQL Server and Azure SQL Managed Instance, does the final @Score reflect the **worst-case** (MIN) across all evaluated user databases?
+- For Azure SQL Database, does the final score reflect the evaluation of the current connected database?
 
 ### 3. Correctness
 - Is the T-SQL or PowerShell syntax valid and free of errors?
@@ -26,10 +31,24 @@ You MUST evaluate ALL of the following:
 - Do JOINs, WHERE clauses, and aggregations produce the intended results?
 
 ### 4. Output Format
-- Does the script declare and set @Result (NVARCHAR) and @Score (INT)?
-- Does the script end with SELECT @Result AS Result, @Score AS Score?
-- Are @Result values limited to 'Pass' or 'Fail'?
-- Are @Score values limited to 0, 1, 2, or 3?
+
+- For T-SQL, does the script declare and set `@Result` (NVARCHAR) and `@Score` (INT)?
+- For PowerShell, does the script set `$Result` and `$Score`?
+- Does the script produce all four required outputs: `Result`, `Score`, `DatabaseQueried`, and `Finding`?
+- For T-SQL, does the final SELECT return exactly these four fields: `Result`, `Score`, `DatabaseQueried`, `Finding`?
+- For PowerShell, does the final output object contain exactly these four properties: `Result`, `Score`, `DatabaseQueried`, `Finding`?
+- For T-SQL, are `@Result` values limited to `Pass` or `Fail` and `@Score` values limited to 0, 1, 2, or 3?
+- For PowerShell, are `$Result` values limited to `Pass` or `Fail` and `$Score` values limited to 0, 1, 2, or 3?
+- Does `DatabaseQueried` correctly identify the database(s) against which evaluation was attempted?
+- For Server-level checks, is `DatabaseQueried` equal to `master`?
+- For Database-level checks on SQL Server/Azure SQL Managed Instance, does it contain the non-system databases selected for evaluation?
+- For Azure SQL Database, does it identify the current connected database?
+- Does it exclude `master`, `model`, `msdb`, and `tempdb`?
+- If a selected database could not be evaluated, does the corresponding `Finding` indicate that evaluation was unavailable or failed?
+- Does `Finding` contain actual evidence from the script's query results rather than a generic description?
+- For setting/boolean checks, does `Finding` identify the relevant setting and its observed status/value?
+- For count/object-based checks, does `Finding` identify the objects that are contrary to the checklist requirement when those objects can be determined?
+- Are `Finding`, `Result`, and `Score` consistent with the actual evidence collected by the script?
 
 ### 5. Scoring Logic
 - Is the scoring (0-3) appropriate for the check being performed?
@@ -41,8 +60,9 @@ You MUST evaluate ALL of the following:
 - The script must be **strictly read-only**. It must ONLY query existing metadata, configuration settings, system catalogs, DMVs, or other information.
 - The script must NOT create, alter, or drop any permanent objects (tables, views, procedures, schemas, logins, users, roles, permissions, jobs, etc.).
 - The script must NOT insert, update, or delete data in any user or system table.
-- Temporary tables (#temp) and table variables (@table) are acceptable for intermediate calculations.
-- EXEC/sp_executesql is acceptable ONLY for read-only dynamic SQL (e.g., querying across databases).
+- For T-SQL, temporary tables (#temp) and table variables (@table) are acceptable for intermediate calculations.
+- For T-SQL, EXEC/sp_executesql is acceptable ONLY for read-only dynamic SQL (e.g., querying across databases).
+- For PowerShell, any database interaction must remain read-only and must not modify the SQL Server instance or its databases.
 - The script must NOT make any changes to the SQL Server instance or its databases under any circumstances.
 
 ### 7. Robustness
@@ -50,10 +70,39 @@ You MUST evaluate ALL of the following:
 - Does the script handle empty result sets without errors?
 - Does the script handle the case where referenced objects don't exist?
 - Are TRY/CATCH blocks used where appropriate for error handling?
+- Does the script preserve and correctly aggregate the evidence needed for `DatabaseQueried` and `Finding` across all evaluated databases?
+- Does the script avoid reporting a database as queried when it was actually skipped and never evaluated?
+- If evaluation was attempted but failed, does the corresponding Finding clearly indicate that evaluation was unavailable or failed?
+
+### 8. Platform and Version Compatibility
+
+The generated script MUST be a single self-adapting script that can operate across the supported environments unless the checklist item is explicitly platform-specific:
+
+- SQL Server 2019
+- SQL Server 2022
+- SQL Server 2025
+- Azure SQL Database
+- Azure SQL Managed Instance
+
+Validate the following:
+
+- Does the script avoid assuming that it is running on one specific SQL Server version or platform?
+- Where platform-specific behavior is required, does the script identify the platform at runtime?
+- For DATABASE-level checks, does the script use cross-database iteration only where supported, and avoid `USE`, three-part names, and cross-database references on Azure SQL Database?
+- Where SQL Server version-specific behavior is required, does the script safely determine the applicable version?
+- Does the script avoid treating Azure SQL Database as SQL Server 2019, 2022, or 2025 based solely on ProductMajorVersion?
+- Are platform- or version-specific system views, DMVs, columns, functions, and configurations checked for availability before they are used?
+- If platform/version-specific syntax is required, is it isolated so that unsupported syntax cannot cause the script to fail on another supported version?
+- Does the script use an appropriate alternative evidence source when the preferred platform/version-specific capability is unavailable?
+- Does the script remain a single SQL script rather than requiring separate scripts for different platforms or SQL versions?
+- Does the script continue to produce Result and Score when a platform/version-specific feature is unavailable but partial or alternative evidence can still be collected?
+- Is the script read-only on every platform/version execution path?
+
+A script that works correctly on only one supported platform or SQL Server version MUST be considered INVALID unless the checklist item itself explicitly targets that platform/version.
 
 ## Verdict Rules
 
-- **VALID**: The script passes ALL seven criteria above. Minor style issues do NOT make a script invalid.
+- **VALID**: The script passes ALL eight criteria above. Minor style issues do NOT make a script invalid.
 - **INVALID**: The script fails one or more criteria in a way that would cause incorrect results, runtime errors, safety concerns, or wrong scope handling.
 
 When INVALID, you MUST provide a corrected version of the script if the issues are fixable. Only omit the corrected script if the fundamental approach is wrong and a complete rewrite would be needed.

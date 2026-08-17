@@ -57,6 +57,79 @@ namespace SQLAuditor.Agents
             return await RunAsync(null, null, CancellationToken.None);
         }
 
+
+        private void LoadExistingMapping()
+        {
+            if (!File.Exists(_mappingPath))
+                return;
+
+            try
+            {
+                var json = File.ReadAllText(_mappingPath);
+
+                if (string.IsNullOrWhiteSpace(json))
+                    return;
+
+                var existing =
+                    JsonSerializer.Deserialize<
+                        Dictionary<string, JsonElement>>(json);
+
+                if (existing == null)
+                    return;
+
+                foreach (var entry in existing)
+                {
+                    string? scriptFile = null;
+                    bool isAdminCheck = false;
+                    bool isDocumentationCheck = false;
+                    bool mcpFeasibility = false;
+
+                    if (entry.Value.TryGetProperty(
+                        "script_file",
+                        out var scriptFileElement) &&
+                        scriptFileElement.ValueKind != JsonValueKind.Null)
+                    {
+                        scriptFile = scriptFileElement.GetString();
+                    }
+
+                    if (entry.Value.TryGetProperty(
+                        "IsAdminCheck",
+                        out var adminElement))
+                    {
+                        isAdminCheck = adminElement.GetBoolean();
+                    }
+
+                    if (entry.Value.TryGetProperty(
+                        "IsDocumentationCheck",
+                        out var documentationElement))
+                    {
+                        isDocumentationCheck =
+                            documentationElement.GetBoolean();
+                    }
+
+                    if (entry.Value.TryGetProperty(
+                        "MCP_Feasibility",
+                        out var mcpElement))
+                    {
+                        mcpFeasibility = mcpElement.GetBoolean();
+                    }
+
+                    _classificationRegistry[entry.Key] =
+                    (
+                        scriptFile,
+                        isAdminCheck,
+                        isDocumentationCheck,
+                        mcpFeasibility
+                    );
+                }
+            }
+            catch
+            {
+                // Keep existing behavior if mapping cannot be read.
+            }
+        }
+
+
         public async Task<AgentRunResult> RunAsync(
             IProgress<string>? progress,
             IEnumerable<ScriptGenChecklistItem>? items = null,
@@ -85,23 +158,26 @@ namespace SQLAuditor.Agents
             Directory.CreateDirectory(ps1Dir);
             Directory.CreateDirectory(resultsDir);
 
-            // Reset script directories and mapping file for a fresh generation run.
-            // This avoids stale scripts accumulating when new checklists are introduced.
-            foreach (var f in Directory.GetFiles(sqlDir))
-            {
-                try { File.Delete(f); } catch { }
-            }
-            foreach (var f in Directory.GetFiles(ps1Dir))
-            {
-                try { File.Delete(f); } catch { }
-            }
+            LoadExistingMapping();
 
-            // Reset the mapping file so it only contains entries from this generation run.
-            try
-            {
-                File.WriteAllText(_mappingPath, "{}");
-            }
-            catch { }
+
+            // // Reset script directories and mapping file for a fresh generation run.
+            // // This avoids stale scripts accumulating when new checklists are introduced.
+            // foreach (var f in Directory.GetFiles(sqlDir))
+            // {
+            //     try { File.Delete(f); } catch { }
+            // }
+            // foreach (var f in Directory.GetFiles(ps1Dir))
+            // {
+            //     try { File.Delete(f); } catch { }
+            // }
+
+            // // Reset the mapping file so it only contains entries from this generation run.
+            // try
+            // {
+            //     File.WriteAllText(_mappingPath, "{}");
+            // }
+            // catch { }
 
 
             List<ScriptGenChecklistItem> checklist;

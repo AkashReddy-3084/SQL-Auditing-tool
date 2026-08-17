@@ -14,6 +14,6 @@ Review the following generated audit script for correctness and relevance to the
 {script_content}
 ---SCRIPT_TO_VALIDATE_END---
 
-Validate this script against ALL criteria (relevance, scope correctness, syntax correctness, output format, scoring logic, safety/read-only, robustness) and return your verdict.
+Validate this script against ALL criteria defined in the system prompt and return your verdict.
 
-If the script is INVALID and the issues are fixable, you MUST provide the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- markers. The corrected script must be a complete, working replacement — not a partial diff.
+If the script is INVALID and the issues are fixable, you MUST provide the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- markers. The corrected script must be a complete, working replacement — not a partial diff. Preserve the required output fields and behavior defined by the system prompt.
