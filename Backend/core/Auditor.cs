@@ -45,8 +45,8 @@ namespace SQLAuditor.Lib
         [JsonPropertyName("Score")]
         public int? Score { get; init; }
 
-        [JsonPropertyName("ImplementationStatus")]
-        public string ImplementationStatus { get; init; } = string.Empty;
+        // [JsonPropertyName("ImplementationStatus")]
+        // public string ImplementationStatus { get; init; } = string.Empty;
 
         [JsonPropertyName("Evidence")]
         public string Evidence { get; init; }
@@ -66,8 +66,8 @@ namespace SQLAuditor.Lib
         [JsonPropertyName("RiskImpact")]
         public string RiskImpact { get; init; } = string.Empty;
 
-        [JsonPropertyName("ScoreImpact")]
-        public double? ScoreImpact { get; init; }
+        // [JsonPropertyName("ScoreImpact")]
+        // public double? ScoreImpact { get; init; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         [JsonPropertyName("NotApplicable")]
@@ -81,14 +81,14 @@ namespace SQLAuditor.Lib
         [JsonPropertyName("rawAttribute")]
         public JsonElement? RawAttribute { get; init; }
 
-        [JsonPropertyName("RawOutput")]
-        public string RawOutput { get; init; } = string.Empty;
+        // [JsonPropertyName("RawOutput")]
+        // public string RawOutput { get; init; } = string.Empty;
 
-        [JsonPropertyName("mcp_tokens_used")]
-        public int McpTokensUsed { get; init; }
+        // [JsonPropertyName("mcp_tokens_used")]
+        // public int McpTokensUsed { get; init; }
 
-        [JsonPropertyName("slm_tokens_used")]
-        public int SlmTokensUsed { get; init; }
+        // [JsonPropertyName("slm_tokens_used")]
+        // public int SlmTokensUsed { get; init; }
 
         public string ScriptFile { get; init; }
 
@@ -763,41 +763,41 @@ namespace SQLAuditor.Lib
                         if (!string.IsNullOrWhiteSpace(userEvidence))
                         {
                             if (string.Equals(userEvidence, "PASS", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
                             if (string.Equals(userEvidence, "FAIL", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
 
                             var outcome = EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
                             if (string.Equals(outcome, "Fail", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
 
-                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual")
-                            {
-                                RawOutput = manualPlan.RawOutput,
-                                SlmTokensUsed = manualPlan.TotalTokens
-                            };
+                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                            // {
+                            //     RawOutput = manualPlan.RawOutput,
+                            //     SlmTokensUsed = manualPlan.TotalTokens
+                            // };
                         }
                     }
                     catch { }
                 }
 
-                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual")
-                {
-                    RawOutput = manualPlan.RawOutput,
-                    SlmTokensUsed = manualPlan.TotalTokens
-                };
+                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual");
+                // {
+                //     RawOutput = manualPlan.RawOutput,
+                //     SlmTokensUsed = manualPlan.TotalTokens
+                // };
             }
 
             async Task RunPipelineAsync(System.Collections.Generic.List<ChecklistItem> items, bool isScriptPipeline)

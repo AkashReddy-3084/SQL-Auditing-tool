@@ -35,18 +35,18 @@ public static class ChecklistResultEnricher
             };
         }
 
-        var implementationStatus = string.IsNullOrWhiteSpace(result.ImplementationStatus)
-            ? (isNotApplicable
-                ? "Not Applicable"
-                : score switch
-                {
-                    0 => "Not Implemented",
-                    1 => "Partial",
-                    2 => "Implemented",
-                    3 => "Best Practice",
-                    _ => string.Empty,
-                })
-            : result.ImplementationStatus;
+        // var implementationStatus = string.IsNullOrWhiteSpace(result.ImplementationStatus)
+        //     ? (isNotApplicable
+        //         ? "Not Applicable"
+        //         : score switch
+        //         {
+        //             0 => "Not Implemented",
+        //             1 => "Partial",
+        //             2 => "Implemented",
+        //             3 => "Best Practice",
+        //             _ => string.Empty,
+        //         })
+        //     : result.ImplementationStatus;
 
         var severity = string.IsNullOrWhiteSpace(result.Severity)
             ? score switch
@@ -103,11 +103,11 @@ public static class ChecklistResultEnricher
             }
             : result.RiskImpact;
 
-        var scoreImpact = result.ScoreImpact;
-        if (scoreImpact is null && score.HasValue)
-        {
-            scoreImpact = 3 - score.Value;
-        }
+        // var scoreImpact = result.ScoreImpact;
+        // if (scoreImpact is null && score.HasValue)
+        // {
+        //     scoreImpact = 3 - score.Value;
+        // }
 
         var evidence = string.IsNullOrWhiteSpace(result.Evidence)
             ? (string.IsNullOrWhiteSpace(result.ScriptFile)
@@ -118,13 +118,13 @@ public static class ChecklistResultEnricher
         return result with
         {
             Score = score,
-            ImplementationStatus = implementationStatus,
+            // ImplementationStatus = implementationStatus,
             Severity = severity,
             Finding = finding,
             Recommendation = recommendation,
             Effort = effort,
             RiskImpact = riskImpact,
-            ScoreImpact = scoreImpact,
+            // ScoreImpact = scoreImpact,
             Evidence = evidence,
             NotApplicable = isNotApplicable ? true : result.NotApplicable,
         };

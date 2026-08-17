@@ -14,7 +14,7 @@ namespace SQLAuditor.Lib;
 
 internal sealed class SqlServerMcpEvaluator
 {
-    private sealed record ProviderCallResult(string Content, string RawOutput, int TotalTokens);
+    private sealed record ProviderCallResult(string Content);
 
     private readonly string _baseUrl;
     private readonly string _apiKey;
@@ -102,19 +102,19 @@ internal sealed class SqlServerMcpEvaluator
         return new ChecklistResult(item.Id, item.Description, item.Verification, parsed.Outcome, evidence, item.ScriptFile, "AI-MCP")
         {
             RawAttribute = parsed.RawAttribute,
-            RawOutput = provider.RawOutput,
-            McpTokensUsed = provider.TotalTokens,
+            // RawOutput = provider.RawOutput,
+            // McpTokensUsed = provider.TotalTokens,
             McpUsage = "Yes",
             McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
             McpEvidence = evidence,
             Score = parsed.Score,
-            ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
+            // ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
             Severity = parsed.Severity ?? string.Empty,
             Finding = parsed.Finding ?? string.Empty,
             Recommendation = parsed.Recommendation,
             Effort = parsed.Effort ?? string.Empty,
             RiskImpact = parsed.RiskImpact ?? string.Empty,
-            ScoreImpact = parsed.ScoreImpact
+            // ScoreImpact = parsed.ScoreImpact
         };
     }
 
@@ -153,19 +153,19 @@ internal sealed class SqlServerMcpEvaluator
         return new ChecklistResult(item.Id, item.Description, item.Verification, parsed.Outcome, evidence, item.ScriptFile, "AI-MCP")
         {
             RawAttribute = parsed.RawAttribute,
-            RawOutput = provider.RawOutput,
-            McpTokensUsed = provider.TotalTokens,
+            // RawOutput = provider.RawOutput,
+            // McpTokensUsed = provider.TotalTokens,
             McpUsage = "Yes",
             McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
             McpEvidence = evidence,
             Score = parsed.Score,
-            ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
+            // ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
             Severity = parsed.Severity ?? string.Empty,
             Finding = parsed.Finding ?? string.Empty,
             Recommendation = parsed.Recommendation,
             Effort = parsed.Effort ?? string.Empty,
             RiskImpact = parsed.RiskImpact ?? string.Empty,
-            ScoreImpact = parsed.ScoreImpact
+            // ScoreImpact = parsed.ScoreImpact
         };
     }
 
@@ -222,62 +222,62 @@ internal sealed class SqlServerMcpEvaluator
         }
 
         var content = choices[0].GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
-        var totalTokens = TryExtractTotalTokens(doc.RootElement);
-        return new ProviderCallResult(content, txt, totalTokens);
+        // var totalTokens = TryExtractTotalTokens(doc.RootElement);
+        return new ProviderCallResult(content);
     }
 
-    private static int TryExtractTotalTokens(JsonElement root)
-    {
-        if (!root.TryGetProperty("usage", out var usage))
-        {
-            return 0;
-        }
+    // private static int TryExtractTotalTokens(JsonElement root)
+    // {
+    //     if (!root.TryGetProperty("usage", out var usage))
+    //     {
+    //         return 0;
+    //     }
 
-        if (TryReadInt(usage, "total_tokens", out var total) || TryReadInt(usage, "totalTokens", out total))
-        {
-            return Math.Max(total, 0);
-        }
+    //     if (TryReadInt(usage, "total_tokens", out var total) || TryReadInt(usage, "totalTokens", out total))
+    //     {
+    //         return Math.Max(total, 0);
+    //     }
 
-        var hasInput = TryReadInt(usage, "prompt_tokens", out var prompt)
-            || TryReadInt(usage, "input_tokens", out prompt)
-            || TryReadInt(usage, "promptTokens", out prompt)
-            || TryReadInt(usage, "inputTokens", out prompt);
+    //     var hasInput = TryReadInt(usage, "prompt_tokens", out var prompt)
+    //         || TryReadInt(usage, "input_tokens", out prompt)
+    //         || TryReadInt(usage, "promptTokens", out prompt)
+    //         || TryReadInt(usage, "inputTokens", out prompt);
 
-        var hasOutput = TryReadInt(usage, "completion_tokens", out var completion)
-            || TryReadInt(usage, "output_tokens", out completion)
-            || TryReadInt(usage, "completionTokens", out completion)
-            || TryReadInt(usage, "outputTokens", out completion);
+    //     var hasOutput = TryReadInt(usage, "completion_tokens", out var completion)
+    //         || TryReadInt(usage, "output_tokens", out completion)
+    //         || TryReadInt(usage, "completionTokens", out completion)
+    //         || TryReadInt(usage, "outputTokens", out completion);
 
-        if (hasInput || hasOutput)
-        {
-            return Math.Max(prompt, 0) + Math.Max(completion, 0);
-        }
+    //     if (hasInput || hasOutput)
+    //     {
+    //         return Math.Max(prompt, 0) + Math.Max(completion, 0);
+    //     }
 
-        return 0;
-    }
+    //     return 0;
+    // }
 
-    private static bool TryReadInt(JsonElement parent, string propertyName, out int value)
-    {
-        value = 0;
-        if (!parent.TryGetProperty(propertyName, out var prop))
-        {
-            return false;
-        }
+    // private static bool TryReadInt(JsonElement parent, string propertyName, out int value)
+    // {
+    //     value = 0;
+    //     if (!parent.TryGetProperty(propertyName, out var prop))
+    //     {
+    //         return false;
+    //     }
 
-        if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var i))
-        {
-            value = i;
-            return true;
-        }
+    //     if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var i))
+    //     {
+    //         value = i;
+    //         return true;
+    //     }
 
-        if (prop.ValueKind == JsonValueKind.String && int.TryParse(prop.GetString(), out i))
-        {
-            value = i;
-            return true;
-        }
+    //     if (prop.ValueKind == JsonValueKind.String && int.TryParse(prop.GetString(), out i))
+    //     {
+    //         value = i;
+    //         return true;
+    //     }
 
-        return false;
-    }
+    //     return false;
+    // }
 
     private sealed record ParsedMcpResponse(
         string Outcome,
@@ -286,13 +286,14 @@ internal sealed class SqlServerMcpEvaluator
         JsonElement? RawAttribute,
         string Notes,
         int? Score,
-        string? ImplementationStatus,
+        // string? ImplementationStatus,
         string? Severity,
         string? Finding,
         string? Recommendation,
         string? Effort,
-        string? RiskImpact,
-        double? ScoreImpact);
+        string? RiskImpact
+        // double? ScoreImpact
+        );
 
     private static ParsedMcpResponse ParseProviderResponse(string raw)
     {
@@ -316,13 +317,14 @@ internal sealed class SqlServerMcpEvaluator
                 root.Clone(),
                 reasoning,
                 ReadOptionalInt(root, "score"),
-                ReadOptionalString(root, "implementationStatus"),
+                // ReadOptionalString(root, "implementationStatus"),
                 ReadOptionalString(root, "severity"),
                 ReadOptionalString(root, "finding"),
                 ReadOptionalString(root, "recommendation"),
                 ReadOptionalString(root, "effort"),
-                ReadOptionalString(root, "riskImpact"),
-                ReadOptionalDouble(root, "scoreImpact"));
+                ReadOptionalString(root, "riskImpact")
+                // ReadOptionalDouble(root, "scoreImpact")
+                );
         }
         catch
         {
@@ -334,7 +336,7 @@ internal sealed class SqlServerMcpEvaluator
                 feasibleText,
                 null,
                 feasibleText ? string.Empty : "Not feasible for MCP",
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null);
         }
     }
 
@@ -356,13 +358,13 @@ internal sealed class SqlServerMcpEvaluator
         return null;
     }
 
-    private static double? ReadOptionalDouble(JsonElement root, string name)
-    {
-        if (!root.TryGetProperty(name, out var el)) return null;
-        if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var d)) return d;
-        if (el.ValueKind == JsonValueKind.String && double.TryParse(el.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out d)) return d;
-        return null;
-    }
+    // private static double? ReadOptionalDouble(JsonElement root, string name)
+    // {
+    //     if (!root.TryGetProperty(name, out var el)) return null;
+    //     if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var d)) return d;
+    //     if (el.ValueKind == JsonValueKind.String && double.TryParse(el.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out d)) return d;
+    //     return null;
+    // }
 
     private static string NormalizeOutcome(string raw)
     {
