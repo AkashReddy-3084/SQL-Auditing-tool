@@ -297,6 +297,19 @@ CREATE TABLE #DbResults (
     Finding NVARCHAR(MAX)
 );
 
+For every evaluated database, the script MUST insert:
+- DbName = actual database name
+- DbScore = actual score for that database
+- Finding = actual evidence from that database
+
+For a failing database, Finding MUST contain the specific non-compliant table/object names whenever they can be identified.
+
+Example row:
+
+DbName = SalesDB
+DbScore = 0
+Finding = dbo.Customer,dbo.CustomerAddress,dbo.Orders
+
 DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
 SELECT name
 FROM sys.databases
