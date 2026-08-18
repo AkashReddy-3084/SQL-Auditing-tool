@@ -38,6 +38,11 @@ public sealed class ChecklistItemResult
     public double? ScoreImpact { get; set; }
     public string? Evidence { get; set; }
 
+    // Persisted under the JSON key "Databases Verified" (note the space). Consumed
+    // by the Excel report; the Markdown generator ignores it.
+    [JsonPropertyName("Databases Verified")]
+    public string? DatabasesVerified { get; set; }
+
     // ---- Derived helpers (not serialized) ---------------------------------
     [JsonIgnore]
     public int AreaNumber

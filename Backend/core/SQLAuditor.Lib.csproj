@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.0" />
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\agents\**\*.cs" Exclude="..\agents\ScriptGeneratingAgent\**" />

@@ -906,6 +906,27 @@ namespace SQLAuditor.Lib
                 try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
             }
 
+            // Automatically produce the comprehensive Excel workbook (audit_report.xlsx)
+            // using the exact same scoring pipeline as the Markdown report. Isolated in
+            // its own try/catch so a workbook failure never breaks the audit run.
+            try
+            {
+                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    excelPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = enrichedResults.Length,
+                    });
+            }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Excel report generation error: {ex.Message}\r\n"); } catch { }
+            }
+
             return enrichedResults;
         }
 
@@ -969,6 +990,23 @@ namespace SQLAuditor.Lib
                 new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
                     jsonPath,
                     reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
+            // Regenerate the Excel workbook from the updated results using the same
+            // scoring pipeline. Isolated so a workbook failure never fails the resolve.
+            try
+            {
+                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    excelPath,
                     new SqlAuditor.Reporting.ReportMetadata
                     {
                         ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
