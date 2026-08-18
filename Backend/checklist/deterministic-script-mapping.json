@@ -846,7 +846,7 @@
     "MCP_Feasibility": true
   },
   "6.2.2": {
-    "script_file": "Backend/checklist/scripts/sql/6.2.2_TLS_enforced_for_data_in_transit_Encrypt_true_minimum_TLS_version_set.sql",
+    "script_file": "Backend/checklist/scripts/sql/6.2.2.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -858,7 +858,7 @@
     "MCP_Feasibility": false
   },
   "6.2.4": {
-    "script_file": "Backend/checklist/scripts/sql/6.2.4_Dynamic_Data_Masking_applied_to_sensitive_columns_where_appropriate.sql",
+    "script_file": "Backend/checklist/scripts/sql/6.2.4.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -876,7 +876,7 @@
     "MCP_Feasibility": true
   },
   "6.2.7": {
-    "script_file": "Backend/checklist/scripts/sql/6.2.7_Backups_are_encrypted.sql",
+    "script_file": "Backend/checklist/scripts/sql/6.2.7.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -1200,7 +1200,7 @@
     "MCP_Feasibility": true
   },
   "9.1.3": {
-    "script_file": "Backend/checklist/scripts/sql/9.1.3_Backups_restore_tested_regularly_not_just_taken.sql",
+    "script_file": "Backend/checklist/scripts/sql/9.1.3.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -1212,13 +1212,13 @@
     "MCP_Feasibility": true
   },
   "9.1.5": {
-    "script_file": "Backend/checklist/scripts/sql/9.1.5_Backups_stored_redundantly_geo_redundant_where_required.sql",
+    "script_file": "Backend/checklist/scripts/sql/9.1.5.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "9.1.6": {
-    "script_file": "Backend/checklist/scripts/sql/9.1.6_Backup_failures_alerted_and_monitored.sql",
+    "script_file": "Backend/checklist/scripts/sql/9.1.6.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
