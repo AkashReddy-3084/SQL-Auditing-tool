@@ -617,15 +617,15 @@ namespace SQLAuditor.Agents
                     // STEP 4 - SAVE SCRIPT
                     // ==========================================================
 
-                    var safeName =
+                    var safeId =
                         Regex.Replace(
-                            item.CheckName ?? "",
-                            @"[^a-zA-Z0-9]+",
+                            item.ChecklistId ?? "unknown",
+                            @"[^a-zA-Z0-9_.-]+",
                             "_")
                         .Trim('_');
-
+                    
                     var filename =
-                        $"{item.ChecklistId}_{safeName}.{response.ScriptType}";
+                        $"{safeId}.{response.ScriptType}";
 
                     var outputDir =
                         response.ScriptType == "sql"

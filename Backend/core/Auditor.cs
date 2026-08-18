@@ -544,7 +544,7 @@ namespace SQLAuditor.Lib
             var scriptsDir = Path.Combine(repoRoot, "Backend", "checklist", "scripts", "sql");
             Directory.CreateDirectory(scriptsDir);
             var safeId = System.Text.RegularExpressions.Regex.Replace(checklistId ?? "unknown", "[^a-zA-Z0-9_.-]", "_");
-            var fileName = string.IsNullOrWhiteSpace(suggestedFileName) ? ($"{safeId}_generated_{DateTime.UtcNow:yyyyMMddHHmmss}.sql") : suggestedFileName;
+            var fileName = string.IsNullOrWhiteSpace(suggestedFileName)? $"{safeId}.sql" : suggestedFileName;
             var fullPath = Path.Combine(scriptsDir, fileName);
             await File.WriteAllTextAsync(fullPath, scriptText ?? string.Empty);
 
