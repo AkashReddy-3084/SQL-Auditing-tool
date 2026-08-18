@@ -7,13 +7,13 @@
   },
   "1.1.2": {
     "script_file": "Backend/checklist/scripts/sql/1.1.2_Environment_separation_exists_Dev_Test_Prod_with_isolated_instances_or_databases.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "1.1.3": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
@@ -24,33 +24,33 @@
     "MCP_Feasibility": true
   },
   "1.1.5": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/1.1.5_Architecture_diagram_exists_and_reflects_the_actual_implementation.sql",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "1.1.6": {
     "script_file": "Backend/checklist/scripts/sql/1.1.6_Single_source_of_truth_no_duplicate_warehouses_serving_the_same_purpose.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "1.1.7": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
   "1.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/1.2.1_Clear_layering_defined_staging_ODS_integration_dimensional_DW_data_marts.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "1.2.2": {
     "script_file": "Backend/checklist/scripts/sql/1.2.2_Each_layer_has_a_defined_purpose_and_transformation_responsibility.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "1.2.3": {
@@ -80,7 +80,7 @@
   "1.2.7": {
     "script_file": "Backend/checklist/scripts/sql/1.2.7_Historical_archival_strategy_defined_for_the_DW.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "1.3.1": {
@@ -108,15 +108,15 @@
     "MCP_Feasibility": false
   },
   "1.3.5": {
-    "script_file": "Backend/checklist/scripts/sql/1.3.5_Connection_strings_use_listener_failover_group_endpoints_not_a_single_node.sql",
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   },
   "1.3.6": {
     "script_file": "Backend/checklist/scripts/sql/1.3.6_Maintenance_windows_and_patching_approach_defined_or_Microsoft_managed_for_PaaS.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "1.3.7": {
@@ -132,7 +132,7 @@
     "MCP_Feasibility": false
   },
   "1.3.9": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/1.3.9_Alias_DNS_resolution_and_failover_behavior_documented_and_validated_applications_reconnect_transparently_on_failover_with_no_manual_repoint.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
@@ -145,13 +145,13 @@
   },
   "2.1.2": {
     "script_file": "Backend/checklist/scripts/sql/2.1.2_ETL_packages_pipelines_follow_consistent_naming_conventions.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "2.1.3": {
     "script_file": "Backend/checklist/scripts/sql/2.1.3_ETL_is_parameterized_no_hardcoded_servers_paths_dates_or_credentials.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -162,10 +162,10 @@
     "MCP_Feasibility": true
   },
   "2.1.5": {
-    "script_file": "Backend/checklist/scripts/sql/2.1.5_Reusable_templated_ETL_components_no_copy_paste_per_table.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "2.1.6": {
     "script_file": "Backend/checklist/scripts/sql/2.1.6_ETL_is_metadata_driven_or_well_modularized_where_appropriate.sql",
@@ -174,16 +174,16 @@
     "MCP_Feasibility": true
   },
   "2.1.7": {
-    "script_file": "Backend/checklist/scripts/sql/2.1.7_ETL_is_logically_documented_data_flow_transformations_source_to_target_mappings.sql",
+    "script_file": null,
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": false
   },
   "2.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/2.2.1_Incremental_load_implemented_where_applicable_watermark_CDC_Change_Tracking.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "2.2.2": {
     "script_file": "Backend/checklist/scripts/sql/2.2.2_Full_load_reserved_for_small_reference_dimension_tables_or_initial_loads.sql",
@@ -198,10 +198,10 @@
     "MCP_Feasibility": true
   },
   "2.2.4": {
-    "script_file": "Backend/checklist/scripts/sql/2.2.4_CDC_Change_Tracking_configured_and_maintained_correctly_where_used.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "2.2.5": {
     "script_file": "Backend/checklist/scripts/sql/2.2.5_Insert_Update_Delete_operations_handled_correctly_MERGE_or_equivalent.sql",
@@ -235,7 +235,7 @@
   },
   "2.3.4": {
     "script_file": "Backend/checklist/scripts/sql/2.3.4_Retry_logic_exists_for_transient_failures.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -320,7 +320,7 @@
   "3.1.6": {
     "script_file": "Backend/checklist/scripts/sql/3.1.6_Code_is_commented_for_complex_logic_business_rules_explained.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "3.1.7": {
@@ -343,7 +343,7 @@
   },
   "3.2.3": {
     "script_file": "Backend/checklist/scripts/sql/3.2.3_Scalar_UDFs_avoided_in_hot_paths_inlined_replaced_where_they_hurt_performance.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -369,7 +369,7 @@
     "script_file": "Backend/checklist/scripts/sql/3.3.1_Transactions_scoped_correctly_not_held_open_across_long_operations.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "3.3.2": {
     "script_file": "Backend/checklist/scripts/sql/3.3.2_TRY_CATCH_with_proper_error_raising_logging_THROW_RAISERROR.sql",
@@ -396,10 +396,10 @@
     "MCP_Feasibility": true
   },
   "3.3.6": {
-    "script_file": "Backend/checklist/scripts/sql/3.3.6_Multi_step_operations_maintain_consistency_on_partial_failure.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "4.1.1": {
     "script_file": "Backend/checklist/scripts/sql/4.1.1_Modeling_approach_is_deliberate_3NF_integration_layer_and_or_dimensional_marts.sql",
@@ -438,15 +438,15 @@
     "MCP_Feasibility": true
   },
   "4.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/4.2.1_Star_schema_implemented_fact_dimension_tables_not_flat_wide_tables.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "4.2.2": {
     "script_file": "Backend/checklist/scripts/sql/4.2.2_Fact_table_grain_clearly_defined_and_documented_per_fact.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "4.2.3": {
@@ -456,10 +456,10 @@
     "MCP_Feasibility": true
   },
   "4.2.4": {
-    "script_file": "Backend/checklist/scripts/sql/4.2.4_Surrogate_keys_used_for_dimensions_IDENTITY_sequence_not_business_keys_in_facts.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "4.2.5": {
     "script_file": "Backend/checklist/scripts/sql/4.2.5_Conformed_dimensions_shared_across_facts_no_duplicate_versions.sql",
@@ -480,10 +480,10 @@
     "MCP_Feasibility": true
   },
   "4.2.8": {
-    "script_file": "Backend/checklist/scripts/sql/4.2.8_SCD_Type_2_valid_from_valid_to_is_current_maintained_correctly_where_used.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "4.3.1": {
     "script_file": "Backend/checklist/scripts/sql/4.3.1_Every_table_has_an_appropriate_clustered_index_or_deliberate_heap_justification.sql",
@@ -517,7 +517,7 @@
   },
   "4.3.6": {
     "script_file": "Backend/checklist/scripts/sql/4.3.6_Missing_index_recommendations_reviewed_not_blindly_applied.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -541,19 +541,19 @@
   },
   "4.4.2": {
     "script_file": "Backend/checklist/scripts/sql/4.4.2_Partition_alignment_supports_fast_load_switch_and_purge_sliding_window.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "4.4.3": {
     "script_file": "Backend/checklist/scripts/sql/4.4.3_Filegroups_used_to_organize_storage_where_applicable_SQL_Server_MI.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "4.4.4": {
     "script_file": "Backend/checklist/scripts/sql/4.4.4_Data_compression_row_page_columnstore_applied_where_beneficial.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -601,7 +601,7 @@
   },
   "4.5.5": {
     "script_file": "Backend/checklist/scripts/sql/4.5.5_Constraints_are_TRUSTED_not_disabled_untrusted_which_hurts_the_optimizer.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -614,7 +614,7 @@
   "5.1.1": {
     "script_file": "Backend/checklist/scripts/sql/5.1.1_Data_quality_framework_formally_defined_with_rules_ownership_and_scoring.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "5.1.2": {
@@ -631,27 +631,27 @@
   },
   "5.1.4": {
     "script_file": "Backend/checklist/scripts/sql/5.1.4_DQ_results_logged_and_trended_over_time.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "5.1.5": {
     "script_file": "Backend/checklist/scripts/sql/5.1.5_DQ_remediation_workflow_exists_alert_investigate_fix_verify.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "5.1.6": {
     "script_file": "Backend/checklist/scripts/sql/5.1.6_DQ_SLAs_defined_per_data_product_mart.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "5.1.7": {
-    "script_file": "Backend/checklist/scripts/sql/5.1.7_DQ_failures_halt_progression_where_critical_bad_data_not_silently_promoted.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "5.1.8": {
     "script_file": "Backend/checklist/scripts/sql/5.1.8_Quarantine_pattern_failed_rows_routed_to_error_tables_with_failure_reason.sql",
@@ -660,10 +660,10 @@
     "MCP_Feasibility": true
   },
   "5.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/5.2.1_Schema_validation_on_inbound_data_column_presence_types.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "5.2.2": {
     "script_file": "Backend/checklist/scripts/sql/5.2.2_Completeness_all_expected_sources_batches_received.sql",
@@ -690,10 +690,10 @@
     "MCP_Feasibility": true
   },
   "5.2.6": {
-    "script_file": "Backend/checklist/scripts/sql/5.2.6_Corrupt_malformed_rows_isolated_not_failing_the_entire_batch.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "5.2.7": {
     "script_file": "Backend/checklist/scripts/sql/5.2.7_Source_metadata_captured_load_timestamp_source_batch_ID.sql",
@@ -721,7 +721,7 @@
   },
   "5.3.4": {
     "script_file": "Backend/checklist/scripts/sql/5.3.4_Aggregate_consistency_detail_sums_equal_aggregate_totals.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -745,7 +745,7 @@
   },
   "5.3.8": {
     "script_file": "Backend/checklist/scripts/sql/5.3.8_Freshness_validation_marts_updated_within_SLA.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -774,10 +774,10 @@
     "MCP_Feasibility": true
   },
   "5.4.5": {
-    "script_file": "Backend/checklist/scripts/sql/5.4.5_Categorical_Enum_values_within_expected_domain_no_invalid_codes.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "5.4.6": {
     "script_file": "Backend/checklist/scripts/sql/5.4.6_Identifiers_Keys_uniqueness_verified_format_consistent_no_nulls_in_keys.sql",
@@ -824,7 +824,7 @@
   "6.1.6": {
     "script_file": "Backend/checklist/scripts/sql/6.1.6_Guest_contractor_access_explicitly_governed_and_time_bound.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "6.1.7": {
@@ -852,10 +852,10 @@
     "MCP_Feasibility": true
   },
   "6.2.3": {
-    "script_file": "Backend/checklist/scripts/sql/6.2.3_Always_Encrypted_used_for_highly_sensitive_columns_where_required.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "6.2.4": {
     "script_file": "Backend/checklist/scripts/sql/6.2.4_Dynamic_Data_Masking_applied_to_sensitive_columns_where_appropriate.sql",
@@ -900,10 +900,10 @@
     "MCP_Feasibility": true
   },
   "6.3.3": {
-    "script_file": "Backend/checklist/scripts/sql/6.3.3_Public_network_access_disabled_or_tightly_restricted_Azure_SQL.sql",
+    "script_file": null,
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "6.3.4": {
     "script_file": "Backend/checklist/scripts/sql/6.3.4_No_broad_allow_Azure_services_0_0_0_0_firewall_rules.sql",
@@ -948,15 +948,15 @@
     "MCP_Feasibility": true
   },
   "7.1.1": {
-    "script_file": "Backend/checklist/scripts/sql/7.1.1_Applicable_regulatory_compliance_regime_s_identified_and_documented.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "7.1.2": {
     "script_file": "Backend/checklist/scripts/sql/7.1.2_In_scope_regulated_data_categories_identified_and_inventoried.sql",
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "7.1.3": {
@@ -968,38 +968,38 @@
   "7.1.4": {
     "script_file": "Backend/checklist/scripts/sql/7.1.4_Data_residency_regional_processing_requirements_identified_and_met.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "7.1.5": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
   "7.1.6": {
-    "script_file": "Backend/checklist/scripts/sql/7.1.6_Breach_incident_notification_process_documented.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "7.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/7.2.1_Segregation_of_Duties_enforced_developer_deployer_approver.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "7.2.2": {
     "script_file": "Backend/checklist/scripts/sql/7.2.2_All_schema_code_changes_go_through_formal_change_management.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "7.2.3": {
-    "script_file": "Backend/checklist/scripts/sql/7.2.3_Audit_trail_for_changes_to_financial_relevant_data.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "7.2.4": {
     "script_file": "Backend/checklist/scripts/sql/7.2.4_Access_control_changes_logged_and_reviewable.sql",
@@ -1010,7 +1010,7 @@
   "7.2.5": {
     "script_file": "Backend/checklist/scripts/sql/7.2.5_Transformation_logic_documented_and_reproducible.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "7.2.6": {
@@ -1022,7 +1022,7 @@
   "7.2.7": {
     "script_file": "Backend/checklist/scripts/sql/7.2.7_Retention_of_historical_financial_data_per_policy.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "7.3.1": {
@@ -1034,7 +1034,7 @@
   "7.3.2": {
     "script_file": "Backend/checklist/scripts/sql/7.3.2_Data_minimization_applied_only_necessary_personal_data_stored.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "7.3.3": {
@@ -1082,7 +1082,7 @@
   "7.4.4": {
     "script_file": "Backend/checklist/scripts/sql/7.4.4_Audit_logs_retained_per_compliance_requirement.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "7.4.5": {
@@ -1100,14 +1100,14 @@
   "8.1.1": {
     "script_file": "Backend/checklist/scripts/sql/8.1.1_Source_to_target_lineage_documented_ETL_mappings.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "8.1.2": {
-    "script_file": "Backend/checklist/scripts/sql/8.1.2_Enterprise_catalog_e_g_Microsoft_Purview_integrated_or_planned.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "8.1.3": {
     "script_file": "Backend/checklist/scripts/sql/8.1.3_Objects_tagged_classified_with_business_domain_and_owner.sql",
@@ -1118,7 +1118,7 @@
   "8.1.4": {
     "script_file": "Backend/checklist/scripts/sql/8.1.4_Dependencies_documented_linked_servers_cross_database_references.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "8.1.5": {
@@ -1142,18 +1142,18 @@
   "8.2.3": {
     "script_file": "Backend/checklist/scripts/sql/8.2.3_Ownership_documented_not_tribal_knowledge.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "8.2.4": {
-    "script_file": "Backend/checklist/scripts/sql/8.2.4_Escalation_path_for_data_quality_issues_defined.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "8.2.5": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
@@ -1172,19 +1172,19 @@
   "8.3.3": {
     "script_file": "Backend/checklist/scripts/sql/8.3.3_Business_definitions_rules_documented_and_current.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "8.3.4": {
     "script_file": "Backend/checklist/scripts/sql/8.3.4_Metadata_accessible_to_consumers_discoverable.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "8.3.5": {
     "script_file": "Backend/checklist/scripts/sql/8.3.5_Business_glossary_terminology_maintained.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "9.1.1": {
@@ -1230,10 +1230,10 @@
     "MCP_Feasibility": true
   },
   "9.2.1": {
-    "script_file": "Backend/checklist/scripts/sql/9.2.1_RTO_and_RPO_defined_and_documented.sql",
-    "IsAdminCheck": true,
+    "script_file": null,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "9.2.2": {
     "script_file": "Backend/checklist/scripts/sql/9.2.2_HA_solution_matches_SLA_Always_On_AG_failover_groups_zone_redundancy.sql",
@@ -1249,14 +1249,14 @@
   },
   "9.2.4": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
   "9.2.5": {
     "script_file": "Backend/checklist/scripts/sql/9.2.5_Failover_tested_at_least_annually.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "9.2.6": {
@@ -1284,7 +1284,7 @@
     "MCP_Feasibility": true
   },
   "9.2.10": {
-    "script_file": "Backend/checklist/scripts/ps1/9.2.10_WSFC_quorum_witness_configured_correctly_for_the_node_count_avoids_split_brain_quorum_model_documented.ps1",
+    "script_file": "Backend/checklist/scripts/sql/9.2.10_WSFC_quorum_witness_configured_correctly_for_the_node_count_avoids_split_brain_quorum_model_documented.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": true
@@ -1296,10 +1296,10 @@
     "MCP_Feasibility": true
   },
   "9.2.12": {
-    "script_file": "Backend/checklist/scripts/sql/9.2.12_Listener_alias_failover_tested_end_to_end_applications_reconnect_transparently_with_no_manual_intervention.sql",
+    "script_file": null,
     "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   },
   "9.3.1": {
     "script_file": "Backend/checklist/scripts/sql/9.3.1_Consistency_checks_DBCC_CHECKDB_scheduled_and_monitored_SQL_Server_MI.sql",
@@ -1321,7 +1321,7 @@
   },
   "9.3.4": {
     "script_file": "Backend/checklist/scripts/sql/9.3.4_ETL_is_idempotent_safe_to_re_run_after_failure.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1351,7 +1351,7 @@
   },
   "9.4.4": {
     "script_file": "Backend/checklist/scripts/sql/9.4.4_Historical_SLA_compliance_tracked_and_reported.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
@@ -1374,10 +1374,10 @@
     "MCP_Feasibility": true
   },
   "10.1.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/10.1.4_Alerts_configured_for_resource_saturation_and_errors.sql",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "10.1.5": {
     "script_file": "Backend/checklist/scripts/sql/10.1.5_Long_running_blocking_query_alerting_configured.sql",
@@ -1387,7 +1387,7 @@
   },
   "10.1.6": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
@@ -1399,7 +1399,7 @@
   },
   "10.2.2": {
     "script_file": "Backend/checklist/scripts/sql/10.2.2_Query_Store_used_to_detect_regressions_and_force_plans_where_needed.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1417,7 +1417,7 @@
   },
   "10.2.5": {
     "script_file": "Backend/checklist/scripts/sql/10.2.5_Baselines_captured_for_comparison_over_time.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1477,19 +1477,19 @@
   },
   "10.4.5": {
     "script_file": "Backend/checklist/scripts/sql/10.4.5_Log_rowcount_reconciliation_captured_per_ETL_run.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "11.1.1": {
     "script_file": "Backend/checklist/scripts/sql/11.1.1_Database_schema_and_code_source_controlled_SSDT_SQL_project_or_migration_scripts.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "11.1.2": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
@@ -1506,10 +1506,10 @@
     "MCP_Feasibility": false
   },
   "11.1.5": {
-    "script_file": "Backend/checklist/scripts/sql/11.1.5_Commit_messages_descriptive_and_linked_to_work_items.sql",
+    "script_file": null,
     "IsAdminCheck": false,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": true
+    "MCP_Feasibility": false
   },
   "11.1.6": {
     "script_file": null,
@@ -1531,33 +1531,33 @@
   },
   "11.2.3": {
     "script_file": "Backend/checklist/scripts/sql/11.2.3_Schema_drift_detected_and_reconciled_between_environments.sql",
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "11.2.4": {
     "script_file": "Backend/checklist/scripts/sql/11.2.4_No_manual_production_changes_all_via_pipeline.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "11.2.5": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
   "11.2.6": {
     "script_file": "Backend/checklist/scripts/sql/11.2.6_Rollback_recovery_procedure_defined_and_tested.sql",
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "11.2.7": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/11.2.7_Pre_post_deployment_scripts_managed_and_idempotent.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "11.3.1": {
     "script_file": "Backend/checklist/scripts/sql/11.3.1_Separate_Dev_Test_Prod_environments.sql",
@@ -1603,26 +1603,26 @@
   },
   "11.4.3": {
     "script_file": "Backend/checklist/scripts/sql/11.4.3_Data_validation_tests_run_post_deployment_counts_schema_checks.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "11.4.4": {
     "script_file": "Backend/checklist/scripts/sql/11.4.4_Performance_tests_exist_for_critical_queries_loads.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "11.4.5": {
     "script_file": "Backend/checklist/scripts/sql/11.4.5_Regression_testing_on_schema_changes.sql",
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "12.1.1": {
     "script_file": "Backend/checklist/scripts/sql/12.1.1_Service_tier_compute_sizing_based_on_workload_analysis_not_guesswork.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
+    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "12.1.2": {
@@ -1633,7 +1633,7 @@
   },
   "12.1.3": {
     "script_file": "Backend/checklist/scripts/sql/12.1.3_Elastic_pools_used_where_multiple_databases_share_capacity_efficiently.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1645,7 +1645,7 @@
   },
   "12.1.5": {
     "script_file": "Backend/checklist/scripts/sql/12.1.5_Growth_projections_modeled_for_next_6_12_months.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
@@ -1729,7 +1729,7 @@
   },
   "13.2.3": {
     "script_file": null,
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
   },
@@ -1742,25 +1742,25 @@
   "13.3.1": {
     "script_file": "Backend/checklist/scripts/sql/13.3.1_Table_column_definitions_documented_with_business_context.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "13.3.2": {
     "script_file": "Backend/checklist/scripts/sql/13.3.2_Source_to_target_mapping_documented_per_table.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "13.3.3": {
-    "script_file": "Backend/checklist/scripts/sql/13.3.3_Acronyms_and_business_terminology_glossary_available.sql",
+    "script_file": null,
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   },
   "13.3.4": {
     "script_file": "Backend/checklist/scripts/sql/13.3.4_Documentation_kept_current_with_schema_changes.sql",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
+    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "13.4.1": {
@@ -1770,10 +1770,10 @@
     "MCP_Feasibility": true
   },
   "13.4.2": {
-    "script_file": "Backend/checklist/scripts/sql/13.4.2_No_single_point_of_human_dependency_bus_factor_1.sql",
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   },
   "13.4.3": {
     "script_file": null,
@@ -1831,7 +1831,7 @@
   },
   "14.2.1": {
     "script_file": "Backend/checklist/scripts/sql/14.2.1_Index_usage_analyzed_seeks_vs_scans_against_workload.sql",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1891,7 +1891,7 @@
   },
   "14.3.5": {
     "script_file": "Backend/checklist/scripts/sql/14.3.5_Lock_escalation_understood_and_mitigated_where_problematic.sql",
-    "IsAdminCheck": true,
+    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1960,5 +1960,11 @@
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
+  },
+  "2.1.1": {
+    "script_file": null,
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": false
   }
 }

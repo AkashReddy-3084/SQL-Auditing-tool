@@ -1,45 +1,76 @@
 -- Checklist: SLA breach triggers alerts
 -- Scope: SERVER
--- Scoring: 0=No alerts/operators; 1=Exists but disabled/unlinked; 2=Enabled & linked for performance/availability metrics; 3=Fully verified SLA thresholds (capped at 2 due to business-defined nature)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 0=No alerts found; 1=Alerts found but disabled OR platform lacks SQL Agent; 2=Alerts enabled but no notifications configured; 3=Alerts enabled with notifications configured.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
-IF OBJECT_ID('msdb.dbo.sysalerts') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+
+IF @EngineEdition <> 5
 BEGIN
     DECLARE @AlertCount INT = 0;
-    DECLARE @OperatorCount INT = 0;
-    DECLARE @LinkedCount INT = 0;
-    DECLARE @SlaAlertCount INT = 0;
+    DECLARE @EnabledCount INT = 0;
+    DECLARE @NotifiedCount INT = 0;
+    DECLARE @AlertNames NVARCHAR(MAX) = '';
 
-    SELECT @AlertCount = COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1;
-    SELECT @OperatorCount = COUNT(*) FROM msdb.dbo.sysoperators;
-    
-    -- Count only links where the associated alert is enabled
-    SELECT @LinkedCount = COUNT(*) FROM msdb.dbo.sysalert_operator ao
-    INNER JOIN msdb.dbo.sysalerts a ON ao.alert_id = a.alert_id
-    WHERE a.enabled = 1;
+    SELECT @AlertCount = COUNT(*)
+    FROM msdb.dbo.sysalerts
+    WHERE name LIKE '%SLA%' OR name LIKE '%breach%' OR name LIKE '%threshold%' OR name LIKE '%violation%'
+       OR description LIKE '%SLA%' OR description LIKE '%breach%' OR description LIKE '%threshold%' OR description LIKE '%violation%';
 
-    -- Check for SLA-related keywords in name or description (fixed column name)
-    SELECT @SlaAlertCount = COUNT(*) FROM msdb.dbo.sysalerts
-    WHERE enabled = 1
-    AND (name LIKE '%latency%' OR name LIKE '%timeout%' OR name LIKE '%availability%' OR name LIKE '%performance%' OR name LIKE '%SLA%' OR description LIKE '%latency%' OR description LIKE '%timeout%');
+    IF @AlertCount > 0
+    BEGIN
+        SELECT @EnabledCount = COUNT(*)
+        FROM msdb.dbo.sysalerts
+        WHERE (name LIKE '%SLA%' OR name LIKE '%breach%' OR name LIKE '%threshold%' OR name LIKE '%violation%'
+           OR description LIKE '%SLA%' OR description LIKE '%breach%' OR description LIKE '%threshold%' OR description LIKE '%violation%')
+          AND enabled = 1;
 
-    SET @Score = CASE
-        WHEN @AlertCount = 0 OR @OperatorCount = 0 THEN 0
-        WHEN @LinkedCount = 0 THEN 1
-        WHEN @SlaAlertCount > 0 THEN 2
-        ELSE 1
-    END;
+        SELECT @NotifiedCount = COUNT(*)
+        FROM msdb.dbo.sysalerts
+        WHERE (name LIKE '%SLA%' OR name LIKE '%breach%' OR name LIKE '%threshold%' OR name LIKE '%violation%'
+           OR description LIKE '%SLA%' OR description LIKE '%breach%' OR description LIKE '%threshold%' OR description LIKE '%violation%')
+          AND enabled = 1
+          AND (has_notification_email = 1 OR has_notification_page = 1 OR has_notification_netsend = 1);
+
+        SELECT @AlertNames = STRING_AGG(name, ', ')
+        FROM msdb.dbo.sysalerts
+        WHERE (name LIKE '%SLA%' OR name LIKE '%breach%' OR name LIKE '%threshold%' OR name LIKE '%violation%'
+           OR description LIKE '%SLA%' OR description LIKE '%breach%' OR description LIKE '%threshold%' OR description LIKE '%violation%');
+    END
+
+    IF @NotifiedCount > 0
+        SET @Score = 3;
+    ELSE IF @EnabledCount > 0
+        SET @Score = 2;
+    ELSE IF @AlertCount > 0
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+
+    IF @Score = 3
+        SET @Finding = 'SLA breach alerts configured and enabled with notifications: ' + ISNULL(@AlertNames, 'None');
+    ELSE IF @Score = 2
+        SET @Finding = 'SLA breach alerts configured and enabled but no notifications assigned: ' + ISNULL(@AlertNames, 'None');
+    ELSE IF @Score = 1
+        SET @Finding = 'SLA breach alerts found but disabled: ' + ISNULL(@AlertNames, 'None');
+    ELSE
+        SET @Finding = 'No alerts configured for SLA breaches or thresholds.';
 END
 ELSE
 BEGIN
-    -- Azure SQL DB does not support SQL Agent alerts. Degrade gracefully.
     SET @Score = 1;
-END;
-
--- NOTE: This script provides automated evidence. Full compliance requires human review.
--- Cap at 2 because SLA thresholds are business-defined and require human validation
-IF @Score > 2 SET @Score = 2;
+    SET @Finding = 'SQL Server Agent not available in Azure SQL Database. Manual review of monitoring/alerting configuration required.';
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+SET @DatabaseQueried = 'master';
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

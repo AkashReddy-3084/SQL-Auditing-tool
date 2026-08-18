@@ -1,54 +1,63 @@
 -- Checklist: Long-running/blocking query alerting configured
 -- Scope: SERVER
--- Scoring: 0=No evidence, 1=Alert/EE exists but no notification, 2=Alerting configured with notification (indirect/generic) or EE session only, 3=Explicit blocking/long-running alert with valid operator notification
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AlertCount INT = 0;
-DECLARE @EECount INT = 0;
-DECLARE @OperatorCount INT = 0;
-DECLARE @NotificationCount INT = 0;
+-- Scoring: 0: No relevant alerts or monitoring jobs found. 1: Generic performance alerts exist but not specifically for blocking/long-running queries. 2: Monitoring configured (alert or job) but no notification operator linked, or relies on indirect metrics. 3: Explicit alerts or jobs configured for blocking/long-running queries with active notification operators.
 
--- Check SQL Agent Alerts for blocking/long-running queries
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysalerts)
-BEGIN
-    SELECT @AlertCount = COUNT(*) FROM msdb.dbo.sysalerts
-    WHERE name LIKE '%block%' OR name LIKE '%long%' OR name LIKE '%run%' OR name LIKE '%wait%'
-       OR message_id IN (1222, 1205, 1223);
-END
+SET NOCOUNT ON;
 
--- Check Extended Events for blocking/long-running queries
-IF EXISTS (SELECT 1 FROM sys.server_event_sessions)
-BEGIN
-    SELECT @EECount = COUNT(DISTINCT ses.event_session_id)
-    FROM sys.server_event_sessions ses
-    INNER JOIN sys.server_event_session_events see ON ses.event_session_id = see.event_session_id
-    INNER JOIN sys.server_events se ON see.event_id = se.event_id
-    WHERE se.name IN ('blocked_process_report', 'lock_deadlock', 'sql_statement_completed', 'wait_info');
-END
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Check for enabled notification operators
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysoperators)
-BEGIN
-    SELECT @OperatorCount = COUNT(*) FROM msdb.dbo.sysoperators
-    WHERE enabled = 1 AND (email_address IS NOT NULL OR pager IS NOT NULL);
-END
+DECLARE @AlertNames NVARCHAR(MAX);
+DECLARE @JobNames NVARCHAR(MAX);
+DECLARE @OperatorNames NVARCHAR(MAX);
 
--- Check if alerts are linked to operators
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysnotifications)
-BEGIN
-    SELECT @NotificationCount = COUNT(*) FROM msdb.dbo.sysnotifications
-    WHERE alert_id IN (SELECT alert_id FROM msdb.dbo.sysalerts WHERE name LIKE '%block%' OR name LIKE '%long%');
-END
+-- Check for SQL Agent Alerts related to blocking/long-running
+SELECT @AlertNames = STRING_AGG(a.name, ', ') WITHIN GROUP (ORDER BY a.name)
+FROM msdb.dbo.sysalerts a
+WHERE a.message_id = 0
+  AND (LOWER(a.name) LIKE '%block%' OR LOWER(a.name) LIKE '%long%run%' OR LOWER(a.name) LIKE '%timeout%' OR LOWER(a.name) LIKE '%deadlock%');
 
--- Scoring Logic
-IF @AlertCount > 0 AND @OperatorCount > 0 AND @NotificationCount > 0
+-- Check for SQL Agent Jobs/Steps monitoring blocking/long-running
+SELECT @JobNames = STRING_AGG(j.name, ', ') WITHIN GROUP (ORDER BY j.name)
+FROM msdb.dbo.sysjobs j
+INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE LOWER(js.command) LIKE '%sys.dm_exec_requests%' 
+   OR LOWER(js.command) LIKE '%sys.dm_os_waiting_tasks%' 
+   OR LOWER(js.command) LIKE '%blocked%' 
+   OR LOWER(js.command) LIKE '%long%run%';
+
+-- Check for linked operators on relevant alerts
+SELECT @OperatorNames = STRING_AGG(o.name, ', ') WITHIN GROUP (ORDER BY o.name)
+FROM msdb.dbo.sysalerts a
+INNER JOIN msdb.dbo.sysoperators o ON a.operator_id = o.id
+WHERE a.message_id = 0
+  AND (LOWER(a.name) LIKE '%block%' OR LOWER(a.name) LIKE '%long%run%' OR LOWER(a.name) LIKE '%timeout%' OR LOWER(a.name) LIKE '%deadlock%');
+
+-- Determine Score
+IF @AlertNames IS NOT NULL AND @OperatorNames IS NOT NULL
     SET @Score = 3;
-ELSE IF @EECount > 0 OR (@AlertCount > 0 AND @NotificationCount > 0)
+ELSE IF @AlertNames IS NOT NULL OR @JobNames IS NOT NULL
     SET @Score = 2;
-ELSE IF @AlertCount > 0 OR @EECount > 0
+ELSE IF EXISTS (SELECT 1 FROM msdb.dbo.sysalerts WHERE message_id = 0)
     SET @Score = 1;
 ELSE
     SET @Score = 0;
 
+-- Build Finding
+SET @Finding = CASE 
+    WHEN @Score = 3 THEN 'Configured alerts: ' + @AlertNames + '; Notification operators: ' + @OperatorNames
+    WHEN @Score = 2 THEN 'Monitoring configured but lacks operator linkage or uses indirect metrics. Alerts: ' + ISNULL(@AlertNames, 'None') + '; Jobs: ' + ISNULL(@JobNames, 'None')
+    WHEN @Score = 1 THEN 'Generic alerts exist but not specifically for blocking/long-running queries.'
+    ELSE 'No relevant alerts or monitoring jobs found.'
+END;
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,73 +1,72 @@
 -- Checklist: Orchestration/dependency management exists (master package/pipeline or scheduler)
 -- Scope: SERVER
--- Scoring: 0=No evidence, 1=Basic scheduler/jobs found, 2=Multi-step jobs or orchestrator procs found, 3=Robust orchestration with dependency management
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 3=Clear scheduler/orchestrator (multi-step/ETL jobs); 2=Scheduler exists but lacks clear orchestration pattern; 1=No scheduler, but procedure dependency chains found; 0=No evidence of orchestration or scheduling.
+
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @JobCount INT = 0;
-DECLARE @MultiStepJobCount INT = 0;
-DECLARE @OrchestratorProcCount INT = 0;
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @OrchestratedJobCount INT = 0;
+DECLARE @ProcDepCount INT = 0;
 
--- Check SQL Agent Jobs (On-prem / MI only; gracefully degrades for Azure SQL DB)
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+-- Evaluate SQL Agent Jobs (not available in Azure SQL Database)
+IF @EngineEdition <> 5
 BEGIN
-    SELECT @JobCount = COUNT(*)
+    SELECT @JobCount = COUNT(*) 
+    FROM msdb.dbo.sysjobs 
+    WHERE enabled = 1;
+
+    SELECT @OrchestratedJobCount = COUNT(DISTINCT j.job_id)
     FROM msdb.dbo.sysjobs j
+    INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
     WHERE j.enabled = 1
-      AND (j.name LIKE '%ETL%' OR j.name LIKE '%Load%' OR j.name LIKE '%Sync%' OR j.name LIKE '%Master%' OR j.name LIKE '%Orchestrator%' OR j.name LIKE '%Pipeline%');
-
-    SELECT @MultiStepJobCount = COUNT(*)
-    FROM (
-        SELECT j.job_id
-        FROM msdb.dbo.sysjobs j
-        INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-        WHERE j.enabled = 1
-          AND (j.name LIKE '%ETL%' OR j.name LIKE '%Load%' OR j.name LIKE '%Sync%' OR j.name LIKE '%Master%' OR j.name LIKE '%Orchestrator%' OR j.name LIKE '%Pipeline%')
-        GROUP BY j.job_id
-        HAVING COUNT(js.step_id) > 1
-    ) AS MultiStep;
+      AND (
+          (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps js2 WHERE js2.job_id = j.job_id) > 1
+          OR js.command LIKE '%dtexec%'
+          OR js.command LIKE '%SSIS%'
+          OR js.command LIKE '%ETL%'
+          OR js.subsystem IN ('SSIS', 'CmdExec', 'TSQL')
+      );
 END
 
--- Check user databases for orchestrator/master procedures
-CREATE TABLE #ProcResults (DbName NVARCHAR(256), ProcCount INT);
+-- Fallback: Check for stored procedure dependencies as proxy for orchestration
+SELECT @ProcDepCount = COUNT(DISTINCT p.OBJECT_ID)
+FROM sys.procedures p
+WHERE EXISTS (
+    SELECT 1 FROM sys.sql_expression_dependencies d
+    WHERE d.referencing_id = p.OBJECT_ID
+      AND d.referenced_id IN (SELECT OBJECT_ID FROM sys.procedures)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+-- Determine Score and Finding
+IF @OrchestratedJobCount > 0
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        SELECT COUNT(*) FROM sys.procedures p
-        WHERE p.name LIKE ''%Master%'' OR p.name LIKE ''%Orchestrator%'' OR p.name LIKE ''%Pipeline%'' OR p.name LIKE ''%ETL%'';';
-        INSERT INTO #ProcResults (DbName, ProcCount)
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #ProcResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
-SELECT @OrchestratorProcCount = ISNULL(SUM(ProcCount), 0) FROM #ProcResults;
-DROP TABLE #ProcResults;
-
--- Scoring logic (ordered highest to lowest to prevent short-circuit)
-IF @MultiStepJobCount > 0 AND @OrchestratorProcCount > 0
     SET @Score = 3;
-ELSE IF @MultiStepJobCount > 0 OR @OrchestratorProcCount > 0
-    SET @Score = 2;
+    SET @Finding = 'Orchestration/scheduler detected: ' + CAST(@OrchestratedJobCount AS NVARCHAR) + ' SQL Agent job(s) with multi-step or ETL/SSIS configuration found.';
+END
 ELSE IF @JobCount > 0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = 'Scheduler detected: ' + CAST(@JobCount AS NVARCHAR) + ' SQL Agent job(s) found, but no clear multi-step or ETL orchestration pattern identified.';
+END
+ELSE IF @ProcDepCount > 0
+BEGIN
     SET @Score = 1;
+    SET @Finding = 'No SQL Agent scheduler found. Proxy evidence: ' + CAST(@ProcDepCount AS NVARCHAR) + ' stored procedure(s) with dependency chains detected.';
+END
 ELSE
+BEGIN
     SET @Score = 0;
+    SET @Finding = 'No evidence of orchestration, dependency management, or scheduler found.';
+END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

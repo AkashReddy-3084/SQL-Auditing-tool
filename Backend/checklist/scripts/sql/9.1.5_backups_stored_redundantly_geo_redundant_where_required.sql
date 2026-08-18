@@ -1,41 +1,79 @@
 -- Checklist: Backups stored redundantly / geo-redundant where required
 -- Scope: SERVER
--- Scoring: 0=No backup history found; 1=Backups exist but only in a single location; 2=Backups stored in 2+ distinct locations (proxy for redundancy); 3=Reserved for fully verified compliance (not achievable via proxy evidence)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 0: No backup history found. 1: Backups exist but only on a single local path. 2: Backups configured to multiple local/UNC paths. 3: Backups stored in cloud storage (Azure Blob URLs) or Azure PaaS (inherent geo-redundancy).
 
-IF OBJECT_ID('msdb.dbo.backupset') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+
+IF @EngineEdition IN (5, 8)
 BEGIN
-    -- On-premises / Azure SQL Managed Instance: evaluate backup history
-    SELECT @Score = CASE
-        WHEN COUNT(DISTINCT m.physical_device_name) = 0 THEN 0
-        WHEN COUNT(DISTINCT m.physical_device_name) = 1 THEN 1
-        WHEN COUNT(DISTINCT m.physical_device_name) >= 2 THEN 2
-        ELSE 0
-    END
-    FROM msdb.dbo.backupset b
-    JOIN msdb.dbo.backupmediafamily m ON b.media_set_id = m.media_set_id
-    WHERE b.database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
-      AND b.backup_start_date >= DATEADD(day, -30, GETDATE());
+    SET @Score = 3;
+    SET @Finding = 'Azure PaaS service provides geo-redundant backups by default.';
 END
 ELSE
 BEGIN
-    -- Azure SQL Database: backups are platform-managed; use service tier as proxy
-    IF OBJECT_ID('sys.database_service_objectives') IS NOT NULL
+    DECLARE @BackupPaths TABLE (
+        PathType NVARCHAR(50),
+        PathCount INT,
+        SamplePath NVARCHAR(256)
+    );
+
+    INSERT INTO @BackupPaths
+    SELECT 
+        CASE 
+            WHEN bmf.physical_device_name LIKE 'http://%' OR bmf.physical_device_name LIKE 'https://%' THEN 'Cloud'
+            WHEN bmf.physical_device_name LIKE '\\%' THEN 'UNC'
+            ELSE 'Local'
+        END AS PathType,
+        COUNT(DISTINCT bmf.physical_device_name) AS PathCount,
+        MIN(bmf.physical_device_name) AS SamplePath
+    FROM msdb.dbo.backupmediafamily bmf
+    INNER JOIN msdb.dbo.backupset bs ON bmf.media_set_id = bs.media_set_id
+    WHERE bmf.media_set_id IN (
+        SELECT TOP 100 media_set_id 
+        FROM msdb.dbo.backupset 
+        ORDER BY backup_start_date DESC
+    )
+    GROUP BY 
+        CASE 
+            WHEN bmf.physical_device_name LIKE 'http://%' OR bmf.physical_device_name LIKE 'https://%' THEN 'Cloud'
+            WHEN bmf.physical_device_name LIKE '\\%' THEN 'UNC'
+            ELSE 'Local'
+        END;
+
+    DECLARE @CloudCount INT = ISNULL((SELECT SUM(PathCount) FROM @BackupPaths WHERE PathType = 'Cloud'), 0);
+    DECLARE @TotalPaths INT = ISNULL((SELECT SUM(PathCount) FROM @BackupPaths), 0);
+
+    IF @TotalPaths = 0
     BEGIN
-        SELECT @Score = CASE
-            WHEN COUNT(*) = 0 THEN 0
-            WHEN MAX(service_objective) LIKE '%GP%' OR MAX(service_objective) LIKE '%BC%' OR MAX(service_objective) LIKE '%P%' THEN 2
-            ELSE 1
-        END
-        FROM sys.database_service_objectives;
+        SET @Score = 0;
+        SET @Finding = 'No backup history found in msdb.';
+    END
+    ELSE IF @CloudCount > 0
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = 'Backups stored in cloud storage (Azure Blob). Sample path: ' + (SELECT TOP 1 SamplePath FROM @BackupPaths WHERE PathType = 'Cloud');
+    END
+    ELSE IF @TotalPaths > 1
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = 'Backups stored across ' + CAST(@TotalPaths AS NVARCHAR(10)) + ' distinct local/UNC paths. Paths: ' + ISNULL((SELECT STRING_AGG(SamplePath, ', ') FROM @BackupPaths), 'N/A');
     END
     ELSE
     BEGIN
-        SET @Score = 0;
-    END
+        SET @Score = 1;
+        SET @Finding = 'Backups stored on a single local path: ' + (SELECT TOP 1 SamplePath FROM @BackupPaths);
+    END;
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

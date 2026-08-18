@@ -1,85 +1,125 @@
 -- Checklist: Partition alignment supports fast load/switch and purge (sliding window)
 -- Scope: DATABASE
--- Scoring: 0=Misaligned indexes; 1=Aligned but non-date boundaries; 2=Aligned+date boundaries, no switch procs; 3=Aligned+date boundaries+switch procs
+-- Scoring: 0: Misaligned partitioned tables/indexes found. 1: Partial alignment. 2: Mostly aligned. 3: Fully aligned or no partitioned objects.
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalPartitioned INT = 0;
-        DECLARE @AlignedCount INT = 0;
-        DECLARE @NonDateBoundaryCount INT = 0;
-        DECLARE @SwitchEvidence INT = 0;
-        DECLARE @DbScore INT = 3;
-
-        -- Count partitioned tables (heap or clustered index)
-        SELECT @TotalPartitioned = COUNT(*)
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    SELECT
+        DbName = ''' + @DbName + ''',
+        DbScore = CASE WHEN COUNT(*) = 0 THEN 3 ELSE 0 END,
+        Finding = CASE WHEN COUNT(*) = 0 THEN ''All partitioned tables and indexes are aligned'' ELSE ''Misaligned tables: '' + STRING_AGG(TableName, '','') END
+    FROM (
+        SELECT t.name AS TableName
         FROM sys.tables t
-        JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id <= 1
+        JOIN sys.indexes i ON t.object_id = i.object_id
         JOIN sys.partition_schemes ps ON i.data_space_id = ps.data_space_id
-        WHERE t.type = ''U'';
+        WHERE t.type = ''U''
+        GROUP BY t.object_id, t.name
+        HAVING COUNT(DISTINCT ps.name) > 1
+    ) AS Misaligned;
+    ';
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    EXEC sp_executesql @Sql;
 
-        IF @TotalPartitioned > 0
-        BEGIN
-            -- Check alignment: all indexes on partitioned tables must use the same partition scheme
-            SELECT @AlignedCount = COUNT(*)
+    IF NOT EXISTS (SELECT 1 FROM #DbResults WHERE DbName = @DbName)
+    BEGIN
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (@DbName, 3, 'No partitioned tables found');
+    END
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4 AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            SELECT
+                DbName = ''' + @DbName + ''',
+                DbScore = CASE WHEN COUNT(*) = 0 THEN 3 ELSE 0 END,
+                Finding = CASE WHEN COUNT(*) = 0 THEN ''All partitioned tables and indexes are aligned'' ELSE ''Misaligned tables: '' + STRING_AGG(TableName, '','') END
             FROM (
-                SELECT t.object_id, COUNT(DISTINCT i.data_space_id) AS scheme_count
+                SELECT t.name AS TableName
                 FROM sys.tables t
                 JOIN sys.indexes i ON t.object_id = i.object_id
                 JOIN sys.partition_schemes ps ON i.data_space_id = ps.data_space_id
                 WHERE t.type = ''U''
-                GROUP BY t.object_id
-            ) AS aligned
-            WHERE scheme_count = 1;
+                GROUP BY t.object_id, t.name
+                HAVING COUNT(DISTINCT ps.name) > 1
+            ) AS Misaligned;
+            ';
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            EXEC sp_executesql @Sql;
 
-            -- Check for non-date/time boundaries on partition functions used by partitioned tables
-            SELECT @NonDateBoundaryCount = COUNT(DISTINCT t.object_id)
-            FROM sys.tables t
-            JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id <= 1
-            JOIN sys.partition_schemes ps ON i.data_space_id = ps.data_space_id
-            JOIN sys.partition_functions pf ON ps.function_id = pf.function_id
-            JOIN sys.types ty ON pf.type_id = ty.user_type_id
-            WHERE t.type = ''U''
-              AND ty.name NOT IN (''date'',''datetime'',''datetime2'',''smalldatetime'',''datetimeoffset'');
+            IF NOT EXISTS (SELECT 1 FROM #DbResults WHERE DbName = @DbName)
+            BEGIN
+                INSERT INTO #DbResults (DbName, DbScore, Finding)
+                VALUES (@DbName, 3, 'No partitioned tables found');
+            END
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
 
-            -- Check for switching/purge procedures
-            SELECT @SwitchEvidence = COUNT(*)
-            FROM sys.procedures p
-            JOIN sys.sql_modules m ON p.object_id = m.object_id
-            WHERE m.definition LIKE ''%SWITCH%'' OR m.definition LIKE ''%TRUNCATE%PARTITION%'';
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
 
-            IF @AlignedCount < @TotalPartitioned SET @DbScore = 0;
-            ELSE IF @NonDateBoundaryCount > 0 SET @DbScore = 1;
-            ELSE IF @SwitchEvidence = 0 SET @DbScore = 2;
-            ELSE SET @DbScore = 3;
-        END
-
-        INSERT INTO #DbResults VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @DbScore);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review of sliding window procedures and boundary intervals.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

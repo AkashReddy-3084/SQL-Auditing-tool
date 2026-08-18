@@ -1,47 +1,101 @@
 -- Checklist: Source metadata captured (load timestamp, source, batch ID)
 -- Scope: DATABASE
--- Scoring: 0=No metadata columns found; 1=1-24% tables have all 3; 2=25-74% tables have all 3; 3=>=75% tables have all 3.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 3 = All user tables contain all three metadata columns; 2 = >=75% compliant; 1 = >=25% compliant; 0 = <25% compliant.
+
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @Total INT = (SELECT COUNT(*) FROM sys.tables WHERE type = ''U'');
-        DECLARE @Match INT = (SELECT COUNT(*) FROM sys.tables t
-            WHERE type = ''U''
-              AND EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name IN (''load_date'',''load_timestamp'',''etl_load_date'',''ingestion_date''))
-              AND EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name IN (''source_system'',''source'',''source_db'',''origin''))
-              AND EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.name IN (''batch_id'',''batch'',''load_batch'',''run_id'')));
-        DECLARE @Pct FLOAT = CASE WHEN @Total > 0 THEN (@Match * 100.0 / @Total) ELSE 0 END;
-        DECLARE @S INT = 0;
-        IF @Pct >= 75 SET @S = 3;
-        ELSE IF @Pct >= 25 SET @S = 2;
-        ELSE IF @Pct > 0 SET @S = 1;
-        INSERT INTO #DbResults VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @S);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+    -- Azure SQL Database: Evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalTables INT;
+    DECLARE @CompliantTables INT;
+    DECLARE @MissingTables NVARCHAR(MAX);
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    WITH TableMetadata AS (
+        SELECT
+            t.object_id,
+            s.name AS schema_name,
+            t.name AS table_name,
+            MAX(CASE WHEN c.name IN (''load_date'', ''load_timestamp'', ''etl_load_dt'', ''insert_dt'', ''created_dt'', ''load_dt'', ''ingestion_date'') THEN 1 ELSE 0 END) AS has_load_ts,
+            MAX(CASE WHEN c.name IN (''source_system'', ''source'', ''src_sys'', ''source_name'', ''src'', ''source_db'') THEN 1 ELSE 0 END) AS has_source,
+            MAX(CASE WHEN c.name IN (''batch_id'', ''batch_no'', ''load_batch'', ''batch_number'', ''batch_num'') THEN 1 ELSE 0 END) AS has_batch
+        FROM sys.tables t
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        LEFT JOIN sys.columns c ON c.object_id = t.object_id
+        WHERE t.type = ''U'' AND s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'')
+        GROUP BY t.object_id, s.name, t.name
+    )
+    SELECT @TotalTables = COUNT(*),
+           @CompliantTables = SUM(CASE WHEN has_load_ts = 1 AND has_source = 1 AND has_batch = 1 THEN 1 ELSE 0 END),
+           @MissingTables = STRING_AGG(CASE WHEN has_load_ts = 1 AND has_source = 1 AND has_batch = 1 THEN NULL ELSE schema_name + ''.'' + table_name END, '', '')
+    FROM TableMetadata;
+
+    IF @TotalTables = 0
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''No user tables found.'';
+    END
+    ELSE
+    BEGIN
+        DECLARE @Pct FLOAT = @CompliantTables * 100.0 / @TotalTables;
+        IF @Pct >= 100 SET @DbScore = 3;
+        ELSE IF @Pct >= 75 SET @DbScore = 2;
+        ELSE IF @Pct >= 25 SET @DbScore = 1;
+        ELSE SET @DbScore = 0;
+
+        IF @DbScore = 3
+            SET @DbFinding = ''All '' + CAST(@TotalTables AS NVARCHAR) + '' user tables contain required source metadata columns.'';
+        ELSE
+            SET @DbFinding = CAST(@CompliantTables AS NVARCHAR) + '' of '' + CAST(@TotalTables AS NVARCHAR) + '' user tables contain required source metadata columns. Missing: '' + ISNULL(@MissingTables, ''None'');
+    END
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @DbScore, @DbFinding);
+    ';
+    EXEC(@Sql);
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: Iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalTables INT;
+            DECLARE @CompliantTables INT;
+            DECLARE @MissingTables NVARCHAR(MAX);
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            WITH TableMetadata AS (
+                SELECT
+                    t.object_id,
+                    s.name AS schema_name,
+                    t.name AS table_name,
+                    MAX(CASE WHEN c.name IN (''load_date'', ''load_timestamp'', ''etl_load_dt'', ''insert_dt'', ''created_dt'', ''load_dt'', ''ingestion_date'') THEN 1 ELSE 0 END) AS has_load_ts,
+                    MAX(CASE WHEN c.name IN (''source_system'', ''source'', ''src_sys'', ''source_name'', ''src'', ''source_db'') THEN 1 ELSE 0 END) AS

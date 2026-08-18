@@ -1,73 +1,33 @@
 -- Checklist: Test environment representative of production (data, scale)
--- Scope: SERVER
--- Scoring: 0 = Production environment detected or test environment with negligible data/scale; 
---          1 = Test environment with minimal data; 
---          2 = Test environment with substantial data/scale (proxy for representativeness); 
---          3 = Not achievable (requires direct cross-environment comparison)
+-- Scope: DATABASE
+-- Scoring: 0: Negligible data (<1k rows or <100MB). 1: Limited data (1k-100k rows or 100MB-1GB). 2: Substantial data (100k-10M rows or 1GB-100GB). 3: Large-scale data (>10M rows or >100GB). NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @TotalRows BIGINT = 0;
-DECLARE @TotalSizeMB BIGINT = 0;
-DECLARE @ServerName NVARCHAR(256) = CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(256));
-DECLARE @EnvType NVARCHAR(10) = 'Unknown';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @TotalRows BIGINT = 0;
+DECLARE @TotalSizeMB DECIMAL(18,2) = 0;
 
-CREATE TABLE #DbMetrics (DbName NVARCHAR(256), DbRows BIGINT, DbSizeMB BIGINT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbRows BIGINT,
+    DbSizeMB DECIMAL(18,2),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
--- Determine environment type from server name
-IF @ServerName LIKE '%PROD%' OR @ServerName LIKE '%PRODUCTION%' SET @EnvType = 'PROD';
-ELSE IF @ServerName LIKE '%TEST%' OR @ServerName LIKE '%QA%' OR @ServerName LIKE '%UAT%' SET @EnvType = 'TEST';
-ELSE IF @ServerName LIKE '%DEV%' OR @ServerName LIKE '%DEVELOPMENT%' SET @EnvType = 'DEV';
-
--- Gather row counts and sizes per user database
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        INSERT INTO #DbMetrics
-        SELECT ''' + @DbName + N''', 
-               ISNULL((SELECT SUM(row_count) FROM sys.dm_db_partition_stats WHERE index_id IN (0, 1) AND object_id IN (SELECT object_id FROM sys.tables)), 0),
-               ISNULL((SELECT SUM(size * 8 / 1024) FROM sys.database_files WHERE type IN (0, 1)), 0);
-        ';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbMetrics VALUES (@DbName, 0, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
--- FIX: Handle NULL from SUM when #DbMetrics is empty (no user databases)
-SELECT @TotalRows = ISNULL(SUM(DbRows), 0), @TotalSizeMB = ISNULL(SUM(DbSizeMB), 0) FROM #DbMetrics;
-
--- Scoring logic
-IF @EnvType = 'PROD'
-BEGIN
-    SET @Score = 0;
-END
-ELSE IF @EnvType IN ('TEST', 'QA', 'UAT', 'DEV', 'Unknown')
-BEGIN
-    IF @TotalRows >= 1000000 AND @TotalSizeMB >= 10240
-        SET @Score = 2;
-    ELSE IF @TotalRows >= 100000 AND @TotalSizeMB >= 1024
-        SET @Score = 1;
-    ELSE
-        SET @Score = 0;
-END
-
--- Note: Per checklist scoring logic, Score 3 = Not achievable (requires direct cross-environment comparison).
--- This script uses a best-effort proxy (Scores 0-2). If strict compliance requires cross-env validation,
--- override @Score = 3 and @Result = 'Pass' (or 'Fail' per your framework's policy for unachievable checks).
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DROP TABLE #DbMetrics;
-
-SELECT @Result AS Result, @Score AS Score;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'DECLARE @Rows BIGINT;
+    DECLARE @SizeMB DECIMAL(18,2);
+    SELECT @Rows = SUM(row_count) FROM sys.dm_db_partition_stats WHERE index_id < 2;
+    SELECT @SizeMB = SUM(size * 8.0 / 1024) FROM sys.database_files;
+    INSERT INTO #DbResults (DbName, DbRows, DbSizeMB, DbScore, Finding)
+    VALUES (''' + @DbName + ''', @Rows, @SizeMB, 0, CAST(@Rows AS NVARCHAR) + '' rows, '' + CAST(@SizeMB AS NVARCHAR) + '' MB);';
+    EXEC sp_executesql

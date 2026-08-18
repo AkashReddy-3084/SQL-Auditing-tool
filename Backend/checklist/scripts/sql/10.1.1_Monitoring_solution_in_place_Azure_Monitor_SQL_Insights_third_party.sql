@@ -1,36 +1,76 @@
 -- Checklist: Monitoring solution in place (Azure Monitor / SQL Insights / third-party)
 -- Scope: SERVER
--- Scoring: 0=No evidence, 1=Only default system_health XE, 2=Custom monitoring XE/jobs/telemetry found (proxy evidence capped at 2)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @CustomXECount INT = 0;
-DECLARE @JobCount INT = 0;
-DECLARE @ExtSourceCount INT = 0;
+-- Scoring: 0=No indicators found; 1=Single weak indicator; 2=Multiple indicators (2-3, proxy evidence); 3=Official monitoring integration detected (e.g., SQL Insights/Azure Monitor XE session)
 
--- Check Extended Events for monitoring/insights (exclude default system_health)
-SELECT @CustomXECount = COUNT(*) FROM sys.dm_xe_sessions
-WHERE name NOT LIKE 'system_health%'
-  AND (name LIKE '%monitor%' OR name LIKE '%health%' OR name LIKE '%insight%' OR name LIKE '%telemetry%');
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 
--- Check SQL Agent jobs for health/monitoring (on-prem/MI only)
-SELECT @JobCount = COUNT(*) FROM msdb.dbo.sysjobs
-WHERE name LIKE '%health%' OR name LIKE '%monitor%' OR name LIKE '%check%' OR name LIKE '%insight%';
+CREATE TABLE #Indicators (
+    SourceType NVARCHAR(50),
+    IndicatorName NVARCHAR(256),
+    Details NVARCHAR(MAX)
+);
 
--- Check external data sources for telemetry export
-SELECT @ExtSourceCount = COUNT(*) FROM master.sys.external_data_sources
-WHERE name LIKE '%monitor%' OR name LIKE '%telemetry%' OR name LIKE '%loganalytics%' OR name LIKE '%insight%';
-
--- Evaluate score
-IF @CustomXECount > 0 OR @JobCount > 0 OR @ExtSourceCount > 0
-    SET @Score = 2;
+-- Check Extended Event sessions (platform-adaptive)
+IF @IsAzureSQLDB = 1
+BEGIN
+    INSERT INTO #Indicators (SourceType, IndicatorName, Details)
+    SELECT 'DB_XE', name, 'Database Extended Event session'
+    FROM sys.database_event_sessions
+    WHERE name LIKE '%insight%' OR name LIKE '%monitor%' OR name LIKE '%performance%' OR name LIKE '%health%';
+END
 ELSE
 BEGIN
-    -- Check for default system_health
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = 'system_health')
-        SET @Score = 1;
+    INSERT INTO #Indicators (SourceType, IndicatorName, Details)
+    SELECT 'Server_XE', name, 'Server Extended Event session'
+    FROM sys.server_event_sessions
+    WHERE name LIKE '%insight%' OR name LIKE '%monitor%' OR name LIKE '%performance%' OR name LIKE '%health%';
 END
 
+-- Check SQL Agent Jobs (SQL Server / MI only)
+IF @IsAzureSQLDB = 0
+BEGIN
+    INSERT INTO #Indicators (SourceType, IndicatorName, Details)
+    SELECT 'Agent_Job', name, 'SQL Agent Job'
+    FROM msdb.dbo.sysjobs
+    WHERE name LIKE '%monitor%' OR name LIKE '%health%' OR name LIKE '%performance%' OR name LIKE '%insight%';
+END
+
+-- Check Schemas for known monitoring tools
+INSERT INTO #Indicators (SourceType, IndicatorName, Details)
+SELECT 'Schema', name, 'Monitoring tool schema'
+FROM sys.schemas
+WHERE name IN ('SolarWinds', 'Redgate', 'Datadog', 'AppDynamics', 'Dynatrace', 'NewRelic', 'AzureMonitor', 'SQLInsights');
+
+-- Calculate score
+DECLARE @Count INT = (SELECT COUNT(*) FROM #Indicators);
+DECLARE @HasOfficial BIT = 0;
+IF EXISTS (SELECT 1 FROM #Indicators WHERE IndicatorName LIKE '%SQLInsights%' OR IndicatorName LIKE '%AzureMonitor%') SET @HasOfficial = 1;
+
+SET @Score = CASE
+    WHEN @Count = 0 THEN 0
+    WHEN @Count = 1 THEN 1
+    WHEN @Count BETWEEN 2 AND 3 THEN 2
+    WHEN @Count >= 4 OR @HasOfficial = 1 THEN 3
+END;
+
+-- Build finding
+SET @Finding = ISNULL(
+    (SELECT STRING_AGG(SourceType + ': ' + IndicatorName, '; ') FROM #Indicators),
+    'No monitoring indicators found'
+);
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-SELECT @Result AS Result, @Score AS Score;
+DROP TABLE #Indicators;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

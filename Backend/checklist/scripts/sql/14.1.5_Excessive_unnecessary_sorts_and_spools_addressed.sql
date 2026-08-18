@@ -1,23 +1,64 @@
 -- Checklist: Excessive/unnecessary sorts and spools addressed
 -- Scope: SERVER
--- Scoring: 0=Fail (>50 cached plans with Sort/Spool), 1=Partial Pass (11-50), 2=Mostly Pass (1-10 or empty cache). Max score capped at 2 due to proxy nature of plan cache.
-DECLARE @Score INT = 2;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @Count INT = 0;
+-- Scoring: 3: <=5 plans with Sort/Spool and max execution count <1000. 2: <=20 plans and max execution count <10000. 1: <=50 plans. 0: >50 plans or any plan with execution count >=10000.
 
-SELECT @Count = COUNT(DISTINCT qs.plan_handle)
-FROM sys.dm_exec_query_stats qs
-CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
-WHERE qp.query_plan.exist('//RelOp[@PhysicalOp="Sort" or @PhysicalOp="Spool"]') = 1;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-SET @Score = CASE 
-    WHEN @Count > 50 THEN 0
-    WHEN @Count BETWEEN 11 AND 50 THEN 1
-    WHEN @Count BETWEEN 1 AND 10 THEN 2
-    ELSE 2
-END;
+DECLARE @SortSpoolCount INT = 0;
+DECLARE @MaxExecCount BIGINT = 0;
 
+CREATE TABLE #SortSpoolPlans (
+    ObjectName NVARCHAR(256),
+    ExecutionCount BIGINT
+);
+
+BEGIN TRY
+    INSERT INTO #SortSpoolPlans (ObjectName, ExecutionCount)
+    SELECT TOP 100
+        ISNULL(OBJECT_NAME(st.objectid, st.dbid), 'Adhoc'),
+        qs.execution_count
+    FROM sys.dm_exec_query_stats qs
+    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+    CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+    WHERE qp.query_plan.exist('//RelOp[contains(@PhysicalOp, "Sort") or contains(@PhysicalOp, "Spool")]') = 1
+    ORDER BY qs.execution_count DESC;
+END TRY
+BEGIN CATCH
+    INSERT INTO #SortSpoolPlans (ObjectName, ExecutionCount)
+    VALUES ('Permission denied or DMV unavailable', 0);
+END TRY
+
+SELECT @SortSpoolCount = COUNT(*), @MaxExecCount = ISNULL(MAX(ExecutionCount), 0) FROM #SortSpoolPlans;
+
+SELECT @Finding = STRING_AGG(PlanInfo, ', ')
+FROM (
+    SELECT TOP 5 ObjectName + ' (Exec: ' + CAST(ExecutionCount AS NVARCHAR) + ')' AS PlanInfo
+    FROM #SortSpoolPlans
+    ORDER BY ExecutionCount DESC
+) t;
+
+IF @SortSpoolCount = 0 
+    SET @Finding = 'No cached execution plans with Sort or Spool operators found.';
+
+IF @SortSpoolCount <= 5 AND @MaxExecCount < 1000
+    SET @Score = 3;
+ELSE IF @SortSpoolCount <= 20 AND @MaxExecCount < 10000
+    SET @Score = 2;
+ELSE IF @SortSpoolCount <= 50
+    SET @Score = 1;
+ELSE
+    SET @Score = 0;
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;
+
+DROP TABLE #SortSpoolPlans;

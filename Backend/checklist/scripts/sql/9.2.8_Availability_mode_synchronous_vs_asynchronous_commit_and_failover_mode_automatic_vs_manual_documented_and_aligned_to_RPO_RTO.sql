@@ -1,43 +1,46 @@
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AgCount INT = 0;
-DECLARE @TotalReplicas INT = 0;
-DECLARE @HealthyReplicas INT = 0;
-DECLARE @ConfiguredReplicas INT = 0;
-DECLARE @DocCount INT = 0;
+-- Checklist: Availability mode (synchronous vs asynchronous commit) and failover mode (automatic vs manual) documented and aligned to RPO/RTO
+-- Scope: SERVER
+-- Scoring: 0: No AGs configured. 1: AGs exist but mode configuration is incomplete. 2: All AG replicas have explicit availability and failover modes configured (RPO/RTO alignment requires manual review). 3: Not achievable automatically.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
--- Check for Always On Availability Groups
-SELECT @AgCount = COUNT(*) FROM sys.availability_groups;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-IF @AgCount > 0
+IF SERVERPROPERTY('EngineEdition') = 5
 BEGIN
-    -- Evaluate replica health and explicit mode configuration
-    SELECT 
-        @TotalReplicas = COUNT(*),
-        @HealthyReplicas = SUM(CASE WHEN ars.connected_state = 2 THEN 1 ELSE 0 END),
-        @ConfiguredReplicas = SUM(CASE WHEN ar.failover_mode IS NOT NULL AND ar.synchronous_commit_allowed IS NOT NULL THEN 1 ELSE 0 END)
-    FROM sys.availability_replicas ar
-    INNER JOIN sys.dm_hadr_availability_replica_states ars 
-        ON ar.group_id = ars.group_id AND ar.replica_id = ars.replica_id;
-
-    IF @TotalReplicas > 0 AND @HealthyReplicas = @TotalReplicas AND @ConfiguredReplicas = @TotalReplicas
+    SET @Score = 2;
+    SET @Finding = 'Azure SQL Database: High Availability is managed by Azure SLA. RPO/RTO alignment is platform-managed.';
+END
+ELSE
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.availability_groups)
     BEGIN
         SET @Score = 2;
+        SELECT @Finding = STRING_AGG(
+            ag.name + ': ' +
+            CASE ar.availability_mode WHEN 1 THEN 'Synchronous' WHEN 2 THEN 'Asynchronous' ELSE 'Unspecified' END + ' commit, ' +
+            CASE ar.failover_mode WHEN 1 THEN 'Manual' WHEN 2 THEN 'Automatic' ELSE 'Unspecified' END + ' failover',
+            '; '
+        )
+        FROM sys.availability_groups ag
+        JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id;
         
-        -- Check for documentation (RPO/RTO alignment) via extended properties
-        -- class_id 106 represents Availability Groups
-        SELECT @DocCount = COUNT(*)
-        FROM sys.extended_properties ep
-        WHERE ep.class_id = 106 
-          AND (ep.name LIKE '%RPO%' OR ep.name LIKE '%RTO%' OR ep.value LIKE '%RPO%' OR ep.value LIKE '%RTO%');
-            
-        IF @DocCount > 0 SET @Score = 3;
+        SET @Finding = ISNULL(@Finding, 'AGs exist but no replica configuration found.');
     END
     ELSE
     BEGIN
-        SET @Score = 1;
+        SET @Score = 0;
+        SET @Finding = 'No Always On Availability Groups configured.';
     END
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,55 +1,60 @@
-USE master;
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AgentEnabled INT = 0;
-DECLARE @AlertCount INT = 0;
-DECLARE @OperatorCount INT = 0;
-DECLARE @NotificationCount INT = 0;
-DECLARE @RecentBackupCount INT = 0;
+-- Checklist: Backup failures alerted and monitored
+-- Scope: SERVER
+-- Scoring: 0: No backup jobs or zero notifications/alerts. 1: <50% jobs notified, no alerts. 2: >=50% jobs notified or alerts exist. 3: All jobs notified.
 
--- Check SQL Agent status
-SELECT @AgentEnabled = ISNULL(value_in_use, 0) FROM sys.configurations WHERE name = 'Agent XPs';
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Check for backup-related alerts, operators, and notification routing
-IF OBJECT_ID('msdb.dbo.sysalerts') IS NOT NULL
-BEGIN
-    SELECT @AlertCount = COUNT(*) FROM msdb.dbo.sysalerts 
-    WHERE name LIKE '%backup%' OR message_id BETWEEN 3013 AND 3099;
-    
-    SELECT @OperatorCount = COUNT(*) FROM msdb.dbo.sysoperators WHERE enabled = 1;
-    
-    SELECT @NotificationCount = COUNT(*) FROM msdb.dbo.sysnotifications 
-    WHERE alert_id IN (
-        SELECT alert_id FROM msdb.dbo.sysalerts 
-        WHERE name LIKE '%backup%' OR message_id BETWEEN 3013 AND 3099
-    );
-END
-ELSE
-BEGIN
-    -- Azure SQL DB lacks msdb/Agent; backup alerting is handled via Azure Monitor/Action Groups
-    -- Degrade to partial evidence score
+SET NOCOUNT ON;
+
+DECLARE @TotalBackupJobs INT;
+DECLARE @NotifiedJobs INT;
+DECLARE @AlertCount INT;
+DECLARE @NonNotifiedJobs NVARCHAR(MAX);
+
+SELECT @TotalBackupJobs = COUNT(*),
+       @NotifiedJobs = SUM(CASE WHEN notify_level_email >= 2 OR notify_level_page >= 2 OR notify_level_netsend >= 2 THEN 1 ELSE 0 END)
+FROM msdb.dbo.sysjobs
+WHERE name LIKE '%backup%';
+
+SELECT @AlertCount = COUNT(*)
+FROM msdb.dbo.sysalerts
+WHERE description LIKE '%backup%' OR message_id BETWEEN 926 AND 999;
+
+SELECT @NonNotifiedJobs = STRING_AGG(name, ', ')
+FROM msdb.dbo.sysjobs
+WHERE name LIKE '%backup%'
+  AND notify_level_email < 2 AND notify_level_page < 2 AND notify_level_netsend < 2;
+
+IF @TotalBackupJobs = 0
+    SET @Score = 0;
+ELSE IF @NotifiedJobs = @TotalBackupJobs
+    SET @Score = 3;
+ELSE IF @NotifiedJobs * 2 >= @TotalBackupJobs OR @AlertCount > 0
+    SET @Score = 2;
+ELSE IF @NotifiedJobs > 0
     SET @Score = 1;
-END
+ELSE
+    SET @Score = 0;
 
--- Check recent backup activity (last 7 days) to verify monitoring is active
-IF OBJECT_ID('msdb.dbo.backupset') IS NOT NULL
-BEGIN
-    SELECT @RecentBackupCount = COUNT(*) FROM msdb.dbo.backupset 
-    WHERE backup_start_date >= DATEADD(day, -7, GETDATE());
-END
+IF @TotalBackupJobs = 0
+    SET @Finding = 'No backup jobs found in SQL Server Agent.';
+ELSE IF @Score = 3
+    SET @Finding = 'All ' + CAST(@TotalBackupJobs AS NVARCHAR) + ' backup jobs have failure notifications configured.' + CASE WHEN @AlertCount > 0 THEN ' ' + CAST(@AlertCount AS NVARCHAR) + ' backup failure alert(s) also configured.' ELSE '' END;
+ELSE IF @Score = 2
+    SET @Finding = CAST(@NotifiedJobs AS NVARCHAR) + ' of ' + CAST(@TotalBackupJobs AS NVARCHAR) + ' backup jobs have failure notifications configured.' + CASE WHEN @AlertCount > 0 THEN ' ' + CAST(@AlertCount AS NVARCHAR) + ' backup failure alert(s) configured.' ELSE '' END + CASE WHEN @NonNotifiedJobs IS NOT NULL THEN ' Jobs without notifications: ' + @NonNotifiedJobs ELSE '' END;
+ELSE IF @Score = 1
+    SET @Finding = CAST(@NotifiedJobs AS NVARCHAR) + ' of ' + CAST(@TotalBackupJobs AS NVARCHAR) + ' backup jobs have failure notifications configured. No backup failure alerts found. Jobs without notifications: ' + ISNULL(@NonNotifiedJobs, 'None');
+ELSE
+    SET @Finding = 'Backup jobs found but none have failure notifications or alerts configured. Jobs: ' + ISNULL(@NonNotifiedJobs, 'None');
 
--- Scoring logic (only apply if not already set for Azure fallback)
-IF @Score = 0
-BEGIN
-    IF @AgentEnabled = 0 OR @AlertCount = 0
-        SET @Score = 0;
-    ELSE IF @OperatorCount = 0 OR @NotificationCount = 0
-        SET @Score = 1;
-    ELSE IF @RecentBackupCount = 0
-        SET @Score = 2;
-    ELSE
-        SET @Score = 3;
-END
-
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

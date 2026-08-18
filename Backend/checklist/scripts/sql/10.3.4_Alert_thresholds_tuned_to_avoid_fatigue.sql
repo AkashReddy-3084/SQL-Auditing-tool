@@ -1,40 +1,65 @@
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @TotalAlerts INT = 0;
-DECLARE @TunedAny INT = 0;
-DECLARE @Tuned30 INT = 0;
+-- Checklist: Alert thresholds tuned to avoid fatigue
+-- Scope: SERVER
+-- Scoring: 0: Any enabled alert has delay_between_responses = 0. 1: All enabled alerts have delay > 0 but < 60s. 2: All enabled alerts have delay >= 60s but < 300s. 3: All enabled alerts have delay >= 300s or no enabled alerts exist.
 
-IF OBJECT_ID('msdb.dbo.sysalerts') IS NOT NULL
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
+IF @EngineEdition = 5
 BEGIN
-    SELECT @TotalAlerts = COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1;
-    
-    IF @TotalAlerts > 0
-    BEGIN
-        SELECT @TunedAny = COUNT(*) FROM msdb.dbo.sysalerts 
-        WHERE enabled = 1 AND delay_between_responses > 0 AND has_response_option = 1;
-        
-        SELECT @Tuned30 = COUNT(*) FROM msdb.dbo.sysalerts 
-        WHERE enabled = 1 AND delay_between_responses >= 30 AND has_response_option = 1;
-        
-        IF @Tuned30 = @TotalAlerts
-            SET @Score = 3;
-        ELSE IF @TunedAny > (@TotalAlerts / 2.0)
-            SET @Score = 2;
-        ELSE IF @TunedAny > 0
-            SET @Score = 1;
-        ELSE
-            SET @Score = 0;
-    END
-    ELSE
-    BEGIN
-        SET @Score = 0;
-    END
+    SET @Score = 3;
+    SET @Finding = 'Azure SQL Database does not support SQL Agent alerts. Alert thresholds are managed externally via Azure Monitor/Action Groups.';
 END
 ELSE
 BEGIN
-    -- Azure SQL DB lacks SQL Agent; no alerts configured
-    SET @Score = 0;
+    DECLARE @TotalEnabled INT;
+    DECLARE @ZeroDelay INT;
+    DECLARE @LowDelay INT;
+    DECLARE @MedDelay INT;
+
+    SELECT 
+        @TotalEnabled = COUNT(*),
+        @ZeroDelay = SUM(CASE WHEN delay_between_responses = 0 THEN 1 ELSE 0 END),
+        @LowDelay = SUM(CASE WHEN delay_between_responses > 0 AND delay_between_responses < 60 THEN 1 ELSE 0 END),
+        @MedDelay = SUM(CASE WHEN delay_between_responses >= 60 AND delay_between_responses < 300 THEN 1 ELSE 0 END)
+    FROM msdb.dbo.sysalerts
+    WHERE enabled = 1;
+
+    IF @TotalEnabled IS NULL OR @TotalEnabled = 0
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = 'No enabled SQL Agent alerts found. Alert fatigue risk is minimal.';
+    END
+    ELSE IF @ZeroDelay > 0
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = 'Alert fatigue risk: ' + CAST(@ZeroDelay AS NVARCHAR(10)) + ' enabled alert(s) have delay_between_responses = 0.';
+    END
+    ELSE IF @LowDelay > 0
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = 'Partial tuning: ' + CAST(@LowDelay AS NVARCHAR(10)) + ' enabled alert(s) have delay_between_responses between 1 and 59 seconds.';
+    END
+    ELSE IF @MedDelay > 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = 'Mostly tuned: ' + CAST(@MedDelay AS NVARCHAR(10)) + ' enabled alert(s) have delay_between_responses between 60 and 299 seconds.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = 'All ' + CAST(@TotalEnabled AS NVARCHAR(10)) + ' enabled alert(s) have delay_between_responses >= 300 seconds. Thresholds are well-tuned to avoid fatigue.';
+    END
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,69 +1,81 @@
 -- Checklist: Business glossary / terminology maintained
 -- Scope: DATABASE
--- Scoring: 0 = 0% tables have glossary/description properties; 1 = 1-30%; 2 = 31-70%; 3 = >70%
+-- Scoring: 0=No evidence; 1=<20% coverage; 2=20-79% coverage; 3=>=80% coverage or dedicated glossary table exists
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
-DECLARE @Cov INT = 0;
-DECLARE @TotalTables INT = 0;
-DECLARE @Pct FLOAT = 0.0;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Cov = 0;
-        SET @TotalTables = 0;
-        
-        -- Get total tables in the database
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N'; SELECT @TotalTables = COUNT(*) FROM sys.tables;';
-        EXEC sp_executesql @Sql, N'@TotalTables INT OUTPUT', @TotalTables OUTPUT;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalTables INT;
+    DECLARE @CoveredTables INT;
+    DECLARE @GlossaryTableExists BIT = 0;
+    DECLARE @CoveragePct DECIMAL(5,2);
+    DECLARE @SampleTables NVARCHAR(MAX);
 
-        -- Get tables with glossary/description extended properties (table-level only)
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        SELECT @Cov = COUNT(DISTINCT ep.major_id) FROM sys.extended_properties ep
-        JOIN sys.tables t ON ep.major_id = t.object_id
-        WHERE ep.class = 1 AND ep.minor_id = 0
-        AND ep.name IN (''MS_Description'', ''BusinessTerm'', ''Glossary'', ''Description'');';
-        EXEC sp_executesql @Sql, N'@Cov INT OUTPUT', @Cov OUTPUT;
+    SELECT @TotalTables = COUNT(*) FROM sys.tables WHERE type = ''U'';
+    
+    SELECT @CoveredTables = COUNT(DISTINCT t.object_id)
+    FROM sys.tables t
+    WHERE t.type = ''U''
+      AND EXISTS (
+          SELECT 1 FROM sys.extended_properties ep
+          WHERE ep.major_id = t.object_id AND ep.minor_id = 0
+            AND (ep.name = ''MS_Description'' OR ep.name LIKE ''%glossary%'' OR ep.name LIKE ''%business%'' OR ep.name LIKE ''%term%'')
+      );
 
-        -- Calculate coverage percentage safely using float arithmetic
-        IF @TotalTables > 0
-            SET @Pct = (@Cov * 100.0) / CAST(@TotalTables AS FLOAT);
-        ELSE
-            SET @Pct = 100.0; -- Vacuously compliant for empty databases
+    SELECT @GlossaryTableExists = 1
+    FROM sys.tables t
+    WHERE t.type = ''U''
+      AND (t.name LIKE ''%Glossary%'' OR t.name LIKE ''%BusinessTerm%'' OR t.name LIKE ''%DataDictionary%'' OR t.name LIKE ''%Metadata%'');
 
-        -- Determine per-database score
-        IF @Pct > 70.0
-            SET @Score = 3;
-        ELSE IF @Pct > 30.0
-            SET @Score = 2;
-        ELSE IF @Pct > 0.0
-            SET @Score = 1;
-        ELSE
-            SET @Score = 0;
+    SET @CoveragePct = CASE WHEN @TotalTables > 0 THEN (@CoveredTables * 100.0) / @TotalTables ELSE 0 END;
 
-        INSERT INTO #DbResults VALUES (@DbName, @Score);
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SELECT @SampleTables = STRING_AGG(t.name, '', '')
+    FROM sys.tables t
+    WHERE t.type = ''U''
+      AND EXISTS (
+          SELECT 1 FROM sys.extended_properties ep
+          WHERE ep.major_id = t.object_id AND ep.minor_id = 0
+            AND (ep.name = ''MS_Description'' OR ep.name LIKE ''%glossary%'' OR ep.name LIKE ''%business%'' OR ep.name LIKE ''%term%'')
+      );
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        @pDbName,
+        CASE 
+            WHEN @GlossaryTableExists = 1 THEN 3
+            WHEN @CoveragePct >= 80 THEN 3
+            WHEN @CoveragePct >= 20 THEN 2
+            WHEN @CoveragePct > 0 THEN 1
+            ELSE 0
+        END,
+        ''Coverage: '' + CAST(@CoveragePct AS NVARCHAR(10)) + ''% ('' + CAST(@CoveredTables AS NVARCHAR(10)) + ''/' + CAST(@TotalTables AS NVARCHAR(10)) + ''). '' +
+        CASE WHEN @GlossaryTableExists = 1 THEN ''Dedicated glossary table found. '' ELSE '''' END +
+        CASE WHEN @SampleTables IS NOT NULL THEN ''Sample covered: '' + @SampleTables ELSE ''No covered tables found.'' END
+    );
+    ';
+    EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT

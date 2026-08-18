@@ -1,46 +1,52 @@
 -- Checklist: Failover tested at least annually
 -- Scope: SERVER
--- Scoring: 0=No evidence found, 1=Evidence exists but >12 months old, 2=Evidence within 12 months (proxy/indirect), 3=Explicit success confirmation within 12 months
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @LastRunDate INT;
-DECLARE @LastRunStatus INT;
-DECLARE @IsOnPrem BIT = 0;
+-- Scoring: 0=No HA/DR configured; 1=HA/DR partially configured or degraded; 2=HA/DR fully configured but test history unverified; 3=Not achievable automatically (requires manual log/process review)
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
--- Detect platform: msdb exists on-prem and Azure SQL MI, but not Azure SQL DB
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL SET @IsOnPrem = 1;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @HaDrTypes NVARCHAR(MAX) = '';
 
-IF @IsOnPrem = 1
+-- Check for Always On Availability Groups
+IF SERVERPROPERTY('IsHadrEnabled') = 1 AND OBJECT_ID('sys.dm_hadr_availability_replica_states') IS NOT NULL
 BEGIN
-    -- Look for SQL Agent jobs related to failover/DR testing
-    SELECT TOP 1
-        @LastRunDate = jh.run_date,
-        @LastRunStatus = jh.run_status
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobhistory jh ON j.job_id = jh.job_id
-    WHERE (j.name LIKE '%failover%' OR j.name LIKE '%dr%' OR j.name LIKE '%test%')
-      AND jh.step_id = 0 -- Job completion record
-    ORDER BY jh.run_date DESC, jh.run_time DESC;
+    IF EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role = 2)
+        SET @HaDrTypes = @HaDrTypes + 'AlwaysOn AG, ';
+END
 
-    IF @LastRunDate IS NOT NULL
-    BEGIN
-        IF DATEDIFF(DAY, CAST(CAST(@LastRunDate AS CHAR(8)) AS DATETIME), GETDATE()) <= 365
-        BEGIN
-            IF @LastRunStatus = 1 SET @Score = 3;
-            ELSE SET @Score = 2;
-        END
-        ELSE
-        BEGIN
-            SET @Score = 1;
-        END
-    END
+-- Check for Failover Cluster
+IF SERVERPROPERTY('IsClustered') = 1
+    SET @HaDrTypes = @HaDrTypes + 'Failover Cluster, ';
+
+-- Check for Log Shipping
+IF OBJECT_ID('msdb.dbo.log_shipping_primary_databases') IS NOT NULL
+BEGIN
+    IF EXISTS (SELECT 1 FROM msdb.dbo.log_shipping_primary_databases)
+        SET @HaDrTypes = @HaDrTypes + 'Log Shipping, ';
+END
+
+-- Clean up trailing comma/space
+IF LEN(@HaDrTypes) > 0
+    SET @HaDrTypes = LEFT(@HaDrTypes, LEN(@HaDrTypes) - 2);
+
+IF @HaDrTypes = ''
+BEGIN
+    SET @Score = 0;
+    SET @Finding = 'No High Availability or Disaster Recovery mechanisms detected.';
 END
 ELSE
 BEGIN
-    -- Azure SQL DB: No SQL Agent. Failover testing is managed via portal/CLI.
-    -- Degrade gracefully; score remains 0.
-    SET @Score = 0;
+    SET @Score = 2;
+    SET @Finding = 'HA/DR mechanisms configured: ' + @HaDrTypes + '. Automated verification of annual failover testing is not possible; manual review of test logs/documentation is required.';
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,63 +1,87 @@
 -- Checklist: Dependencies documented (linked servers, cross-database references)
--- Scope: SERVER
--- Scoring: 0=No documentation found for existing dependencies; 1=1-49% documented; 2=50-89% documented; 3=90-100% documented or no dependencies exist.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
+-- Scope: DATABASE
+-- Scoring: 3: All dependencies documented or none exist. 2: >=80% documented. 1: >=20% documented. 0: <20% documented or evaluation failed.
+
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @TotalDeps INT = 0;
-DECLARE @DocDeps INT = 0;
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
-DECLARE @t INT, @d INT;
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @LinkedServerFinding NVARCHAR(MAX) = 'No linked servers found';
+DECLARE @LinkedServerScore INT = 3;
 
--- Check Linked Servers (Server-level)
-IF OBJECT_ID('sys.servers') IS NOT NULL
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
+
+-- Check linked servers (server-level)
+SELECT @LinkedServerFinding = ISNULL(STRING_AGG(name, ', '), 'No linked servers found'),
+       @LinkedServerScore = CASE WHEN COUNT(*) = 0 THEN 3
+                                 WHEN SUM(CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE ep.major_id = s.server_id AND ep.class = 100) THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 80 THEN 2
+                                 WHEN SUM(CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE ep.major_id = s.server_id AND ep.class = 100) THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 20 THEN 1
+                                 ELSE 0 END
+FROM sys.servers s
+WHERE is_linked = 1;
+
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    SELECT @TotalDeps += COUNT(*), 
-           @DocDeps += SUM(CASE WHEN comment IS NOT NULL OR EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE ep.major_id = s.server_id AND ep.class = 10) THEN 1 ELSE 0 END)
-    FROM sys.servers s
-    WHERE s.server_id > 0;
+    SET @DatabaseQueried = DB_NAME();
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    SELECT DB_NAME(),
+           CASE WHEN COUNT(*) = 0 THEN 3
+                WHEN SUM(CASE WHEN ep.major_id IS NOT NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 80 THEN 2
+                WHEN SUM(CASE WHEN ep.major_id IS NOT NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 20 THEN 1
+                ELSE 0 END,
+           ISNULL(STRING_AGG(CASE WHEN ep.major_id IS NULL THEN OBJECT_NAME(dep.referencing_id) ELSE NULL END, ', '), 'No cross-database references found')
+    FROM sys.sql_expression_dependencies dep
+    LEFT JOIN sys.extended_properties ep ON ep.major_id = dep.referencing_id AND ep.class = 1
+    WHERE dep.referenced_database_name IS NOT NULL
+      AND dep.referenced_database_name <> DB_NAME();
 END
-
--- Check Cross-Database References (Database-level)
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        SELECT @t = COUNT(*), 
-               @d = SUM(CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE ep.major_id = sed.referencing_id AND ep.minor_id = 0) THEN 1 ELSE 0 END)
-        FROM sys.sql_expression_dependencies sed
-        JOIN sys.objects o ON sed.referencing_id = o.object_id
-        WHERE sed.referenced_database_name IS NOT NULL;';
-        
-        EXEC sp_executesql @Sql, N'@t INT OUTPUT, @d INT OUTPUT', @t = @t OUTPUT, @d = @d OUTPUT;
-        SET @TotalDeps += ISNULL(@t, 0);
-        SET @DocDeps += ISNULL(@d, 0);
-    END TRY
-    BEGIN CATCH
-        -- Skip databases that fail (e.g., offline, restricted access)
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
--- Calculate Score based on documentation ratio
-IF @TotalDeps = 0
-    SET @Score = 3;
 ELSE
 BEGIN
-    DECLARE @Ratio FLOAT = CAST(@DocDeps AS FLOAT) / @TotalDeps;
-    IF @Ratio >= 0.9 SET @Score = 3;
-    ELSE IF @Ratio >= 0.5 SET @Score = 2;
-    ELSE IF @Ratio > 0 SET @Score = 1;
-    ELSE SET @Score = 0;
-END
+    DECLARE @DbName NVARCHAR(256);
+    DECLARE @Sql NVARCHAR(MAX);
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            SELECT ''' + @DbName + ''',
+                   CASE WHEN COUNT(*) = 0 THEN 3
+                        WHEN SUM(CASE WHEN ep.major_id IS NOT NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 80 THEN 2
+                        WHEN SUM(CASE WHEN ep.major_id IS NOT NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) >= 20 THEN 1
+                        ELSE 0 END,
+                   ISNULL(STRING_AGG(CASE WHEN ep.major_id IS NULL THEN OBJECT_NAME(dep.referencing_id) ELSE NULL END, '',''), ''''No cross-database references found''''')
+            FROM sys.sql_expression_dependencies dep
+            LEFT JOIN sys.extended_properties ep ON ep.major_id = dep.referencing_id AND ep.class = 1
+            WHERE dep.referenced_database_name IS NOT NULL
+              AND dep.referenced_database_name <> DB_NAME();
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    SET @DatabaseQueried = (
+        SELECT STRING

@@ -1,49 +1,70 @@
 -- Checklist: Key metrics tracked (CPU, memory, IO, DTU/vCore, waits)
 -- Scope: SERVER
--- Scoring: 0=No metrics tracked, 1=1 metric tracked, 2=2-3 metrics tracked, 3=4-5 metrics tracked
--- NOTE: This script checks for configured monitoring infrastructure (Extended Events or SQL Agent Jobs).
--- Full compliance may require human review to validate naming conventions and collection intervals.
+-- Scoring: 0: No monitoring infrastructure found. 1: 1-2 metric categories tracked. 2: 3-4 metric categories tracked. 3: All 5 metric categories tracked.
 
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @MetricsTracked INT = 0;
-DECLARE @MsdbAvailable BIT = CASE WHEN OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 
--- 1. CPU tracking (checks for XE sessions or Agent Jobs with relevant names)
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%cpu%' OR name LIKE '%processor%')
-   OR (@MsdbAvailable = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name LIKE '%cpu%' OR name LIKE '%processor%'))
-   SET @MetricsTracked += 1;
+CREATE TABLE #MetricsFound (
+    MetricCategory NVARCHAR(50),
+    SourceType NVARCHAR(20),
+    SourceName NVARCHAR(256)
+);
 
--- 2. Memory tracking
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%memory%' OR name LIKE '%mem%')
-   OR (@MsdbAvailable = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name LIKE '%memory%' OR name LIKE '%mem%'))
-   SET @MetricsTracked += 1;
+-- Check SQL Agent Jobs (SQL Server / Azure SQL MI only)
+IF @EngineEdition NOT IN (5)
+BEGIN
+    INSERT INTO #MetricsFound (MetricCategory, SourceType, SourceName)
+    SELECT 'CPU', 'Job', name FROM msdb.dbo.sysjobs WHERE name LIKE '%cpu%' OR name LIKE '%processor%'
+    UNION ALL
+    SELECT 'Memory', 'Job', name FROM msdb.dbo.sysjobs WHERE name LIKE '%memory%' OR name LIKE '%buffer%' OR name LIKE '%page%'
+    UNION ALL
+    SELECT 'IO', 'Job', name FROM msdb.dbo.sysjobs WHERE name LIKE '%io%' OR name LIKE '%disk%' OR name LIKE '%storage%'
+    UNION ALL
+    SELECT 'DTU/vCore', 'Job', name FROM msdb.dbo.sysjobs WHERE name LIKE '%dtu%' OR name LIKE '%vcore%' OR name LIKE '%compute%'
+    UNION ALL
+    SELECT 'Waits', 'Job', name FROM msdb.dbo.sysjobs WHERE name LIKE '%wait%' OR name LIKE '%blocking%' OR name LIKE '%lock%';
+END
 
--- 3. IO tracking
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%io%' OR name LIKE '%disk%')
-   OR (@MsdbAvailable = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name LIKE '%io%' OR name LIKE '%disk%'))
-   SET @MetricsTracked += 1;
+-- Check Extended Event Sessions (All platforms)
+INSERT INTO #MetricsFound (MetricCategory, SourceType, SourceName)
+SELECT 'CPU', 'XE', name FROM sys.server_event_sessions WHERE name LIKE '%cpu%' OR name LIKE '%processor%'
+UNION ALL
+SELECT 'Memory', 'XE', name FROM sys.server_event_sessions WHERE name LIKE '%memory%' OR name LIKE '%buffer%' OR name LIKE '%page%'
+UNION ALL
+SELECT 'IO', 'XE', name FROM sys.server_event_sessions WHERE name LIKE '%io%' OR name LIKE '%disk%' OR name LIKE '%storage%'
+UNION ALL
+SELECT 'DTU/vCore', 'XE', name FROM sys.server_event_sessions WHERE name LIKE '%dtu%' OR name LIKE '%vcore%' OR name LIKE '%compute%'
+UNION ALL
+SELECT 'Waits', 'XE', name FROM sys.server_event_sessions WHERE name LIKE '%wait%' OR name LIKE '%blocking%' OR name LIKE '%lock%';
 
--- 4. DTU/vCore tracking
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%dtu%' OR name LIKE '%vcore%')
-   OR (@MsdbAvailable = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name LIKE '%dtu%' OR name LIKE '%vcore%'))
-   SET @MetricsTracked += 1;
+-- Aggregate findings
+DECLARE @DistinctMetrics INT = (SELECT COUNT(DISTINCT MetricCategory) FROM #MetricsFound);
+DECLARE @TrackedList NVARCHAR(MAX) = (SELECT STRING_AGG(DISTINCT MetricCategory, ', ') FROM #MetricsFound);
+DECLARE @SourcesList NVARCHAR(MAX) = (SELECT STRING_AGG(SourceType + ': ' + SourceName, '; ') FROM #MetricsFound);
 
--- 5. Waits tracking
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%wait%' OR name LIKE '%blocking%')
-   OR (@MsdbAvailable = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name LIKE '%wait%' OR name LIKE '%blocking%'))
-   SET @MetricsTracked += 1;
-
--- Cap at 5 core metrics
-SET @MetricsTracked = CASE WHEN @MetricsTracked > 5 THEN 5 ELSE @MetricsTracked END;
-
--- Apply scoring logic per checklist specification
 SET @Score = CASE
-    WHEN @MetricsTracked = 0 THEN 0
-    WHEN @MetricsTracked = 1 THEN 1
-    WHEN @MetricsTracked BETWEEN 2 AND 3 THEN 2
-    WHEN @MetricsTracked BETWEEN 4 AND 5 THEN 3
+    WHEN @DistinctMetrics = 5 THEN 3
+    WHEN @DistinctMetrics >= 3 THEN 2
+    WHEN @DistinctMetrics >= 1 THEN 1
+    ELSE 0
 END;
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SET @Finding = CASE
+    WHEN @DistinctMetrics = 0 THEN 'No monitoring jobs or Extended Event sessions found tracking key performance metrics.'
+    ELSE 'Tracked metrics: ' + ISNULL(@TrackedList, 'None') + '. Sources: ' + ISNULL(@SourcesList, 'None')
+END;
+
+DROP TABLE #MetricsFound;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

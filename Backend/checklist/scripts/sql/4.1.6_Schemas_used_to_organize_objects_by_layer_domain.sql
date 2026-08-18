@@ -1,52 +1,176 @@
 -- Checklist: Schemas used to organize objects by layer/domain
 -- Scope: DATABASE
--- Scoring: 0=All objects in dbo, 1=1-49% in non-dbo, 2=50-89% in non-dbo, 3=>=90% in non-dbo
+-- Scoring: 0=No user objects/failed; 1=>70% in dbo; 2=30-70% in dbo; 3=<30% in dbo
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-DECLARE @TotalObjects INT;
-DECLARE @NonDboObjects INT;
-DECLARE @LocalScore INT = 0;
+    -- Azure SQL Database: evaluate current DB only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalObjects INT;
+    DECLARE @DboObjects INT;
+    DECLARE @TopSchemas NVARCHAR(MAX);
 
-SELECT @TotalObjects = COUNT(*) FROM sys.objects WHERE type IN (''U'',''V'',''P'',''IF'',''FN'',''TF'');
-SELECT @NonDboObjects = COUNT(*) FROM sys.objects WHERE type IN (''U'',''V'',''P'',''IF'',''FN'',''TF'') AND schema_id <> 1;
+    SELECT @TotalObjects = COUNT(*)
+    FROM sys.objects
+    WHERE type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+      AND is_ms_shipped = 0;
 
-IF @TotalObjects = 0 SET @LocalScore = 0;
-ELSE BEGIN
-    DECLARE @Pct FLOAT = (@NonDboObjects * 100.0) / @TotalObjects;
-    IF @Pct >= 90 SET @LocalScore = 3;
-    ELSE IF @Pct >= 50 SET @LocalScore = 2;
-    ELSE IF @Pct >= 1 SET @LocalScore = 1;
-    ELSE SET @LocalScore = 0;
-END;
+    SELECT @DboObjects = COUNT(*)
+    FROM sys.objects o
+    JOIN sys.schemas s ON o.schema_id = s.schema_id
+    WHERE o.type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+      AND o.is_ms_shipped = 0
+      AND s.name = ''dbo'';
 
-SELECT @DbName AS DbName, @LocalScore AS DbScore;
-';
-        INSERT INTO #DbResults (DbName, DbScore) EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SELECT @TopSchemas = STRING_AGG(s.name + '' ('' + CAST(COUNT(*) AS NVARCHAR(10)) + '')'', '', '')
+    FROM sys.objects o
+    JOIN sys.schemas s ON o.schema_id = s.schema_id
+    WHERE o.type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+      AND o.is_ms_shipped = 0
+    GROUP BY s.name
+    ORDER BY COUNT(*) DESC;
+
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
+
+    IF @TotalObjects = 0
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''No user objects found'';
+    END
+    ELSE
+    BEGIN
+        DECLARE @DboPct FLOAT = CAST(@DboObjects AS FLOAT) / @TotalObjects * 100;
+        SET @DbScore = CASE
+            WHEN @DboPct < 30 THEN 3
+            WHEN @DboPct <= 70 THEN 2
+            ELSE 1
+        END;
+        SET @DbFinding = CAST(@DboPct AS NVARCHAR(10)) + ''% in dbo. Top schemas: '' + ISNULL(@TopSchemas, ''None'');
+    END;
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalObjects INT;
+            DECLARE @DboObjects INT;
+            DECLARE @TopSchemas NVARCHAR(MAX);
+
+            SELECT @TotalObjects = COUNT(*)
+            FROM sys.objects
+            WHERE type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+              AND is_ms_shipped = 0;
+
+            SELECT @DboObjects = COUNT(*)
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+              AND o.is_ms_shipped = 0
+              AND s.name = ''dbo'';
+
+            SELECT @TopSchemas = STRING_AGG(s.name + '' ('' + CAST(COUNT(*) AS NVARCHAR(10)) + '')'', '', '')
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN (''U'',''V'',''P'',''FN'',''IF'',''TF'')
+              AND o.is_ms_shipped = 0
+            GROUP BY s.name
+            ORDER BY COUNT(*) DESC;
+
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            IF @TotalObjects = 0
+            BEGIN
+                SET @DbScore = 0;
+                SET @DbFinding = ''No user objects found'';
+            END
+            ELSE
+            BEGIN
+                DECLARE @DboPct FLOAT = CAST(@DboObjects AS FLOAT) / @TotalObjects * 100;
+                SET @DbScore = CASE
+                    WHEN @DboPct < 30 THEN 3
+                    WHEN @DboPct <= 70 THEN 2
+                    ELSE 1
+                END;
+                SET @DbFinding = CAST(@DboPct AS NVARCHAR(10)) + ''% in dbo. Top schemas: '' + ISNULL(@TopSchemas, ''None'');
+            END;
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = ISNULL(
+    (SELECT STRING_AGG(DbName, ', ') FROM #DbResults),
+    'None'
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

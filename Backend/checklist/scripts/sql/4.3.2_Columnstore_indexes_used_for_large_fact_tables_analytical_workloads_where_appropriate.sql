@@ -1,71 +1,85 @@
 -- Checklist: Columnstore indexes used for large fact tables / analytical workloads where appropriate
 -- Scope: DATABASE
--- Scoring: 0=No columnstore indexes found; 1=Columnstore indexes exist but only on small tables (<1M rows); 2=Columnstore indexes on some large fact tables (>=1M rows); 3=Columnstore indexes on all large fact tables matching analytical naming patterns.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 
+-- 3: All large tables (>100k rows) have a columnstore index, or no large tables exist.
+-- 2: >= 75% of large tables have a columnstore index.
+-- 1: >= 1 large table has a columnstore index, but < 75%.
+-- 0: Large tables exist, but none have a columnstore index.
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @IsAzureSQL BIT = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 5 THEN 1 ELSE 0 END;
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQL = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @HasCS INT = 0;
-        DECLARE @TotalLargeFact INT = 0;
-        DECLARE @LargeFactWithCS INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+DECLARE @TotalLarge INT = 0;
+DECLARE @CsCount INT = 0;
+DECLARE @FindingText NVARCHAR(MAX) = '''';
 
-        SELECT @HasCS = COUNT(DISTINCT i.object_id) 
-        FROM sys.indexes i 
-        JOIN sys.tables t ON i.object_id = t.object_id 
-        WHERE i.type IN (5, 6);
+SELECT @TotalLarge = COUNT(*), @CsCount = SUM(HasColumnstore)
+FROM (
+    SELECT 
+        t.name AS TableName,
+        SUM(p.row_count) AS RowCount,
+        MAX(CASE WHEN i.type IN (5, 6) THEN 1 ELSE 0 END) AS HasColumnstore
+    FROM sys.tables t
+    JOIN sys.dm_db_partition_stats p ON t.object_id = p.object_id AND p.index_id < 2
+    LEFT JOIN sys.indexes i ON t.object_id = i.object_id AND i.type IN (5, 6)
+    GROUP BY t.name
+    HAVING SUM(p.row_count) > 100000
+) AS LargeTables;
 
-        SELECT @TotalLargeFact = COUNT(DISTINCT t.object_id) 
-        FROM sys.tables t 
-        JOIN (SELECT object_id, SUM(rows) as total_rows FROM sys.partitions WHERE index_id IN (0, 1) GROUP BY object_id) p 
-          ON t.object_id = p.object_id 
-        WHERE t.type = ''U'' 
-          AND p.total_rows >= 1000000 
-          AND (t.name LIKE ''%fact%'' OR t.name LIKE ''%transaction%'' OR t.name LIKE ''%event%'' OR t.name LIKE ''%sales%'');
+SELECT @FindingText = STRING_AGG(TableName + '' ('' + CAST(RowCount AS NVARCHAR) + '' rows, '' + CASE WHEN HasColumnstore = 1 THEN ''CS'' ELSE ''No CS'' END + '')'', '', '')
+FROM (
+    SELECT 
+        t.name AS TableName,
+        SUM(p.row_count) AS RowCount,
+        MAX(CASE WHEN i.type IN (5, 6) THEN 1 ELSE 0 END) AS HasColumnstore
+    FROM sys.tables t
+    JOIN sys.dm_db_partition_stats p ON t.object_id = p.object_id AND p.index_id < 2
+    LEFT JOIN sys.indexes i ON t.object_id = i.object_id AND i.type IN (5, 6)
+    GROUP BY t.name
+    HAVING SUM(p.row_count) > 100000
+) AS LargeTables;
 
-        SELECT @LargeFactWithCS = COUNT(DISTINCT t.object_id) 
-        FROM sys.tables t 
-        JOIN sys.indexes i ON t.object_id = i.object_id 
-        JOIN (SELECT object_id, SUM(rows) as total_rows FROM sys.partitions WHERE index_id IN (0, 1) GROUP BY object_id) p 
-          ON t.object_id = p.object_id 
-        WHERE t.type = ''U'' 
-          AND i.type IN (5, 6) 
-          AND p.total_rows >= 1000000 
-          AND (t.name LIKE ''%fact%'' OR t.name LIKE ''%transaction%'' OR t.name LIKE ''%event%'' OR t.name LIKE ''%sales%'');
+IF @TotalLarge = 0
+    SET @FindingText = ''No large tables (>100k rows) found'';
 
-        INSERT INTO #DbResults VALUES (''' + @DbName + ''', 
-            CASE 
-                WHEN @TotalLargeFact = 0 THEN 3
-                WHEN @HasCS = 0 THEN 0
-                WHEN @LargeFactWithCS = 0 THEN 1
-                WHEN @LargeFactWithCS < @TotalLargeFact THEN 2
-                ELSE 3
-            END);
-        ';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+DECLARE @DbScore INT;
+IF @TotalLarge = 0
+    SET @DbScore = 3;
+ELSE IF CAST(@CsCount AS FLOAT) / @TotalLarge >= 1.0
+    SET @DbScore = 3;
+ELSE IF CAST(@CsCount AS FLOAT) / @TotalLarge >= 0.75
+    SET @DbScore = 2;
+ELSE IF @CsCount > 0
+    SET @DbScore = 1;
+ELSE
+    SET @DbScore = 0;
+
+INSERT INTO #DbResults (DbName, DbScore, Finding)
+VALUES ('' + REPLACE(@DbName, '''', '''''') + ''', @DbScore, @FindingText);';
+    EXEC(@Sql);
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @

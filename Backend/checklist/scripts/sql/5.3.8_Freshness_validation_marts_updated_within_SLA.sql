@@ -1,69 +1,145 @@
 -- Checklist: Freshness validation: marts updated within SLA
 -- Scope: DATABASE
--- Scoring: 0=No recent updates (>48h or no tables), 1=Partial freshness (1-69% tables updated within 24h), 2=Mostly fresh (70-100% tables updated within 24h), 3=Fully compliant (all tables fresh within exact SLA). Max score capped at 2 because actual SLA compliance requires human validation of business thresholds; script uses 24h proxy evidence.
+-- Scoring: 0: No updates in >48h; 1: 24-48h; 2: 1-24h; 3: <1h. Proxy for SLA.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SET NOCOUNT ON;
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalTables INT = 0;
-        DECLARE @FreshTables INT = 0;
-        DECLARE @ThresholdHours INT = 24;
-        DECLARE @DbScore INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @MaxUpdate DATETIME;
+    DECLARE @HoursDiff FLOAT;
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
 
-        SELECT @TotalTables = COUNT(*)
-        FROM sys.tables t
-        JOIN sys.schemas s ON t.schema_id = s.schema_id
-        WHERE s.name LIKE ''%mart%'' OR s.name LIKE ''%dw%'' OR s.name LIKE ''%data%'';
+    SELECT @MaxUpdate = MAX(ius.last_user_update)
+    FROM sys.dm_db_index_usage_stats ius
+    JOIN sys.tables t ON ius.object_id = t.object_id
+    WHERE ius.database_id = DB_ID();
 
-        IF @TotalTables > 0
-        BEGIN
-            SELECT @FreshTables = COUNT(*)
-            FROM (
-                SELECT t.object_id, 
-                       ISNULL(MAX(i.stats_modified_date), t.modify_date) AS last_update
-                FROM sys.tables t
-                JOIN sys.schemas s ON t.schema_id = s.schema_id
-                LEFT JOIN sys.indexes i ON t.object_id = i.object_id AND i.type <= 1
-                WHERE (s.name LIKE ''%mart%'' OR s.name LIKE ''%dw%'' OR s.name LIKE ''%data%'')
-                GROUP BY t.object_id, t.modify_date
-            ) AS tbl
-            WHERE DATEDIFF(hour, last_update, GETDATE()) <= @ThresholdHours;
+    IF @MaxUpdate IS NULL
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''No recent table updates detected'';
+    END
+    ELSE
+    BEGIN
+        SET @HoursDiff = DATEDIFF(HOUR, @MaxUpdate, GETUTCDATE());
+        SET @DbScore = CASE
+            WHEN @HoursDiff < 1 THEN 3
+            WHEN @HoursDiff < 24 THEN 2
+            WHEN @HoursDiff < 48 THEN 1
+            ELSE 0
+        END;
+        SET @DbFinding = ''Most recent update: '' + CONVERT(NVARCHAR(30), @MaxUpdate, 120) + '' ('' + CAST(@HoursDiff AS NVARCHAR(10)) + '' hours ago)'';
+    END;
 
-            IF @FreshTables = 0 SET @DbScore = 0;
-            ELSE IF CAST(@FreshTables AS FLOAT) / @TotalTables < 0.7 SET @DbScore = 1;
-            ELSE SET @DbScore = 2;
-        END
-        ELSE
-        BEGIN
-            SET @DbScore = 0;
-        END
-
-        INSERT INTO #DbResults VALUES (@DbName, @DbScore);';
-        EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @MaxUpdate DATETIME;
+            DECLARE @HoursDiff FLOAT;
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            SELECT @MaxUpdate = MAX(ius.last_user_update)
+            FROM sys.dm_db_index_usage_stats ius
+            JOIN sys.tables t ON ius.object_id = t.object_id
+            WHERE ius.database_id = DB_ID();
+
+            IF @MaxUpdate IS NULL
+            BEGIN
+                SET @DbScore = 0;
+                SET @DbFinding = ''No recent table updates detected'';
+            END
+            ELSE
+            BEGIN
+                SET @HoursDiff = DATEDIFF(HOUR, @MaxUpdate, GETUTCDATE());
+                SET @DbScore = CASE
+                    WHEN @HoursDiff < 1 THEN 3
+                    WHEN @HoursDiff < 24 THEN 2
+                    WHEN @HoursDiff < 48 THEN 1
+                    ELSE 0
+                END;
+                SET @DbFinding = ''Most recent update: '' + CONVERT(NVARCHAR(30), @MaxUpdate, 120) + '' ('' + CAST(@HoursDiff AS NVARCHAR(10)) + '' hours ago)'';
+            END;
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,61 +1,65 @@
 -- Checklist: ETL is idempotent — safe to re-run after failure
--- Scope: SERVER
--- Scoring: 0=No ETL procs found or <20% show idempotency patterns, 1=20-59% show patterns, 2=>=60% show patterns, 3=Reserved for fully verifiable checks (capped at 2 here due to proxy/static analysis nature).
+-- Scope: DATABASE
+-- Scoring: 0: No DML procedures found or 0% show idempotent patterns. 1: 1-49% show patterns. 2: 50-79% show patterns. 3: >=80% show strong idempotent patterns (TRUNCATE/MERGE/DELETE+INSERT/TRY-CATCH/batch tracking).
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
-DECLARE @TotalETL INT = 0;
-DECLARE @IdempotentETL INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #ETLChecks (DbName NVARCHAR(256), ProcName NVARCHAR(256), IsIdempotent BIT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
+    -- Azure SQL Database: evaluate current connected database only
+    SET @DbName = DB_NAME();
+    
     BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        INSERT INTO #ETLChecks
-        SELECT ''' + @DbName + N''', p.name,
-            CASE WHEN m.definition LIKE ''%MERGE%''
-                 OR m.definition LIKE ''%TRUNCATE TABLE%''
-                 OR m.definition LIKE ''%DELETE FROM%''
-                 OR m.definition LIKE ''%IF EXISTS%''
-            THEN 1 ELSE 0 END
-        FROM sys.procedures p
-        JOIN sys.sql_modules m ON p.object_id = m.object_id
-        WHERE p.name LIKE ''%etl%'' OR p.name LIKE ''%load%'' OR p.name LIKE ''%sync%''
-           OR p.name LIKE ''%import%'' OR p.name LIKE ''%staging%'' OR p.name LIKE ''%ods%''
-           OR p.name LIKE ''%dw%'' OR p.name LIKE ''%mart%'';';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        -- Skip databases where we lack permissions or errors occur
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        SET @Sql = N'
+DECLARE @TotalDml INT = 0;
+DECLARE @IdempotentDml INT = 0;
+DECLARE @NonCompliantList NVARCHAR(MAX) = N'''';
+
+SELECT @TotalDml = COUNT(*) FROM sys.procedures p
+JOIN sys.sql_modules m ON p.object_id = m.object_id
+WHERE m.definition IS NOT NULL AND (m.definition LIKE ''''%INSERT%'''' OR m.definition LIKE ''''%UPDATE%'''' OR m.definition LIKE ''''%DELETE%'''' OR m.definition LIKE ''''%MERGE%'''' OR m.definition LIKE ''''%TRUNCATE%'');
+
+SELECT @IdempotentDml = COUNT(*) FROM sys.procedures p
+JOIN sys.sql_modules m ON p.object_id = m.object_id
+WHERE m.definition IS NOT NULL AND (m.definition LIKE ''''%INSERT%'''' OR m.definition LIKE ''''%UPDATE%'''' OR m.definition LIKE ''''%DELETE%'''' OR m.definition LIKE ''''%MERGE%'''' OR m.definition LIKE ''''%TRUNCATE%'')
+  AND (m.definition LIKE ''''%TRUNCATE%'''' OR m.definition LIKE ''''%MERGE%'''' OR m.definition LIKE ''''%DELETE%'''' OR m.definition LIKE ''''%NOT EXISTS%'''' OR m.definition LIKE ''''%TRY%'''' OR m.definition LIKE ''''%CATCH%'''' OR m.definition LIKE ''''%ROLLBACK%'''' OR m.definition LIKE ''''%BATCH_ID%'''' OR m.definition LIKE ''''%LOAD_DATE%'');
+
+SELECT @NonCompliantList = STRING_AGG(QUOTENAME(SCHEMA_NAME(p.schema_id)) + ''''.'' + QUOTENAME(p.name), '''''',''')
+FROM sys.procedures p
+JOIN sys.sql_modules m ON p.object_id = m.object_id
+WHERE m.definition IS NOT NULL AND (m.definition LIKE ''''%INSERT%'''' OR m.definition LIKE ''''%UPDATE%'''' OR m.definition LIKE ''''%DELETE%'''' OR m.definition LIKE ''''%MERGE%'''' OR m.definition LIKE ''''%TRUNCATE%'')
+  AND NOT (m.definition LIKE ''''%TRUNCATE%'''' OR m.definition LIKE ''''%MERGE%'''' OR m.definition LIKE ''''%DELETE%'''' OR m.definition LIKE ''''%NOT EXISTS%'''' OR m.definition LIKE ''''%TRY%'''' OR m.definition LIKE ''''%CATCH%'''' OR m.definition LIKE ''''%ROLLBACK%'''' OR m.definition LIKE ''''%BATCH_ID%'''' OR m.definition LIKE ''''%LOAD_DATE%'');
+
+DECLARE @DbScore INT = 0;
+DECLARE @DbFinding NVARCHAR(MAX) = N'''';
+
+IF @TotalDml = 0 BEGIN
+    SET @DbScore = 0;
+    SET @DbFinding = N''''No DML procedures found to evaluate ETL idempotency.'''';
+END ELSE BEGIN
+    DECLARE @Pct FLOAT = CAST(@IdempotentDml AS FLOAT) / @TotalDml * 100;
+    IF @Pct >= 80 SET @DbScore = 3;
+    ELSE IF @Pct >= 50 SET @DbScore = 2;
+    ELSE IF @Pct > 0 SET @DbScore = 1;
+    ELSE SET @DbScore = 0;
+
+    SET @DbFinding = N''''Evaluated '''' + CAST(@TotalDml AS NVARCHAR) + N'''' DML procedures. '''' + CAST(@IdempotentDml AS NVARCHAR) + N'''' show idempotent patterns. Non-compliant: '''' + ISNULL(@NonCompliantList, N''''None'''');
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
 
-SELECT @TotalETL = COUNT(*), @IdempotentETL = SUM(IsIdempotent) FROM #ETLChecks;
-
-IF @TotalETL = 0
-    SET @Score = 0;
-ELSE
-BEGIN
-    DECLARE @Pct FLOAT = CAST(@IdempotentETL AS FLOAT) / @TotalETL;
-    IF @Pct >= 0.6 SET @Score = 2;
-    ELSE IF @Pct >= 0.2 SET @Score = 1;
-    ELSE SET @Score = 0;
-END
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DROP TABLE #ETLChecks;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+INSERT INTO #DbResults (DbName, DbScore, Finding)
+VALUES (''''' + @DbName + ''''', @DbScore, @DbFinding);
+';
+        EXEC(@Sql

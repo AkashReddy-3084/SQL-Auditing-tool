@@ -1,58 +1,111 @@
 -- Checklist: Source-to-target reconciliation exists for financial data
 -- Scope: DATABASE
--- Scoring: 0=No evidence, 1=Minimal evidence (1-5 objects with weak matches), 2=Good evidence (6+ objects or definitions contain reconciliation logic), 3=Strong evidence (dedicated recon schema/control tables + automated variance procedures)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 3=Explicit reconciliation objects found; 2=Financial/ETL objects with reconciliation keywords; 1=Weak/partial evidence; 0=No evidence
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @ObjCount INT = 0;
-        DECLARE @DefCount INT = 0;
-        DECLARE @SchCount INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @ReconcileCount INT = 0;
+    DECLARE @FinancialCount INT = 0;
+    DECLARE @Evidence NVARCHAR(MAX) = '''';
+    DECLARE @DbNameParam NVARCHAR(128) = ''' + REPLACE(@DbName, '''', '''''') + N''';
 
-        SELECT @ObjCount = COUNT(*) FROM sys.objects 
-        WHERE type IN (''U'',''P'',''V'',''FN'') 
-        AND (name LIKE ''%recon%'' OR name LIKE ''%reconcil%'' OR name LIKE ''%financial%'' OR name LIKE ''%ledger%'' OR name LIKE ''%balance%'' OR name LIKE ''%variance%'' OR name LIKE ''%control%'' OR name LIKE ''%sox%'' OR name LIKE ''%itgc%'');
+    SELECT @ReconcileCount = COUNT(*) FROM sys.procedures p
+    JOIN sys.sql_modules m ON p.object_id = m.object_id
+    WHERE p.is_ms_shipped = 0
+      AND (p.name LIKE ''%reconcil%'' OR p.name LIKE ''%balance%'' OR m.definition LIKE ''%reconcil%'' OR m.definition LIKE ''%balance%'');
 
-        SELECT @DefCount = COUNT(*) FROM sys.sql_modules m 
-        JOIN sys.objects o ON m.object_id = o.object_id 
-        WHERE o.type IN (''P'',''FN'',''V'') 
-        AND (m.definition LIKE ''%reconcil%'' OR m.definition LIKE ''%variance%'' OR m.definition LIKE ''%control total%'' OR m.definition LIKE ''%difference%'' OR m.definition LIKE ''%source%target%'');
+    SELECT @FinancialCount = COUNT(*) FROM sys.procedures p
+    WHERE p.is_ms_shipped = 0
+      AND (p.name LIKE ''%financial%'' OR p.name LIKE ''%source%target%'' OR p.name LIKE ''%control%total%'');
 
-        SELECT @SchCount = COUNT(*) FROM sys.schemas 
-        WHERE name LIKE ''%recon%'' OR name LIKE ''%control%'' OR name LIKE ''%audit%'';
+    SELECT @Evidence = STRING_AGG(p.name, '', '') FROM sys.procedures p 
+    WHERE p.is_ms_shipped = 0 AND (p.name LIKE ''%reconcil%'' OR p.name LIKE ''%balance%'' OR p.name LIKE ''%financial%'');
 
-        INSERT INTO #DbResults VALUES (@DbName, CASE 
-            WHEN @ObjCount = 0 AND @DefCount = 0 THEN 0 
-            WHEN @ObjCount BETWEEN 1 AND 5 AND @DefCount = 0 THEN 1 
-            WHEN @SchCount >= 1 AND @DefCount >= 2 THEN 3 
-            WHEN @ObjCount >= 6 OR @DefCount >= 1 THEN 2 
-            ELSE 1 
-        END);';
-        EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        @DbNameParam,
+        CASE WHEN @ReconcileCount > 0 THEN 3 WHEN @FinancialCount > 0 THEN 2 ELSE 0 END,
+        CASE WHEN @Evidence IS NOT NULL THEN @Evidence ELSE ''No reconciliation or financial control objects found'' END
+    );
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
 
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @ReconcileCount INT = 0;
+            DECLARE @FinancialCount INT = 0;
+            DECLARE @Evidence NVARCHAR(MAX) = '''';
+            DECLARE @DbNameParam NVARCHAR(128) = ''' + REPLACE(@DbName, '''', '''''') + N''';
+
+            SELECT @ReconcileCount = COUNT(*) FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE p.is_ms_shipped = 0
+              AND (p.name LIKE ''%reconcil%'' OR p.name LIKE ''%balance%'' OR m.definition LIKE ''%reconcil%'' OR m.definition LIKE ''%balance%'');
+
+            SELECT @FinancialCount = COUNT(*) FROM sys.procedures p
+            WHERE p.is_ms_shipped = 0
+              AND (p.name LIKE ''%financial%'' OR p.name LIKE ''%source%target%'' OR p.name LIKE ''%control%total%'');
+
+            SELECT @Evidence = STRING_AGG(p.name, '', '') FROM sys.procedures p 
+            WHERE p.is_ms_shipped = 0 AND (p.name LIKE ''%reconcil%'' OR p.name LIKE ''%balance%'' OR p.name LIKE ''%financial%'');
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (
+                @DbNameParam,
+                CASE WHEN @ReconcileCount > 0 THEN 3 WHEN @FinancialCount > 0 THEN 2 ELSE 0 END,
+                CASE WHEN @Evidence IS NOT NULL THEN @Evidence ELSE ''No reconciliation or financial control objects found'' END
+            );
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (SELECT STRING_AGG(DbName, ', ') FROM #DbResults);
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults WHERE Finding IS NOT NULL AND Finding <> ''), 'No non-compliant findings found');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

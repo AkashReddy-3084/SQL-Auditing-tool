@@ -1,68 +1,145 @@
 -- Checklist: Technical metadata (schema) captured and current
 -- Scope: DATABASE
--- Scoring: 0=No metadata evidence, 1=Minimal evidence (<20% coverage or empty metadata table), 2=Good evidence (>20% coverage or populated metadata table), 3=Strong evidence (>60% coverage or comprehensive metadata table)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0=No metadata found; 1=Low coverage (<50% of tables); 2=Good coverage (>=50%) or metadata schema/table exists; 3=High coverage (>=80%) or comprehensive metadata repository detected.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalTables INT = (SELECT COUNT(*) FROM sys.tables WHERE type = ''U'');
-        DECLARE @TablesWithProps INT = 0;
-        DECLARE @TotalColumns INT = (SELECT COUNT(*) FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE t.type = ''U'');
-        DECLARE @ColsWithProps INT = 0;
-        DECLARE @MetaTableExists INT = (SELECT COUNT(*) FROM sys.tables WHERE name LIKE ''%Metadata%'' OR name LIKE ''%DataDictionary%'' OR name LIKE ''%SchemaInfo%'');
-        DECLARE @MetaTableRowCount INT = 0;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalTables INT;
+    DECLARE @TablesWithMeta INT;
+    DECLARE @HasMetaSchema BIT = 0;
+    DECLARE @HasMetaTable BIT = 0;
+    DECLARE @Coverage DECIMAL(5,2);
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
 
-        SELECT @TablesWithProps = COUNT(DISTINCT major_id) FROM sys.extended_properties WHERE class = 1 AND minor_id = 0;
-        SELECT @ColsWithProps = COUNT(*) FROM sys.extended_properties WHERE class = 1 AND minor_id > 0;
+    SELECT @TotalTables = COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0 AND type = ''U'';
+    SELECT @TablesWithMeta = COUNT(DISTINCT t.object_id)
+    FROM sys.tables t
+    JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.minor_id = 0
+    WHERE t.is_ms_shipped = 0 AND t.type = ''U'';
 
-        IF @MetaTableExists > 0
-        BEGIN
-            SELECT @MetaTableRowCount = ISNULL(SUM(p.rows), 0)
-            FROM sys.tables t
-            JOIN sys.dm_db_partition_stats p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
-            WHERE t.name LIKE ''%Metadata%'' OR t.name LIKE ''%DataDictionary%'' OR t.name LIKE ''%SchemaInfo%'';
-        END
+    SELECT @HasMetaSchema = CASE WHEN EXISTS(SELECT 1 FROM sys.schemas WHERE name IN (''metadata'', ''data_dictionary'', ''mdm'', ''schema_registry'')) THEN 1 ELSE 0 END;
+    SELECT @HasMetaTable = CASE WHEN EXISTS(SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (''metadata'', ''data_dictionary'', ''mdm'', ''schema_registry'') OR t.name LIKE ''%metadata%'' OR t.name LIKE ''%data_dictionary%'') THEN 1 ELSE 0 END;
 
-        DECLARE @DbScore INT = 0;
-        IF @TotalTables = 0 SET @DbScore = 3;
-        ELSE
-        BEGIN
-            DECLARE @TablePropPct FLOAT = CAST(@TablesWithProps AS FLOAT) / NULLIF(@TotalTables, 0);
-            DECLARE @ColPropPct FLOAT = CAST(@ColsWithProps AS FLOAT) / NULLIF(@TotalColumns, 0);
-            DECLARE @MaxPct FLOAT = CASE WHEN @TablePropPct > @ColPropPct THEN @TablePropPct ELSE @ColPropPct END;
+    SET @Coverage = CASE WHEN @TotalTables > 0 THEN (@TablesWithMeta * 100.0) / @TotalTables ELSE 0 END;
 
-            IF @MaxPct >= 0.6 OR (@MetaTableExists > 0 AND @MetaTableRowCount > 100) SET @DbScore = 3;
-            ELSE IF @MaxPct >= 0.2 OR (@MetaTableExists > 0 AND @MetaTableRowCount > 10) SET @DbScore = 2;
-            ELSE IF @MaxPct > 0 OR @MetaTableExists > 0 SET @DbScore = 1;
-            ELSE SET @DbScore = 0;
-        END
-        INSERT INTO #DbResults VALUES (@DbNameParam, @DbScore);
-        ';
-        EXEC sp_executesql @Sql, N'@DbNameParam NVARCHAR(256)', @DbNameParam = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    IF @Coverage >= 80.0 OR (@HasMetaSchema = 1 AND @HasMetaTable = 1) SET @DbScore = 3;
+    ELSE IF @Coverage >= 50.0 OR @HasMetaSchema = 1 OR @HasMetaTable = 1 SET @DbScore = 2;
+    ELSE IF @Coverage > 0.0 SET @DbScore = 1;
+    ELSE SET @DbScore = 0;
+
+    SET @DbFinding = CONCAT(''Tables with metadata: '', @TablesWithMeta, ''/'', @TotalTables, '' ('', CAST(@Coverage AS NVARCHAR(10)), ''%'')'');
+    IF @HasMetaSchema = 1 SET @DbFinding = @DbFinding + ''; Metadata schema detected'';
+    IF @HasMetaTable = 1 SET @DbFinding = @DbFinding + ''; Metadata table detected'';
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalTables INT;
+            DECLARE @TablesWithMeta INT;
+            DECLARE @HasMetaSchema BIT = 0;
+            DECLARE @HasMetaTable BIT = 0;
+            DECLARE @Coverage DECIMAL(5,2);
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            SELECT @TotalTables = COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0 AND type = ''U'';
+            SELECT @TablesWithMeta = COUNT(DISTINCT t.object_id)
+            FROM sys.tables t
+            JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.minor_id = 0
+            WHERE t.is_ms_shipped = 0 AND t.type = ''U'';
+
+            SELECT @HasMetaSchema = CASE WHEN EXISTS(SELECT 1 FROM sys.schemas WHERE name IN (''metadata'', ''data_dictionary'', ''mdm'', ''schema_registry'')) THEN 1 ELSE 0 END;
+            SELECT @HasMetaTable = CASE WHEN EXISTS(SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name IN (''metadata'', ''data_dictionary'', ''mdm'', ''schema_registry'') OR t.name LIKE ''%metadata%'' OR t.name LIKE ''%data_dictionary%'') THEN 1 ELSE 0 END;
+
+            SET @Coverage = CASE WHEN @TotalTables > 0 THEN (@TablesWithMeta * 100.0) / @TotalTables ELSE 0 END;
+
+            IF @Coverage >= 80.0 OR (@HasMetaSchema = 1 AND @HasMetaTable = 1) SET @DbScore = 3;
+            ELSE IF @Coverage >= 50.0 OR @HasMetaSchema = 1 OR @HasMetaTable = 1 SET @DbScore = 2;
+            ELSE IF @Coverage > 0.0 SET @DbScore = 1;
+            ELSE SET @DbScore = 0;
+
+            SET @DbFinding = CONCAT(''Tables with metadata: '', @TablesWithMeta, ''/'', @TotalTables, '' ('', CAST(@Coverage AS NVARCHAR(10)), ''%'')'');
+            IF @HasMetaSchema = 1 SET @DbFinding = @DbFinding + ''; Metadata schema detected'';
+            IF @HasMetaTable = 1 SET @DbFinding = @DbFinding + ''; Metadata table detected'';
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

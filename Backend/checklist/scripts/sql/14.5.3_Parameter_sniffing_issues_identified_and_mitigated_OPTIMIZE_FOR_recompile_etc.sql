@@ -1,66 +1,113 @@
 -- Checklist: Parameter sniffing issues identified and mitigated (OPTIMIZE FOR, recompile, etc.)
 -- Scope: DATABASE
--- Scoring: 0 = <10% of parameterized procedures use mitigation hints; 1 = 10-49% use hints; 2 = >=50% use hints; 3 = Forced parameterization enabled at database level.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0: No mitigation hints found. 1: 1-9 hints. 2: 10-49 hints. 3: 50+ hints. Overall score uses MIN across databases.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-DECLARE @TotalProcs INT = 0;
-DECLARE @MitigatedProcs INT = 0;
-DECLARE @ForcedParam INT = 0;
-
-SELECT @ForcedParam = is_parameterization_forced FROM sys.databases WHERE name = DB_NAME();
-
-SELECT @TotalProcs = COUNT(DISTINCT p.object_id)
-FROM sys.procedures p
-INNER JOIN sys.parameters par ON p.object_id = par.object_id
-WHERE p.is_ms_shipped = 0;
-
-SELECT @MitigatedProcs = COUNT(DISTINCT sm.object_id)
-FROM sys.procedures p
-INNER JOIN sys.sql_modules sm ON p.object_id = sm.object_id
-WHERE p.is_ms_shipped = 0
-AND (ISNULL(sm.definition, '''') LIKE ''%OPTION (RECOMPILE)%''
-     OR ISNULL(sm.definition, '''') LIKE ''%OPTIMIZE FOR%''
-     OR ISNULL(sm.definition, '''') LIKE ''%WITH RECOMPILE%'');
-
-DECLARE @DbScore INT = 0;
-IF @ForcedParam = 1 SET @DbScore = 3;
-ELSE IF @TotalProcs = 0 SET @DbScore = 3;
-ELSE BEGIN
-    DECLARE @Pct FLOAT = CAST(@MitigatedProcs AS FLOAT) / CAST(@TotalProcs AS FLOAT);
-    IF @Pct >= 0.5 SET @DbScore = 2;
-    ELSE IF @Pct >= 0.1 SET @DbScore = 1;
-    ELSE SET @DbScore = 0;
-END;
-
-INSERT INTO #DbResults VALUES (@DbNameParam, @DbScore);
-';
-        EXEC sp_executesql @Sql, N'@DbNameParam NVARCHAR(256)', @DbNameParam = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    SELECT ''' + @DbName + ''' AS DbName,
+           CASE WHEN COUNT(*) = 0 THEN 0
+                WHEN COUNT(*) BETWEEN 1 AND 9 THEN 1
+                WHEN COUNT(*) BETWEEN 10 AND 49 THEN 2
+                ELSE 3 END AS DbScore,
+           CASE WHEN COUNT(*) = 0 THEN ''No mitigation hints found.''
+                ELSE ''Found '' + CAST(COUNT(*) AS NVARCHAR) + '' hints. Examples: '' + STRING_AGG(SCHEMA_NAME(o.schema_id) + ''.'' + o.name, '', '') WITHIN GROUP (ORDER BY o.name)
+           END AS Finding
+    FROM sys.sql_modules m
+    JOIN sys.objects o ON m.object_id = o.object_id
+    WHERE o.type IN (''P'', ''TF'', ''IF'', ''FS'', ''FT'')
+      AND m.definition IS NOT NULL
+      AND (m.definition LIKE ''%RECOMPILE%'' OR m.definition LIKE ''%OPTIMIZE FOR%'');
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            SELECT ''' + @DbName + ''' AS DbName,
+                   CASE WHEN COUNT(*) = 0 THEN 0
+                        WHEN COUNT(*) BETWEEN 1 AND 9 THEN 1
+                        WHEN COUNT(*) BETWEEN 10 AND 49 THEN 2
+                        ELSE 3 END AS DbScore,
+                   CASE WHEN COUNT(*) = 0 THEN ''No mitigation hints found.''
+                        ELSE ''Found '' + CAST(COUNT(*) AS NVARCHAR) + '' hints. Examples: '' + STRING_AGG(SCHEMA_NAME(o.schema_id) + ''.'' + o.name, '', '') WITHIN GROUP (ORDER BY o.name)
+                   END AS Finding
+            FROM sys.sql_modules m
+            JOIN sys.objects o ON m.object_id = o.object_id
+            WHERE o.type IN (''P'', ''TF'', ''IF'', ''FS'', ''FT'')
+              AND m.definition IS NOT NULL
+              AND (m.definition LIKE ''%RECOMPILE%'' OR m.definition LIKE ''%OPTIMIZE FOR%'');
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

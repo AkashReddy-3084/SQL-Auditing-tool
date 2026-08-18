@@ -1,54 +1,135 @@
 -- Checklist: Rollback / recovery procedure defined and tested
--- Scope: SERVER
--- Scoring: 0=No evidence, 1=Backup history only, 2=Procedure defined but untested, 3=Procedure defined and recently tested
+-- Scope: DATABASE
+-- Scoring: 0: No rollback/recovery procedures found. 1: Procedures found but no testing evidence. 2: Procedures found with testing evidence/comments. 3: Not achievable (proxy check capped at 2).
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @JobCount INT = 0;
-DECLARE @TestedCount INT = 0;
-DECLARE @BackupCount INT = 0;
-DECLARE @ProcCount INT = 0;
+DECLARE @DbName NVARCHAR(256);
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Platform compatibility: msdb exists on-premises and in Azure SQL MI, but not in Azure SQL DB
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
+
+IF @EngineEdition = 5
 BEGIN
-    -- Check for rollback/recovery deployment jobs
-    SELECT @JobCount = COUNT(*) FROM msdb.dbo.sysjobs
-    WHERE name LIKE '%rollback%' OR name LIKE '%recovery%' OR name LIKE '%undeploy%' OR name LIKE '%downgrade%';
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    DECLARE @ProcCount INT = 0;
+    DECLARE @TestedCount INT = 0;
+    DECLARE @ProcNames NVARCHAR(MAX) = '';
+    DECLARE @TestedNames NVARCHAR(MAX) = '';
 
-    -- Check if any of those jobs have recent successful runs (evidence of testing)
-    -- step_id = 0 indicates the overall job run status, ensuring full job success is verified
-    SELECT @TestedCount = COUNT(DISTINCT j.job_id)
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobhistory h ON j.job_id = h.job_id
-    WHERE (j.name LIKE '%rollback%' OR j.name LIKE '%recovery%' OR j.name LIKE '%undeploy%' OR j.name LIKE '%downgrade%')
-      AND h.step_id = 0
-      AND h.run_status = 1
-      AND h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), DATEADD(DAY, -30, GETDATE()), 112));
+    SELECT @ProcCount = COUNT(*)
+    FROM sys.procedures p
+    WHERE p.is_ms_shipped = 0
+      AND (p.name LIKE '%rollback%' OR p.name LIKE '%recovery%' OR p.name LIKE '%undo%' OR p.name LIKE '%downgrade%' OR p.name LIKE '%revert%');
 
-    -- Check for recent full backups as proxy for recovery capability
-    SELECT @BackupCount = COUNT(*) FROM msdb.dbo.backupset
-    WHERE type = 'D' AND backup_finish_date >= DATEADD(DAY, -7, GETDATE());
+    IF @ProcCount > 0
+    BEGIN
+        SELECT @ProcNames = ISNULL(STRING_AGG(p.name, ', '), 'None')
+        FROM sys.procedures p
+        WHERE p.is_ms_shipped = 0
+          AND (p.name LIKE '%rollback%' OR p.name LIKE '%recovery%' OR p.name LIKE '%undo%' OR p.name LIKE '%downgrade%' OR p.name LIKE '%revert%');
+
+        SELECT @TestedCount = COUNT(*)
+        FROM sys.extended_properties ep
+        JOIN sys.procedures p ON ep.major_id = p.object_id
+        WHERE ep.name IN ('Tested', 'Verified', 'LastTested')
+          AND p.is_ms_shipped = 0
+          AND (p.name LIKE '%rollback%' OR p.name LIKE '%recovery%' OR p.name LIKE '%undo%' OR p.name LIKE '%downgrade%' OR p.name LIKE '%revert%');
+
+        IF @TestedCount > 0
+        BEGIN
+            SELECT @TestedNames = ISNULL(STRING_AGG(p.name, ', '), 'None')
+            FROM sys.extended_properties ep
+            JOIN sys.procedures p ON ep.major_id = p.object_id
+            WHERE ep.name IN ('Tested', 'Verified', 'LastTested')
+              AND p.is_ms_shipped = 0
+              AND (p.name LIKE '%rollback%' OR p.name LIKE '%recovery%' OR p.name LIKE '%undo%' OR p.name LIKE '%downgrade%' OR p.name LIKE '%revert%');
+        END
+    END
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        @DbName,
+        CASE
+            WHEN @ProcCount = 0 THEN 0
+            WHEN @TestedCount = 0 THEN 1
+            ELSE 2
+        END,
+        CASE
+            WHEN @ProcCount = 0 THEN 'No rollback/recovery procedures found'
+            WHEN @TestedCount = 0 THEN 'Found ' + CAST(@ProcCount AS NVARCHAR) + ' procedure(s): ' + @ProcNames + ' (no testing evidence)'
+            ELSE 'Found ' + CAST(@ProcCount AS NVARCHAR) + ' procedure(s): ' + @ProcNames + ' | Tested: ' + @TestedNames
+        END
+    );
 END
 ELSE
 BEGIN
-    -- Fallback for Azure SQL DB: check for rollback/recovery procs in current database
-    SELECT @ProcCount = COUNT(*) FROM sys.procedures
-    WHERE name LIKE '%rollback%' OR name LIKE '%recovery%' OR name LIKE '%undeploy%' OR name LIKE '%downgrade%';
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-    -- Azure SQL DB backup history fallback (if available)
-    IF OBJECT_ID('sys.database_backup_history') IS NOT NULL
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
     BEGIN
-        SELECT @BackupCount = COUNT(*) FROM sys.database_backup_history
-        WHERE type = 'D' AND backup_finish_date >= DATEADD(DAY, -7, GETDATE());
-    END
-END
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @ProcCount INT = 0;
+            DECLARE @TestedCount INT = 0;
+            DECLARE @ProcNames NVARCHAR(MAX) = '';
+            DECLARE @TestedNames NVARCHAR(MAX) = '';
 
--- Scoring logic
-IF @JobCount > 0 AND @TestedCount > 0 SET @Score = 3;
-ELSE IF @JobCount > 0 SET @Score = 2;
-ELSE IF @ProcCount > 0 SET @Score = 2;
-ELSE IF @BackupCount > 0 SET @Score = 1;
-ELSE SET @Score = 0;
+            SELECT @ProcCount = COUNT(*)
+            FROM sys.procedures p
+            WHERE p.is_ms_shipped = 0
+              AND (p.name LIKE ''%rollback%'' OR p.name LIKE ''%recovery%'' OR p.name LIKE ''%undo%'' OR p.name LIKE ''%downgrade%'' OR p.name LIKE ''%revert%'');
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+            IF @ProcCount > 0
+            BEGIN
+                SELECT @ProcNames = ISNULL(STRING_AGG(p.name, '', ''), ''None'')
+                FROM sys.procedures p
+                WHERE p.is_ms_shipped = 0
+                  AND (p.name LIKE ''%rollback%'' OR p.name LIKE ''%recovery%'' OR p.name LIKE ''%undo%'' OR p.name LIKE ''%downgrade%'' OR p.name LIKE ''%revert%'');
+
+                SELECT @TestedCount = COUNT(*)
+                FROM sys.extended_properties ep
+                JOIN sys.procedures p ON ep.major_id = p.object_id
+                WHERE ep.name IN (''Tested'', ''Verified'', ''LastTested'')
+                  AND p.is_ms_shipped = 0
+                  AND (p.name LIKE ''%rollback%'' OR p.name LIKE ''%recovery%'' OR p.name LIKE ''%undo%'' OR p.name LIKE ''%downgrade%'' OR p.name LIKE ''%revert%'');
+
+                IF @TestedCount > 0
+                BEGIN
+                    SELECT @TestedNames = ISNULL(STRING_AGG(p.name, '', ''), ''None'')
+                    FROM sys.extended_properties ep
+                    JOIN sys.procedures p ON ep.major_id = p.object_id
+                    WHERE ep.name IN (''Tested'', ''Verified'', ''LastTested'')
+                      AND p.is_ms_shipped = 0
+                      AND (p.name LIKE ''%rollback%'' OR p.name LIKE ''%recovery%'' OR p.name LIKE ''%undo%'' OR p.name LIKE ''%downgrade%'' OR p.name LIKE ''%revert%'');
+                END
+            END
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (
+                ''' + @DbName + ''',
+                CASE
+                    WHEN @ProcCount = 0 THEN 0
+                    WHEN @TestedCount = 0 THEN 1
+                    ELSE 2
+                END,
+                CASE
+                    WHEN @ProcCount = 0 THEN ''No rollback/recovery procedures found''
+                    WHEN @TestedCount = 0 THEN ''Found '' + CAST(@ProcCount AS

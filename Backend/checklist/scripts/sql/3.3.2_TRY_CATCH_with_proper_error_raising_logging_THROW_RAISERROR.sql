@@ -1,64 +1,123 @@
 -- Checklist: TRY...CATCH with proper error raising/logging (THROW/RAISERROR)
 -- Scope: DATABASE
--- Scoring: 0=No TRY...CATCH found, 1=<20% coverage or missing THROW/RAISERROR, 2=20-79% coverage with proper handling, 3=>=80% coverage with proper handling
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0: No TRY...CATCH found. 1: TRY...CATCH found but <50% include THROW/RAISERROR. 2: 50-99% include THROW/RAISERROR. 3: >=99% include THROW/RAISERROR.
+
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalModules INT;
-        DECLARE @WithProperHandling INT;
-        DECLARE @DbScore INT = 0;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TryCatchCount INT = 0;
+    DECLARE @ErrorRaiseCount INT = 0;
+    DECLARE @MissingErrorRaise NVARCHAR(MAX) = ''None'';
 
-        SELECT @TotalModules = COUNT(*)
+    SELECT 
+        @TryCatchCount = COUNT(*),
+        @ErrorRaiseCount = SUM(CASE WHEN definition LIKE ''%THROW%'' OR definition LIKE ''%RAISERROR%'' THEN 1 ELSE 0 END)
+    FROM sys.sql_modules m
+    JOIN sys.objects o ON m.object_id = o.object_id
+    WHERE o.type IN (''P'', ''PC'', ''TF'', ''IF'', ''FS'')
+      AND o.is_ms_shipped = 0
+      AND definition LIKE ''%TRY%''
+      AND definition LIKE ''%CATCH%'';
+
+    IF @TryCatchCount = 0
+    BEGIN
+        INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (''' + @DbName + ''', 0, ''No TRY...CATCH blocks found in any procedures.'');
+    END
+    ELSE
+    BEGIN
+        SELECT @MissingErrorRaise = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
         FROM sys.sql_modules m
         JOIN sys.objects o ON m.object_id = o.object_id
-        WHERE o.type IN (''P'', ''TF'', ''IF'', ''TR'')
-        AND m.definition IS NOT NULL;
+        WHERE o.type IN (''P'', ''PC'', ''TF'', ''IF'', ''FS'')
+          AND o.is_ms_shipped = 0
+          AND m.definition LIKE ''%TRY%''
+          AND m.definition LIKE ''%CATCH%''
+          AND m.definition NOT LIKE ''%THROW%''
+          AND m.definition NOT LIKE ''%RAISERROR%'';
 
-        SELECT @WithProperHandling = COUNT(*)
-        FROM sys.sql_modules m
-        JOIN sys.objects o ON m.object_id = o.object_id
-        WHERE o.type IN (''P'', ''TF'', ''IF'', ''TR'')
-        AND m.definition IS NOT NULL
-        AND m.definition LIKE ''%TRY%'' AND m.definition LIKE ''%CATCH%''
-        AND (m.definition LIKE ''%THROW%'' OR m.definition LIKE ''%RAISERROR%'');
+        IF @MissingErrorRaise IS NULL SET @MissingErrorRaise = ''None'';
 
-        IF @TotalModules = 0 SET @DbScore = 3;
-        ELSE IF @WithProperHandling = 0 SET @DbScore = 0;
-        ELSE BEGIN
-            DECLARE @Pct FLOAT = CAST(@WithProperHandling AS FLOAT) / CAST(@TotalModules AS FLOAT) * 100.0;
-            IF @Pct < 20.0 SET @DbScore = 1;
-            ELSE IF @Pct < 80.0 SET @DbScore = 2;
-            ELSE SET @DbScore = 3;
-        END;
+        DECLARE @DbScore INT;
+        DECLARE @Ratio FLOAT = CAST(@ErrorRaiseCount AS FLOAT) / CAST(@TryCatchCount AS FLOAT);
+        IF @Ratio >= 0.95 SET @DbScore = 3;
+        ELSE IF @Ratio >= 0.50 SET @DbScore = 2;
+        ELSE SET @DbScore = 1;
 
-        INSERT INTO #DbResults VALUES (''' + @DbName + ''', @DbScore);
-        ';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        INSERT INTO #DbResults (DbName, DbScore, Finding) 
+        VALUES (''' + @DbName + ''', @DbScore, CAST(@TryCatchCount AS NVARCHAR) + '' TRY...CATCH blocks found. '' + CAST(@ErrorRaiseCount AS NVARCHAR) + '' include THROW/RAISERROR. Missing: '' + @MissingErrorRaise);
+    END';
+    EXEC sp_executesql @Sql;
+    SET @DatabaseQueried = @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TryCatchCount INT = 0;
+            DECLARE @ErrorRaiseCount INT = 0;
+            DECLARE @MissingErrorRaise NVARCHAR(MAX) = ''None'';
+
+            SELECT 
+                @TryCatchCount = COUNT(*),
+                @ErrorRaiseCount = SUM(CASE WHEN definition LIKE ''%THROW%'' OR definition LIKE ''%RAISERROR%'' THEN 1 ELSE 0 END)
+            FROM sys.sql_modules m
+            JOIN sys.objects o ON m.object_id = o.object_id
+            WHERE o.type IN (''P'', ''PC'', ''TF'', ''IF'', ''FS'')
+              AND o.is_ms_shipped = 0
+              AND definition LIKE ''%TRY%''
+              AND definition LIKE ''%CATCH%'';
+
+            IF @TryCatchCount = 0
+            BEGIN
+                INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (''' + @DbName + ''', 0, ''No TRY...CATCH blocks found in any procedures.'');
+            END
+            ELSE
+            BEGIN
+                SELECT @MissingErrorRaise = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
+                FROM sys.sql_modules m
+                JOIN sys.objects o ON m.object_id = o.object_id
+                WHERE o.type IN (''P'', ''PC'', ''TF'', ''IF'', ''FS'')
+                  AND o.is_ms_shipped = 0
+                  AND m.definition LIKE ''%TRY%''
+                  AND m.definition LIKE ''%CATCH%''
+                  AND m.definition NOT LIKE ''%THROW%''
+                  AND m.definition NOT LIKE ''%RAISERROR%'';
+
+                IF @MissingErrorRaise IS NULL SET @MissingErrorRaise = ''None'';
+
+                DECLARE @DbScore INT;
+                DECLARE @Ratio FLOAT = CAST(@ErrorRaiseCount AS FLOAT) / CAST(@TryCatchCount AS FLOAT);
+                IF @Ratio >= 0.95 SET @DbScore = 3;
+                ELSE IF @Ratio >= 0.50 SET @DbScore = 2;
+                ELSE SET @DbScore = 1;
+
+                INSERT INTO #DbResults (DbName, DbScore, Finding) 
+                VALUES (''' + @DbName + ''', @DbScore, CAST(@TryCatchCount AS NVARCHAR) + '' TRY...CATCH blocks found. '' + CAST

@@ -1,56 +1,69 @@
 -- Checklist: Backup storage costs monitored (retention tuned)
 -- Scope: SERVER
--- Scoring: 0 = No backup history found; 1 = Backups exist but are very old (>60 days) with no cleanup job; 2 = Cleanup job exists OR backups are recent (<30 days), but not both (or Azure SQL DB where retention is cloud-managed); 3 = Automated cleanup job exists AND oldest backup is within retention window (<30 days), indicating tuned retention.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 0: No backup history or retention > 90 days (excessive storage cost). 1: Retention 61-90 days. 2: Retention 31-60 days or compression disabled. 3: Retention <= 30 days and compression enabled (optimal cost control).
+
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 DECLARE @OldestBackupDate DATETIME;
-DECLARE @CleanupJobExists BIT = 0;
-DECLARE @MsdbAvailable BIT = 0;
+DECLARE @RetentionDays INT;
+DECLARE @CompressionEnabled BIT = 0;
+DECLARE @BackupCount INT = 0;
 
-SELECT @MsdbAvailable = CASE WHEN OBJECT_ID('msdb.dbo.backupset') IS NOT NULL THEN 1 ELSE 0 END;
+SET @DatabaseQueried = 'master';
 
-IF @MsdbAvailable = 1
+IF @EngineEdition = 5
 BEGIN
-    -- Check for automated backup cleanup/retention jobs
-    IF EXISTS (
-        SELECT 1 FROM msdb.dbo.sysjobs j
-        INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-        WHERE j.enabled = 1
-        AND (
-            j.name LIKE '%cleanup%' OR j.name LIKE '%delete%' OR j.name LIKE '%retention%'
-            OR js.command LIKE '%cleanup%' OR js.command LIKE '%delete%' OR js.command LIKE '%retention%'
-            OR js.command LIKE '%xp_delete_file%' OR js.command LIKE '%sp_delete_backuphistory%'
-        )
-    )
-        SET @CleanupJobExists = 1;
-
-    -- Find the oldest backup in history
-    SELECT @OldestBackupDate = MIN(bs.backup_start_date)
-    FROM msdb.dbo.backupset bs
-    WHERE bs.type IN ('D', 'I', 'L');
-
-    IF @OldestBackupDate IS NULL
-        SET @Score = 0;
-    ELSE
-    BEGIN
-        DECLARE @DaysSinceOldestBackup INT = DATEDIFF(DAY, @OldestBackupDate, GETDATE());
-        
-        IF @CleanupJobExists = 1 AND @DaysSinceOldestBackup <= 30
-            SET @Score = 3;
-        ELSE IF @CleanupJobExists = 1 OR @DaysSinceOldestBackup <= 30
-            SET @Score = 2;
-        ELSE IF @DaysSinceOldestBackup > 60
-            SET @Score = 1;
-        ELSE
-            SET @Score = 2;
-    END
+    -- Azure SQL Database: Backup retention is platform-managed
+    SET @Score = 3;
+    SET @Finding = 'Backup retention is platform-managed (Azure SQL Database). Automated backups and retention policies are enforced by the service.';
 END
 ELSE
 BEGIN
-    -- Azure SQL DB: Backup retention is managed by the platform based on service tier.
-    -- We cannot query msdb, so we assign partial credit assuming cloud-managed retention.
-    SET @Score = 2;
+    -- SQL Server / Azure SQL MI: Evaluate backup history and compression
+    SELECT @OldestBackupDate = MIN(backup_start_date),
+           @BackupCount = COUNT(*)
+    FROM msdb.dbo.backupset
+    WHERE type IN ('D', 'I', 'L');
+
+    -- Check server-level compression default
+    SELECT @CompressionEnabled = CASE WHEN CAST(value_in_use AS INT) = 1 THEN 1 ELSE 0 END
+    FROM sys.configurations
+    WHERE name = 'backup compression default';
+
+    -- Override if any backup in history is compressed
+    IF EXISTS (SELECT 1 FROM msdb.dbo.backupset WHERE is_compressed = 1)
+        SET @CompressionEnabled = 1;
+
+    IF @BackupCount = 0
+    BEGIN
+        SET @RetentionDays = 999;
+        SET @Finding = 'No backup history found in msdb. Retention policy cannot be verified.';
+    END
+    ELSE
+    BEGIN
+        SET @RetentionDays = DATEDIFF(day, @OldestBackupDate, GETDATE());
+        SET @Finding = 'Oldest backup age: ' + CAST(@RetentionDays AS NVARCHAR(10)) + ' days. Backup compression: ' + CASE WHEN @CompressionEnabled = 1 THEN 'Enabled' ELSE 'Disabled' END + '. Total backups in history: ' + CAST(@BackupCount AS NVARCHAR(10)) + '.';
+    END
+
+    IF @BackupCount = 0
+        SET @Score = 0;
+    ELSE IF @RetentionDays > 90
+        SET @Score = 0;
+    ELSE IF @RetentionDays > 60
+        SET @Score = 1;
+    ELSE IF @RetentionDays > 30 OR @CompressionEnabled = 0
+        SET @Score = 2;
+    ELSE
+        SET @Score = 3;
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

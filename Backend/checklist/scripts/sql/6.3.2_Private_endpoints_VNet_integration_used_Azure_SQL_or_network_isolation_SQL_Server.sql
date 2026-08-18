@@ -1,52 +1,70 @@
 -- Checklist: Private endpoints / VNet integration used (Azure SQL) or network isolation (SQL Server)
 -- Scope: SERVER
--- Scoring: 0 = No evidence of network isolation or firewall rules. 1 = Partial evidence. 2 = Good evidence. Max capped at 2.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+-- Scoring: 3=Fully isolated, 2=Partial isolation, 1=No rules/No active connections (proxy evidence), 0=Public access detected
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
--- Azure SQL DB (EngineEdition 5) or SQL MI (EngineEdition 8)
-IF @EngineEdition IN (5, 8) AND OBJECT_ID('sys.firewall_rules') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+
+IF @EngineEdition IN (5, 8)
 BEGIN
-    DECLARE @FirewallCount INT = 0;
-    DECLARE @BroadAccess BIT = 0;
+    -- Azure SQL Database / Azure SQL Managed Instance
+    DECLARE @VNetRules INT = 0;
+    DECLARE @PublicRules INT = 0;
     
-    SELECT @FirewallCount = COUNT(*) FROM sys.firewall_rules;
-    SELECT @BroadAccess = ISNULL(MAX(CASE WHEN start_ip_address = '0.0.0.0' AND end_ip_address = '255.255.255.255' THEN 1 ELSE 0 END), 0) FROM sys.firewall_rules;
+    SELECT @VNetRules = COUNT(*) FROM sys.firewall_rules WHERE is_virtual_network_rule = 1;
+    SELECT @PublicRules = COUNT(*) FROM sys.firewall_rules WHERE is_virtual_network_rule = 0;
     
-    IF @FirewallCount > 0 AND @BroadAccess = 0
+    IF @VNetRules > 0 AND @PublicRules = 0
+        SET @Score = 3;
+    ELSE IF @VNetRules > 0 AND @PublicRules > 0
         SET @Score = 2;
-    ELSE IF @FirewallCount > 0
-        SET @Score = 1;
-    ELSE
+    ELSE IF @VNetRules = 0 AND @PublicRules > 0
         SET @Score = 0;
+    ELSE
+        SET @Score = 1;
+        
+    SET @Finding = 'Azure SQL: VNet rules=' + CAST(@VNetRules AS NVARCHAR(10)) + ', Public firewall rules=' + CAST(@PublicRules AS NVARCHAR(10));
 END
 ELSE
 BEGIN
-    -- On-prem / SQL Server: Check endpoints for restrictions
-    DECLARE @TotalEndpoints INT = 0;
-    DECLARE @RestrictedEndpoints INT = 0;
+    -- SQL Server (On-prem / Azure VM)
+    DECLARE @TotalConns INT = 0;
+    DECLARE @PrivateConns INT = 0;
     
-    SELECT @TotalEndpoints = COUNT(*) FROM sys.endpoints WHERE type_desc IN ('TSQL', 'DATABASE_MIRRORING');
-    SELECT @RestrictedEndpoints = COUNT(*) FROM sys.endpoints 
-    WHERE type_desc IN ('TSQL', 'DATABASE_MIRRORING') 
-    AND (is_disabled = 1 OR principal_id IS NOT NULL);
+    SELECT 
+        @TotalConns = COUNT(*),
+        @PrivateConns = COUNT(CASE 
+            WHEN client_net_address LIKE '10.%' 
+              OR client_net_address LIKE '172.1[6-9].%' 
+              OR client_net_address LIKE '172.2[0-9].%' 
+              OR client_net_address LIKE '172.3[0-1].%' 
+              OR client_net_address LIKE '192.168.%' 
+              OR client_net_address LIKE '127.%' 
+              OR client_net_address IS NULL 
+            THEN 1 
+        END)
+    FROM sys.dm_exec_connections;
     
-    IF @TotalEndpoints > 0
-    BEGIN
-        IF @RestrictedEndpoints = @TotalEndpoints
-            SET @Score = 2;
-        ELSE IF @RestrictedEndpoints > 0
-            SET @Score = 1;
-        ELSE
-            SET @Score = 0;
-    END
+    IF @TotalConns = 0
+        SET @Score = 1;
+    ELSE IF @PrivateConns = @TotalConns
+        SET @Score = 3;
+    ELSE IF @PrivateConns > 0
+        SET @Score = 2;
     ELSE
-    BEGIN
-        SET @Score = 0; -- No endpoints found = no evidence of isolation
-    END
+        SET @Score = 0;
+        
+    SET @Finding = 'SQL Server: Total active connections=' + CAST(@TotalConns AS NVARCHAR(10)) + ', Private IP connections=' + CAST(@PrivateConns AS NVARCHAR(10)) + ', Public IP connections=' + CAST(@TotalConns - @PrivateConns AS NVARCHAR(10));
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

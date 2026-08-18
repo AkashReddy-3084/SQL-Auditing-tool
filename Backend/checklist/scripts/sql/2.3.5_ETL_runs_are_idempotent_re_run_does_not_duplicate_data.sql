@@ -1,59 +1,88 @@
-SET NOCOUNT ON;
+-- Checklist: ETL runs are idempotent (re-run does not duplicate data)
+-- Scope: DATABASE
+-- Scoring: 3=Strong idempotent patterns in >=80% of ETL objects; 2=Patterns in >=50%; 1=Patterns in >=20%; 0=<20% or no ETL objects. NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalDML INT = 0;
-        DECLARE @Idempotent INT = 0;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalETL INT = 0;
+    DECLARE @IdempotentETL INT = 0;
 
-        SELECT @TotalDML = COUNT(*)
-        FROM sys.procedures p
-        JOIN sys.sql_modules m ON p.object_id = m.object_id
-        WHERE p.is_ms_shipped = 0
-        AND (m.definition LIKE ''%INSERT%'' OR m.definition LIKE ''%UPDATE%'' OR m.definition LIKE ''%MERGE%'');
+    SELECT @TotalETL = COUNT(*)
+    FROM sys.procedures p
+    JOIN sys.sql_modules m ON p.object_id = m.object_id
+    WHERE p.is_ms_shipped = 0
+      AND m.definition IS NOT NULL
+      AND (p.name LIKE ''%ETL%'' OR p.name LIKE ''%Load%'' OR p.name LIKE ''%Sync%'' OR p.name LIKE ''%Import%'' OR p.name LIKE ''%Staging%'' OR p.name LIKE ''%DW%'' OR p.name LIKE ''%Mart%'');
 
-        SELECT @Idempotent = COUNT(*)
-        FROM sys.procedures p
-        JOIN sys.sql_modules m ON p.object_id = m.object_id
-        WHERE p.is_ms_shipped = 0
-        AND (m.definition LIKE ''%INSERT%'' OR m.definition LIKE ''%UPDATE%'' OR m.definition LIKE ''%MERGE%'')
-        AND (m.definition LIKE ''%MERGE%'' OR m.definition LIKE ''%DELETE FROM%'' OR m.definition LIKE ''%WHERE NOT EXISTS%'' OR m.definition LIKE ''%IF NOT EXISTS%'' OR m.definition LIKE ''%TRUNCATE TABLE%'');
+    SELECT @IdempotentETL = COUNT(*)
+    FROM sys.procedures p
+    JOIN sys.sql_modules m ON p.object_id = m.object_id
+    WHERE p.is_ms_shipped = 0
+      AND m.definition IS NOT NULL
+      AND (p.name LIKE ''%ETL%'' OR p.name LIKE ''%Load%'' OR p.name LIKE ''%Sync%'' OR p.name LIKE ''%Import%'' OR p.name LIKE ''%Staging%'' OR p.name LIKE ''%DW%'' OR p.name LIKE ''%Mart%'')
+      AND (m.definition LIKE ''%MERGE%'' OR m.definition LIKE ''%TRUNCATE%'' OR m.definition LIKE ''%DELETE%'' OR m.definition LIKE ''%UPSERT%'' OR m.definition LIKE ''%BATCH%'' OR m.definition LIKE ''%LOAD_DATE%'' OR m.definition LIKE ''%ROWVERSION%'');
 
-        DECLARE @DbScore INT = 0;
-        IF @TotalDML = 0 SET @DbScore = 0;
-        ELSE BEGIN
-            DECLARE @Pct FLOAT = CAST(@Idempotent AS FLOAT) / CAST(@TotalDML AS FLOAT);
-            IF @Pct >= 0.5 SET @DbScore = 2;
-            ELSE IF @Pct > 0.0 SET @DbScore = 1;
-            ELSE SET @DbScore = 0;
-        END;
-
-        INSERT INTO #DbResults VALUES (@DbParam, @DbScore);
-        ';
-        EXEC sp_executesql @Sql, N'@DbParam NVARCHAR(256)', @DbParam = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        ''' + @DbName + ''',
+        CASE
+            WHEN @TotalETL = 0 THEN 0
+            WHEN CAST(@IdempotentETL AS FLOAT) / @TotalETL >= 0.8 THEN 3
+            WHEN CAST(@IdempotentETL AS FLOAT) / @TotalETL >= 0.5 THEN 2
+            WHEN CAST(@IdempotentETL AS FLOAT) / @TotalETL >= 0.2 THEN 1
+            ELSE 0
+        END,
+        ''Total ETL objects: '' + CAST(@TotalETL AS NVARCHAR(10)) + ''; Idempotent patterns found in: '' + CAST(@IdempotentETL AS NVARCHAR(10))
+    );
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalETL INT = 0;
+            DECLARE @IdempotentETL INT = 0;
+
+            SELECT @TotalETL = COUNT(*)
+            FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE p.is_ms_shipped = 0
+              AND m.definition IS NOT NULL
+              AND (p.name LIKE ''%ETL%'' OR p.name LIKE ''%Load%'' OR p.name LIKE ''%Sync%'' OR p.name LIKE ''%Import%'' OR p.name LIKE ''%Staging%'' OR p.name LIKE ''%DW%'' OR p.name LIKE ''%Mart%'');
+
+            SELECT @IdempotentETL = COUNT(*)
+            FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE p.is_ms_shipped = 0
+              AND m.definition IS NOT NULL
+              AND (p.name LIKE ''%ETL%'' OR p.name LIKE ''%Load%'' OR p.name LIKE ''%Sync%'' OR p.name LIKE ''%Import%

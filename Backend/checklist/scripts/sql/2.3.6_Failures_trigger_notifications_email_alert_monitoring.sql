@@ -1,40 +1,77 @@
 -- Checklist: Failures trigger notifications (email/alert/monitoring)
 -- Scope: SERVER
--- Scoring: 0=No notification infrastructure configured; 1=Partial (DB Mail enabled OR operators exist); 2=Good (Alerts OR job failure notifications configured); 3=Fully configured (DB Mail, operators, alerts, and job failure notifications all present)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbMailEnabled INT = 0;
-DECLARE @OperatorCount INT = 0;
-DECLARE @AlertCount INT = 0;
-DECLARE @JobNotifyCount INT = 0;
+-- Scoring: 3=Mail enabled & >=90% jobs notify on failure; 2=Mail enabled & >=50% notify OR mail disabled but operators configured OR Azure SQL DB; 1=Mail disabled & some jobs have operators; 0=No failure notifications configured.
 
--- Check Database Mail XPs
-SELECT @DbMailEnabled = value_in_use FROM sys.configurations WHERE name = 'Database Mail XPs';
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @MailEnabled BIT = 0;
+DECLARE @TotalJobs INT = 0;
+DECLARE @NotifyingJobs INT = 0;
+DECLARE @OperatorJobs INT = 0;
 
--- Check Operators
-SELECT @OperatorCount = COUNT(*) FROM msdb.dbo.sysoperators;
+SET @DatabaseQueried = 'master';
 
--- Check Alerts
-SELECT @AlertCount = COUNT(*) FROM msdb.dbo.sysalerts;
+IF @EngineEdition = 5
+BEGIN
+    SET @Score = 2;
+    SET @Finding = 'Azure SQL Database does not support SQL Agent jobs. External monitoring/alerting must be verified manually.';
+END
+ELSE
+BEGIN
+    BEGIN TRY
+        SELECT @MailEnabled = CONVERT(BIT, value_in_use)
+        FROM sys.configurations
+        WHERE name = 'Database Mail XPs';
 
--- Check Jobs with failure notification
-SELECT @JobNotifyCount = COUNT(*) FROM msdb.dbo.sysjobs WHERE notify_level_email IN (2, 3);
+        SELECT 
+            @TotalJobs = COUNT(*),
+            @NotifyingJobs = SUM(CASE WHEN notify_level_email >= 2 AND notify_operator_id > 0 THEN 1 ELSE 0 END),
+            @OperatorJobs = SUM(CASE WHEN notify_operator_id > 0 THEN 1 ELSE 0 END)
+        FROM msdb.dbo.sysjobs;
+    END TRY
+    BEGIN CATCH
+        SET @MailEnabled = 0;
+        SET @TotalJobs = 0;
+        SET @NotifyingJobs = 0;
+        SET @OperatorJobs = 0;
+    END CATCH;
 
--- Calculate Score based on component presence
-SET @Score = 0;
-IF @DbMailEnabled = 1 SET @Score = @Score + 1;
-IF @OperatorCount > 0 SET @Score = @Score + 1;
-IF @AlertCount > 0 SET @Score = @Score + 1;
-IF @JobNotifyCount > 0 SET @Score = @Score + 1;
+    IF @TotalJobs = 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = 'No SQL Agent jobs found. Database Mail is ' + CASE WHEN @MailEnabled = 1 THEN 'enabled' ELSE 'disabled' END + '.';
+    END
+    ELSE
+    BEGIN
+        DECLARE @NotifyPct FLOAT = CAST(@NotifyingJobs AS FLOAT) / @TotalJobs * 100;
+        
+        IF @MailEnabled = 1 AND @NotifyPct >= 90
+            SET @Score = 3;
+        ELSE IF @MailEnabled = 1 AND @NotifyPct >= 50
+            SET @Score = 2;
+        ELSE IF @MailEnabled = 0 AND @OperatorJobs > 0
+            SET @Score = 2;
+        ELSE IF @MailEnabled = 0 AND @OperatorJobs > 0 AND @NotifyPct > 0
+            SET @Score = 1;
+        ELSE IF @MailEnabled = 1 AND @NotifyPct > 0
+            SET @Score = 1;
+        ELSE
+            SET @Score = 0;
 
--- Map to 0-3 scale
-SET @Score = CASE 
-    WHEN @Score = 0 THEN 0
-    WHEN @Score = 1 THEN 1
-    WHEN @Score = 2 THEN 2
-    WHEN @Score >= 3 THEN 3
-END;
+        SET @Finding = 'Total jobs: ' + CAST(@TotalJobs AS NVARCHAR(10)) + 
+                      ', Notifying on failure: ' + CAST(@NotifyingJobs AS NVARCHAR(10)) + 
+                      ' (' + CAST(ROUND(@NotifyPct, 0) AS NVARCHAR(10)) + '%). ' +
+                      'Database Mail: ' + CASE WHEN @MailEnabled = 1 THEN 'Enabled' ELSE 'Disabled' END + '.';
+    END
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result AS Result, @Score AS Score;
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

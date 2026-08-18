@@ -1,69 +1,121 @@
 -- Checklist: Missing-index recommendations reviewed (not blindly applied)
 -- Scope: DATABASE
--- Scoring: 0=Fail (high ratio of unused recommended indexes), 1=Partial Pass (some unused recommended indexes), 2=Mostly Pass (no recommendations or all created indexes show usage)
+-- Scoring: 3=No missing index requests found; 2=1-5 requests; 1=6-20 requests; 0=>20 requests
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
--- NOTE: sys.dm_db_index_usage_stats is cleared on server restart; results reflect post-restart activity.
 
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (DbName NVARCHAR(128), DbScore INT, Finding NVARCHAR(MAX));
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-DECLARE @RecCount INT = 0;
-DECLARE @UnusedIdxCount INT = 0;
-
--- Count active missing index recommendations with actual workload impact
-SELECT @RecCount = COUNT(*)
-FROM sys.dm_db_missing_index_group_stats g
-JOIN sys.dm_db_missing_index_groups gi ON g.group_handle = gi.index_group_handle
-JOIN sys.dm_db_missing_index_details d ON gi.index_handle = d.index_handle
-WHERE (g.user_seeks > 0 OR g.user_scans > 0)
-  AND d.object_id IS NOT NULL;
-
--- Count indexes on recommended tables that have zero usage (indicates blind application)
-SELECT @UnusedIdxCount = COUNT(*)
-FROM sys.indexes i
-JOIN sys.tables t ON i.object_id = t.object_id
-LEFT JOIN sys.dm_db_index_usage_stats u ON i.object_id = u.object_id AND i.index_id = u.index_id AND u.database_id = DB_ID()
-WHERE i.type_desc IN ('CLUSTERED', 'NONCLUSTERED')
-  AND (u.user_seeks IS NULL OR u.user_seeks = 0)
-  AND (u.user_scans IS NULL OR u.user_scans = 0)
-  AND t.name IN (SELECT DISTINCT OBJECT_NAME(d.object_id) FROM sys.dm_db_missing_index_details d WHERE d.object_id IS NOT NULL);
-
-DECLARE @DbScore INT = 0;
-IF @RecCount = 0 OR @UnusedIdxCount = 0
-    SET @DbScore = 2;
-ELSE IF @UnusedIdxCount < @RecCount
-    SET @DbScore = 1;
-ELSE
-    SET @DbScore = 0;
-
-INSERT INTO #DbResults VALUES (@DbName, @DbScore);
-';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+        DECLARE @Count INT;
+        DECLARE @Details NVARCHAR(MAX);
+        
+        SELECT @Count = COUNT(DISTINCT mig.index_group_handle)
+        FROM sys.dm_db_missing_index_group_stats migs
+        JOIN sys.dm_db_missing_index_groups mig ON migs.group_handle = mig.index_group_handle
+        WHERE migs.user_seeks + migs.user_scans + migs.user_lookups + migs.user_updates > 0;
+        
+        IF @Count > 0
+        BEGIN
+            SELECT @Details = STRING_AGG(
+                CAST(migs.user_seeks AS NVARCHAR(20)) + '' seeks, '' + 
+                CAST(migs.user_scans AS NVARCHAR(20)) + '' scans, '' + 
+                mid.statement,
+                ''; ''
+            )
+            FROM sys.dm_db_missing_index_group_stats migs
+            JOIN sys.dm_db_missing_index_groups mig ON migs.group_handle = mig.index_group_handle
+            JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
+            WHERE migs.user_seeks + migs.user_scans + migs.user_lookups + migs.user_updates > 0;
+        END
+        ELSE
+        BEGIN
+            SET @Details = ''No missing index requests found'';
+        END
+        
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (
+            ''' + REPLACE(@DbName, '''', '''''') + ''',
+            CASE WHEN @Count = 0 THEN 3 WHEN @Count <= 5 THEN 2 WHEN @Count <= 20 THEN 1 ELSE 0 END,
+            @Details
+        );
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
+    
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+    
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+                DECLARE @Count INT;
+                DECLARE @Details NVARCHAR(MAX);
+                
+                SELECT @Count = COUNT(DISTINCT mig.index_group_handle)
+                FROM sys.dm_db_missing_index_group_stats migs
+                JOIN sys.dm_db_missing_index_groups mig ON migs.group_handle = mig.index_group_handle
+                WHERE migs.user_seeks + migs.user_scans + migs.user_lookups + migs.user_updates > 0;
+                
+                IF @Count > 0
+                BEGIN
+                    SELECT @Details = STRING_AGG(
+                        CAST(migs.user_seeks AS NVARCHAR(20)) + '' seeks, '' + 
+                        CAST(migs.user_scans AS NVARCHAR(20)) + '' scans, '' + 
+                        mid.statement,
+                        ''; ''
+                    )
+                    FROM sys.dm_db_missing_index_group_stats migs
+                    JOIN sys.dm_db_missing_index_groups mig ON migs.group_handle = mig.index_group_handle
+                    JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
+                    WHERE migs.user_seeks + migs.user_scans + migs.user_lookups + migs.user_updates > 0;
+                END
+                ELSE
+                BEGIN
+                    SET @Details = ''No missing index requests found'';
+                END
+                
+                INSERT INTO #DbResults (DbName, DbScore, Finding)
+                VALUES (
+                    ''' + REPLACE(@DbName, '''', '''''') + ''',
+                    CASE WHEN @Count = 0 THEN 3 WHEN @Count <= 5 THEN 2 WHEN @Count <= 20 THEN 1 ELSE 0 END,
+                    @Details
+                );
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+        
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+    
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
 
--- Aggregate: worst-case score across all databases
+SET @DatabaseQueried = (SELECT STRING_AGG(DbName, ', ') FROM #DbResults);
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults WHERE Finding IS NOT NULL AND Finding <> ''), 'No non-compliant findings found');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

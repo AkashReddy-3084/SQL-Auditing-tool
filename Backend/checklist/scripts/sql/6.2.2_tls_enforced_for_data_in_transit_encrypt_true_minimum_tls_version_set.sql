@@ -1,50 +1,76 @@
 -- Checklist: TLS enforced for data in transit (Encrypt=true; minimum TLS version set)
 -- Scope: SERVER
--- Scoring: 0=Force encryption disabled & no encrypted connections; 1=Force encryption disabled but some connections encrypted; 2=Force encryption enabled (TLS version requires OS/registry verification); 3=Force encryption enabled & all active connections verified as encrypted
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 0: force encryption OFF; 1: force encryption ON but TLS version < 1.2 or unverifiable; 2: force encryption ON, TLS 1.2+ observed but OS-level minimum version config cannot be fully verified via T-SQL; 3: force encryption ON, TLS 1.2+ verified on all active connections or platform-enforced.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @ForceEncryption INT = 0;
-DECLARE @EncryptedConnections INT = 0;
-DECLARE @TotalConnections INT = 0;
+DECLARE @MinTLSVersion INT = 0;
+DECLARE @HasTLSColumn BIT = 0;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX);
 
--- Check force encryption setting (available on-prem & MI, not Azure SQL DB)
-IF OBJECT_ID('sys.configurations') IS NOT NULL
+-- Check if tls_version column exists in sys.dm_exec_connections (SQL 2022+)
+IF COL_LENGTH('sys.dm_exec_connections', 'tls_version') IS NOT NULL
+    SET @HasTLSColumn = 1;
+
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    SELECT @ForceEncryption = CONVERT(INT, value_in_use)
+    SET @Score = 3;
+    SET @Finding = 'Azure SQL Database enforces TLS encryption for all connections by default. Minimum TLS version is managed by the platform.';
+END
+ELSE
+BEGIN
+    -- Check force encryption setting
+    SELECT @ForceEncryption = ISNULL(value_in_use, 0)
     FROM sys.configurations
-    WHERE name = N'force encryption';
-END
-ELSE
-BEGIN
-    -- Azure SQL DB enforces TLS at the platform level
-    SET @ForceEncryption = 1;
-END
+    WHERE name = 'force encryption';
 
--- Check active connections encryption status
-SELECT @EncryptedConnections = COUNT(CASE WHEN encrypt_option = 1 THEN 1 END),
-       @TotalConnections = COUNT(*)
-FROM sys.dm_exec_connections;
-
-IF @ForceEncryption = 1
-BEGIN
-    SET @Score = 2; -- Force encryption is on. Minimum TLS version requires OS/registry verification.
-    IF @TotalConnections > 0 AND @EncryptedConnections = @TotalConnections
+    IF @ForceEncryption = 0
     BEGIN
-        SET @Score = 3; -- Fully verified via T-SQL
-    END
-END
-ELSE
-BEGIN
-    IF @EncryptedConnections > 0
-    BEGIN
-        SET @Score = 1; -- Partial evidence: some connections encrypted despite setting off
+        SET @Score = 0;
+        SET @Finding = 'force encryption = OFF. TLS is not enforced for data in transit.';
     END
     ELSE
     BEGIN
-        SET @Score = 0;
+        -- Force encryption is ON
+        IF @HasTLSColumn = 1
+        BEGIN
+            -- Check active connections for TLS version
+            SELECT @MinTLSVersion = MIN(tls_version)
+            FROM sys.dm_exec_connections
+            WHERE encrypt_option = 1;
+
+            IF @MinTLSVersion IS NULL
+            BEGIN
+                SET @Score = 2;
+                SET @Finding = 'force encryption = ON. No active encrypted connections to verify TLS version. -- NOTE: This script provides automated evidence. Full compliance requires human review.';
+            END
+            ELSE IF @MinTLSVersion >= 12
+            BEGIN
+                SET @Score = 3;
+                SET @Finding = 'force encryption = ON. All active encrypted connections use TLS 1.2 or higher.';
+            END
+            ELSE
+            BEGIN
+                SET @Score = 1;
+                SET @Finding = 'force encryption = ON. Some connections use TLS versions below 1.2. Minimum TLS version should be updated.';
+            END
+        END
+        ELSE
+        BEGIN
+            -- Older SQL Server, cannot check TLS version directly
+            SET @Score = 2;
+            SET @Finding = 'force encryption = ON. TLS version verification requires SQL Server 2022+ or OS-level registry inspection. -- NOTE: This script provides automated evidence. Full compliance requires human review.';
+        END
     END
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

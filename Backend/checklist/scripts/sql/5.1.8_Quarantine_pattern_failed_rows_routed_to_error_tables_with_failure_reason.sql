@@ -1,67 +1,110 @@
 -- Checklist: Quarantine pattern: failed rows routed to error tables with failure reason
 -- Scope: DATABASE
--- Scoring: 0=No error tables found; 1=Error tables found but lack failure reason columns; 2=Error tables with failure reason columns found; 3=Error tables with failure reason columns found and actively populated (rowcount > 0)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0=No quarantine tables found; 1=Quarantine tables exist but lack failure reason columns; 2=Quarantine tables with failure reason columns exist but not referenced by ETL procedures; 3=Quarantine tables with failure reason columns exist and are referenced by ETL procedures.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @HasTable INT = 0;
-        DECLARE @HasReason INT = 0;
-        DECLARE @HasRows INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TableList NVARCHAR(MAX) = NULL;
+    DECLARE @ReasonColList NVARCHAR(MAX) = NULL;
+    DECLARE @HasReasonCols BIT = 0;
+    DECLARE @ReferencedByProcs BIT = 0;
 
-        SELECT @HasTable = COUNT(*) FROM sys.tables t
-        WHERE t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%fail%'' OR t.name LIKE ''%bad%'' OR t.name LIKE ''%exception%'';
+    SELECT @TableList = STRING_AGG(t.name, '','')
+    FROM sys.tables t
+    WHERE t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%failed%'';
 
-        IF @HasTable > 0
-        BEGIN
-            SELECT @HasReason = COUNT(*) FROM sys.columns c
-            JOIN sys.tables t ON c.object_id = t.object_id
-            WHERE t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%fail%'' OR t.name LIKE ''%bad%'' OR t.name LIKE ''%exception%''
-            AND (c.name LIKE ''%reason%'' OR c.name LIKE ''%message%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%desc%'' OR c.name LIKE ''%error%'');
+    IF @TableList IS NOT NULL
+    BEGIN
+        SELECT @ReasonColList = STRING_AGG(c.name, '','')
+        FROM sys.tables t
+        JOIN sys.columns c ON t.object_id = c.object_id
+        WHERE (t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%failed%'')
+          AND (c.name LIKE ''%reason%'' OR c.name LIKE ''%message%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%error%'');
 
-            IF @HasReason > 0
-            BEGIN
-                SELECT @HasRows = ISNULL(SUM(p.rows), 0) FROM sys.tables t
-                JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0,1)
-                WHERE t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%fail%'' OR t.name LIKE ''%bad%'' OR t.name LIKE ''%exception%''
-                AND EXISTS (
-                    SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND (c.name LIKE ''%reason%'' OR c.name LIKE ''%message%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%desc%'' OR c.name LIKE ''%error%'')
-                );
-            END
-        END
+        IF @ReasonColList IS NOT NULL SET @HasReasonCols = 1;
 
-        DECLARE @DbScore INT = 0;
-        IF @HasTable = 0 SET @DbScore = 0;
-        ELSE IF @HasReason = 0 SET @DbScore = 1;
-        ELSE IF @HasRows > 0 SET @DbScore = 3;
-        ELSE SET @DbScore = 2;
+        IF EXISTS (
+            SELECT 1
+            FROM sys.procedures p
+            CROSS APPLY sys.dm_sql_referenced_entities(p.name, ''OBJECT'') ref
+            JOIN sys.tables t ON ref.referenced_id = t.object_id
+            WHERE (t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%failed%'')
+        )
+        SET @ReferencedByProcs = 1;
+    END
 
-        INSERT INTO #DbResults VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @DbScore);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    DECLARE @DbScore INT = 0;
+    DECLARE @DbFinding NVARCHAR(MAX) = '';
+
+    IF @TableList IS NULL
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''No quarantine/error tables found'';
+    END
+    ELSE IF @HasReasonCols = 0
+    BEGIN
+        SET @DbScore = 1;
+        SET @DbFinding = ''Quarantine tables found ('' + @TableList + '') but lack failure reason columns'';
+    END
+    ELSE IF @ReferencedByProcs = 0
+    BEGIN
+        SET @DbScore = 2;
+        SET @DbFinding = ''Quarantine tables with reason columns ('' + @TableList + '', cols: '' + @ReasonColList + '') found but not referenced by ETL procedures'';
+    END
+    ELSE
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''Quarantine tables ('' + @TableList + '') with reason columns ('' + @ReasonColList + '') actively referenced by ETL procedures'';
+    END
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TableList NVARCHAR(MAX) = NULL;
+            DECLARE @ReasonColList NVARCHAR(MAX) = NULL;
+            DECLARE @HasReasonCols BIT = 0;
+            DECLARE @ReferencedByProcs BIT = 0;
+
+            SELECT @TableList = STRING_AGG(t.name, '','')
+            FROM sys.tables t
+            WHERE t.name LIKE ''%error%'' OR t.name LIKE ''%quarantine%'' OR t.name LIKE ''%reject%'' OR t.name LIKE ''%failed%'';
+
+            IF @TableList IS NOT NULL
+            BEGIN
+                SELECT @ReasonColList = STRING_AGG(c.name, '','')
+                FROM sys.tables t
+                JOIN sys.columns c ON t.object_id = c.object_id
+                WHERE (t.name LIKE ''%error%'' OR t.name LIKE ''%quar

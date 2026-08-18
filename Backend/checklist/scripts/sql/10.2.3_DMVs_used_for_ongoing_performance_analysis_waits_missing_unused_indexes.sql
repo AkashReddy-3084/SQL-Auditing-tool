@@ -1,46 +1,76 @@
 -- Checklist: DMVs used for ongoing performance analysis (waits, missing/unused indexes)
--- Scope: DATABASE
--- Scoring: 3=DMVs accessible & populated (missing/unused indexes found); 2=Accessible but empty; 1=Partial access/permissions; 0=Inaccessible or no evidence
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-SET NOCOUNT ON;
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+-- Scope: SERVER
+-- Scoring: 3=Query Store enabled for all user DBs or jobs monitor both waits/indexes; 2=Partial Query Store or jobs monitor only one category; 1=DMVs accessible but no automated monitoring configured; 0=DMVs inaccessible or completely non-compliant.
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @WaitJobs INT = 0;
+DECLARE @IndexJobs INT = 0;
+DECLARE @QSEnabledCount INT = 0;
+DECLARE @TotalUserDBs INT = 0;
+DECLARE @QsDbNames NVARCHAR(MAX) = '';
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+-- Check Query Store status for user databases
+SELECT @QSEnabledCount = COUNT(*), @TotalUserDBs = COUNT(*)
+FROM sys.databases d
+JOIN sys.database_query_store_options q ON d.database_id = q.database_id
+WHERE d.database_id > 4 AND d.state = 0 AND q.actual_state = 1;
+
+SELECT @QsDbNames = STRING_AGG(name, ', ')
+FROM sys.databases d
+JOIN sys.database_query_store_options q ON d.database_id = q.database_id
+WHERE d.database_id > 4 AND d.state = 0 AND q.actual_state = 1;
+
+-- Check SQL Agent jobs for DMV references (SQL Server / MI only)
+IF @EngineEdition <> 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @MissingIdx INT = 0;
-        DECLARE @UnusedIdx INT = 0;
-        SELECT @MissingIdx = COUNT(*) FROM sys.dm_db_missing_index_details;
-        SELECT @UnusedIdx = COUNT(*) FROM sys.dm_db_index_usage_stats
-        WHERE user_seeks = 0 AND user_scans = 0 AND user_lookups = 0 AND user_updates > 0;
-        INSERT INTO #DbResults VALUES (' + QUOTENAME(@DbName, '''') + ', CASE
-            WHEN @MissingIdx > 0 OR @UnusedIdx > 0 THEN 3
-            ELSE 2
-        END);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 1);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+    SELECT @WaitJobs = COUNT(*)
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+    WHERE j.enabled = 1 AND CAST(js.command AS NVARCHAR(MAX)) LIKE '%sys.dm_os_wait_stats%';
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    SELECT @IndexJobs = COUNT(*)
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+    WHERE j.enabled = 1 AND (CAST(js.command AS NVARCHAR(MAX)) LIKE '%sys.dm_db_missing_index_details%' 
+                            OR CAST(js.command AS NVARCHAR(MAX)) LIKE '%sys.dm_db_index_usage_stats%');
+END
+
+-- Determine Score
+IF @TotalUserDBs = 0
+    SET @Score = 3;
+ELSE IF @QSEnabledCount = @TotalUserDBs
+    SET @Score = 3;
+ELSE IF @QSEnabledCount > 0 OR @WaitJobs > 0 OR @IndexJobs > 0
+    SET @Score = 2;
+ELSE
+    SET @Score = 1;
+
+-- Construct Finding
+SET @Finding = 'Total user databases: ' + CAST(@TotalUserDBs AS NVARCHAR(10)) + '; ';
+SET @Finding = @Finding + 'Query Store enabled: ' + CAST(@QSEnabledCount AS NVARCHAR(10)) + ' (' + ISNULL(@QsDbNames, 'None') + '); ';
+IF @EngineEdition <> 5
+    SET @Finding = @Finding + 'Wait monitoring jobs: ' + CAST(@WaitJobs AS NVARCHAR(10)) + '; Index monitoring jobs: ' + CAST(@IndexJobs AS NVARCHAR(10)) + '; ';
+ELSE
+    SET @Finding = @Finding + 'Platform: Azure SQL Database (SQL Agent jobs not applicable); ';
+
+IF @Score = 3
+    SET @Finding = @Finding + 'Fully compliant: Comprehensive performance monitoring configured.';
+ELSE IF @Score = 2
+    SET @Finding = @Finding + 'Partially compliant: Monitoring covers some databases or only one performance category.';
+ELSE IF @Score = 1
+    SET @Finding = @Finding + 'DMVs are accessible but no automated monitoring or Query Store is configured.';
+ELSE
+    SET @Finding = @Finding + 'Non-compliant: DMVs are inaccessible or completely unmonitored.';
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

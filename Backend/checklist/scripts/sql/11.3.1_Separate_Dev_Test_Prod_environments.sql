@@ -1,31 +1,66 @@
 -- Checklist: Separate Dev / Test / Prod environments
 -- Scope: SERVER
--- Scoring: 0=No environment identifier, 1=Ambiguous/non-standard naming, 2=Clear environment keyword detected, 3=Capped at 2 (proxy evidence)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @ServerName NVARCHAR(256) = UPPER(COALESCE(TRY_CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(128)), @@SERVERNAME));
-DECLARE @InstanceName NVARCHAR(256) = UPPER(COALESCE(TRY_CAST(SERVERPROPERTY('InstanceName') AS NVARCHAR(128)), N''));
-DECLARE @FullIdentifier NVARCHAR(512) = @ServerName + N'\' + @InstanceName;
+-- Scoring: 3=Clear single environment keyword in server name; 2=Multiple/ambiguous keywords; 1=No keyword in server name but linked servers suggest separation; 0=No evidence of separation.
 
--- Check for clear environment keywords with approximate word-boundary matching
-IF @FullIdentifier LIKE N'%[ _.-]DEV%' OR @FullIdentifier LIKE N'DEV%'
-   OR @FullIdentifier LIKE N'%[ _.-]TEST%' OR @FullIdentifier LIKE N'TEST%'
-   OR @FullIdentifier LIKE N'%[ _.-]PROD%' OR @FullIdentifier LIKE N'PROD%'
-   OR @FullIdentifier LIKE N'%[ _.-]QA%' OR @FullIdentifier LIKE N'QA%'
-   OR @FullIdentifier LIKE N'%[ _.-]UAT%' OR @FullIdentifier LIKE N'UAT%'
-   OR @FullIdentifier LIKE N'%[ _.-]STG%' OR @FullIdentifier LIKE N'STG%'
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
+DECLARE @ServerName NVARCHAR(256) = CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(256));
+DECLARE @UpperName NVARCHAR(256) = UPPER(@ServerName);
+DECLARE @EnvKeywordCount INT = 0;
+
+-- Count environment keywords in server name
+IF @UpperName LIKE '%DEV%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%TEST%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%QA%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%UAT%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%STG%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%PROD%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%LIVE%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%TRAIN%' SET @EnvKeywordCount += 1;
+IF @UpperName LIKE '%DR%' SET @EnvKeywordCount += 1;
+
+IF @EnvKeywordCount = 1
+BEGIN
+    SET @Score = 3;
+    SET @Finding = 'Server name clearly indicates a dedicated environment: ' + @ServerName;
+END
+ELSE IF @EnvKeywordCount > 1
 BEGIN
     SET @Score = 2;
-END
-ELSE IF @FullIdentifier LIKE N'%[A-Z][A-Z]%' OR @FullIdentifier LIKE N'%[0-9]%'
-BEGIN
-    SET @Score = 1;
+    SET @Finding = 'Server name contains multiple environment keywords (' + @ServerName + '), suggesting ambiguous or shared environment configuration.';
 END
 ELSE
 BEGIN
-    SET @Score = 0;
+    -- Proxy check: linked servers
+    DECLARE @LinkedEnvCount INT = 0;
+    BEGIN TRY
+        SELECT @LinkedEnvCount = COUNT(*) FROM sys.servers s
+        WHERE UPPER(s.name) LIKE '%DEV%' OR UPPER(s.name) LIKE '%TEST%' OR UPPER(s.name) LIKE '%QA%' OR UPPER(s.name) LIKE '%UAT%' OR UPPER(s.name) LIKE '%STG%' OR UPPER(s.name) LIKE '%PROD%' OR UPPER(s.name) LIKE '%LIVE%';
+    END TRY
+    BEGIN CATCH
+        SET @LinkedEnvCount = 0;
+    END CATCH;
+
+    IF @LinkedEnvCount > 0
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = 'No environment keyword in server name (' + @ServerName + '), but ' + CAST(@LinkedEnvCount AS NVARCHAR(10)) + ' linked server(s) suggest environment separation.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = 'No evidence of environment separation. Server name (' + @ServerName + ') lacks environment identifiers and no linked servers indicate separation.';
+    END
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;
