@@ -102,6 +102,13 @@ public static class AuditTools
                                   .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
             sb.AppendLine($"  {g.Key}: {g.Count()}");
 
+        // Script items get their verdict deterministically but their wording from Copilot,
+        // since this server makes no LLM calls.
+        sb.AppendLine();
+        sb.Append(Auditor.BuildScriptEnrichmentRequest(
+            results,
+            id => $"enrich_result(id=\"{id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\")"));
+
         // Items not decided by deterministic scripts need review. This server makes no
         // LLM calls, so Copilot Chat is the reviewer: it analyzes each item, guides the
         // user, and records the decision via the resolve_review tool.
@@ -227,6 +234,26 @@ public static class AuditTools
         return Task.FromResult(
             $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
     }
+
+    [McpServerTool(Name = "enrich_result")]
+    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
+    public static Task<string> EnrichResultAsync(
+        [Description("The checklist item ID to enrich, e.g. '1.1.5'.")] string id,
+        [Description("1-2 sentences on the actual state the script found (object/database names, counts). Not a restatement of the checklist description.")] string? finding = null,
+        [Description("How the finding justifies the outcome, quoting the values the script returned. Under 120 words.")] string? evidence = null,
+        [Description("The specific business/security/operational consequence of this finding. Under 50 words.")] string? riskImpact = null,
+        [Description("Remediation targeted at this gap, consistent with the score. Omit when the score is 3 and the outcome is Pass.")] string? recommendation = null)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return Task.FromResult("Error: 'id' is required.");
+
+        var auditor = new Auditor(string.Empty);
+        if (auditor.ApplyEnrichment(id, finding, evidence, riskImpact, recommendation))
+            return Task.FromResult($"Enriched [{id}]. results/checklist_results.json and results/final_report.md regenerated.");
+
+        return Task.FromResult(
+            $"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");
+    }
 }
 
 /// <summary>
@@ -245,6 +272,8 @@ public static class AuditPrompts
       + "question to ask me: (1) the SQL Server name, (2) the authentication method ('windows' or 'sql'; "
       + "for SQL Login ask the username, the password comes from the environment), then (3) the checklist "
       + "item IDs to evaluate. Never guess the server or credentials. "
+      + "For every item listed in the COPILOT ENRICHMENT REQUIRED block, author the finding, evidence, "
+      + "risk impact and recommendation from the script result shown there and record them with 'enrich_result'. "
       + "For any item that comes back as Needs Review, show its verification guidance, help me decide "
       + "Pass or Fail, and record each decision with the 'resolve_review' tool. "
       + "When everything is resolved, show the summary with 'show_reports'. "

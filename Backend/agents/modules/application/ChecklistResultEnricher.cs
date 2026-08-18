@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace SQLAuditor.Lib;
 
@@ -22,7 +22,7 @@ public static class ChecklistResultEnricher
         var isNotApplicable = result.NotApplicable == true
             || string.Equals(result.Outcome, "N/A", StringComparison.OrdinalIgnoreCase);
 
-        // Score (0–3) derived from the outcome when the engine did not provide one.
+        // Score (0-3) derived from the outcome when the engine did not provide one.
         var score = result.Score;
         if (score is null && !isNotApplicable)
         {
@@ -35,27 +35,24 @@ public static class ChecklistResultEnricher
             };
         }
 
-        // var implementationStatus = string.IsNullOrWhiteSpace(result.ImplementationStatus)
-        //     ? (isNotApplicable
-        //         ? "Not Applicable"
-        //         : score switch
-        //         {
-        //             0 => "Not Implemented",
-        //             1 => "Partial",
-        //             2 => "Implemented",
-        //             3 => "Best Practice",
-        //             _ => string.Empty,
-        //         })
-        //     : result.ImplementationStatus;
+        // Script-evaluated items carry facts produced by the SQL script and wording
+        // authored by the AI enricher. Back-filling them with generic templates would
+        // destroy that traceability, so only the score/severity rubric is applied and
+        // the AI-authored fields stay null when AI was unavailable.
+        if (string.Equals(result.Technique, "Script", StringComparison.OrdinalIgnoreCase))
+        {
+            return result with
+            {
+                Score = score,
+                Severity = string.IsNullOrWhiteSpace(result.Severity)
+                    ? DeriveSeverity(result.Id, score, isNotApplicable)
+                    : result.Severity,
+                NotApplicable = isNotApplicable ? true : result.NotApplicable,
+            };
+        }
 
         var severity = string.IsNullOrWhiteSpace(result.Severity)
-            ? score switch
-            {
-                0 => "High",
-                1 => "Medium",
-                2 => "Low",
-                _ => "Informational",
-            }
+            ? DeriveSeverity(result.Id, score, isNotApplicable)
             : result.Severity;
 
         var finding = string.IsNullOrWhiteSpace(result.Finding)
@@ -71,9 +68,8 @@ public static class ChecklistResultEnricher
             : result.Finding;
 
         // Recommendation: preserve any engine-supplied (e.g. MCP) value; otherwise
-        // derive a context-specific corrective action from the implementation status.
-        // Fully implemented (Best Practice) and N/A items need no action, so the
-        // recommendation stays null.
+        // derive a context-specific corrective action from the score. Fully implemented
+        // and N/A items need no action, so the recommendation stays null.
         var recommendation = string.IsNullOrWhiteSpace(result.Recommendation) ? null : result.Recommendation;
         if (recommendation is null && !isNotApplicable)
         {
@@ -103,12 +99,6 @@ public static class ChecklistResultEnricher
             }
             : result.RiskImpact;
 
-        // var scoreImpact = result.ScoreImpact;
-        // if (scoreImpact is null && score.HasValue)
-        // {
-        //     scoreImpact = 3 - score.Value;
-        // }
-
         var evidence = string.IsNullOrWhiteSpace(result.Evidence)
             ? (string.IsNullOrWhiteSpace(result.ScriptFile)
                 ? $"Assessed via {result.Technique}."
@@ -118,15 +108,33 @@ public static class ChecklistResultEnricher
         return result with
         {
             Score = score,
-            // ImplementationStatus = implementationStatus,
             Severity = severity,
             Finding = finding,
             Recommendation = recommendation,
             Effort = effort,
             RiskImpact = riskImpact,
-            // ScoreImpact = scoreImpact,
             Evidence = evidence,
             NotApplicable = isNotApplicable ? true : result.NotApplicable,
+        };
+    }
+
+    // Rubric section 6: severity tracks the score, escalating to Critical for a total
+    // gap in the security (area 6) and compliance (area 7) areas, where the exposure
+    // is active rather than latent.
+    private static string DeriveSeverity(string id, int? score, bool isNotApplicable)
+    {
+        if (isNotApplicable) return "Informational";
+
+        var dot = id?.IndexOf('.') ?? -1;
+        var head = dot >= 0 ? id![..dot] : id;
+        var area = int.TryParse(head, out var n) ? n : 0;
+
+        return score switch
+        {
+            0 => area is 6 or 7 ? "Critical" : "High",
+            1 => "Medium",
+            2 => "Low",
+            _ => "Informational",
         };
     }
 }

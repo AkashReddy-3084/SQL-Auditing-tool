@@ -32,6 +32,10 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```powershell
   powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview> --notes "<rationale>"
   ```
+- **enrich_result** — record the audit wording you authored for one script-evaluated item:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence "<evidence>" --risk "<riskImpact>" --recommendation "<recommendation>"
+  ```
 - **load_checklist** — list the checklist structure (read-only):
   ```powershell
   powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --dump-checklist
@@ -47,7 +51,17 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    `--user <name>`; the password comes from the `SQLAUDITOR_SQL_PASSWORD` session
    environment variable — **never** ask for it in chat. Omit `--user` for Windows
    Integrated authentication. The CLI runs the engine only; it never calls an LLM.
-2. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
+2. Read the `=== COPILOT ENRICHMENT REQUIRED ===` block. Script-evaluated items already
+   have their Outcome, Score, Severity and Databases Verified decided — **never change
+   those**. For each item you author the wording from the `Script result` shown there,
+   using only the facts it contains (no invented objects, counts, databases or settings):
+   - `finding` — 1–2 sentences on the actual state found, not a restatement of the checklist text
+   - `evidence` — how that finding justifies the outcome, quoting the returned values (< 120 words)
+   - `riskImpact` — the specific consequence of *this* finding (< 50 words, no generic phrases)
+   - `recommendation` — remediation targeted at this gap; leave empty when Score is 3 and Outcome is Pass
+
+   Record each one with **enrich_result** before moving on.
+3. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
    (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
    Manual Verification Steps for every item automatically, in your very first reply after
    running evaluate — before asking anything.** Never ask the user for a decision, and
@@ -72,12 +86,12 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    ## Recommended Actions (if failed)
    - ...
    ```
-3. Only **after** the full steps for all items have been shown, ask the user for their
+4. Only **after** the full steps for all items have been shown, ask the user for their
    finding/evidence and decide Pass or Fail together, one item at a time or all at once.
-4. Record the decision by running **resolve_review** with `--id`, `--decision`
+5. Record the decision by running **resolve_review** with `--id`, `--decision`
    (`pass` or `fail`), and `--notes`.
-5. Do not write a final summary until every review item is resolved. Then run
-   **show_reports** to display `results/final_report.md`.
+6. Do not write a final summary until every review item is resolved and every script item
+   is enriched. Then run **show_reports** to display `results/final_report.md`.
 
 ## Examples
 

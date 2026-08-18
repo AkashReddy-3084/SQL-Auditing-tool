@@ -26,6 +26,12 @@ namespace SQLAuditor
                 return RunResolveReviewCommand(args);
             }
 
+            // Record Copilot-authored audit wording for a script-evaluated item.
+            if (args.Length > 0 && string.Equals(args[0], "enrich_result", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunEnrichResultCommand(args);
+            }
+
             // Print a previously-generated report (summary Markdown or raw JSON).
             if (args.Length > 0 && (string.Equals(args[0], "show_reports", StringComparison.OrdinalIgnoreCase) || args.Contains("--show-reports")))
             {
@@ -321,9 +327,15 @@ namespace SQLAuditor
             }
 
             // In Copilot mode, surface the NeedsReview items in a clearly delimited block
-            // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide).
+            // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide),
+            // and the script-evaluated items so it can author their audit wording.
             if (copilotMode)
             {
+                Console.WriteLine();
+                Console.Write(SQLAuditor.Lib.Auditor.BuildScriptEnrichmentRequest(
+                    results,
+                    id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence \"<evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
+
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
 
@@ -427,7 +439,8 @@ namespace SQLAuditor
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
             Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
-            Console.WriteLine("                      Copilot CLI skill to review via 'resolve_review'.");
+            Console.WriteLine("                      Copilot CLI skill to review via 'resolve_review', and");
+            Console.WriteLine("                      script items for it to word via 'enrich_result'.");
             Console.WriteLine("  --help              Show this help.");
             Console.WriteLine();
             Console.WriteLine("The CLI performs no LLM calls: Copilot CLI is the AI layer. No .env or");
@@ -551,6 +564,44 @@ namespace SQLAuditor
             }
 
             Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+            return 2;
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `enrich_result` subcommand
+        // Writes the audit wording Copilot authored for a script-evaluated item into
+        // results/checklist_results.json and regenerates the report. Outcome, Score,
+        // Severity and Databases Verified are script-derived and cannot be set here.
+        // ---------------------------------------------------------------------
+        static int RunEnrichResultCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]");
+                return 0;
+            }
+
+            var id = GetOption(opts, "id");
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                Console.Error.WriteLine("Error: --id is required.");
+                return 2;
+            }
+
+            var finding = GetOption(opts, "finding");
+            var evidence = GetOption(opts, "evidence");
+            var risk = GetOption(opts, "risk") ?? GetOption(opts, "riskimpact");
+            var recommendation = GetOption(opts, "recommendation");
+
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation))
+            {
+                Console.WriteLine($"Enriched [{id}]. results/checklist_results.json and results/final_report.md regenerated.");
+                return 0;
+            }
+
+            Console.Error.WriteLine($"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");
             return 2;
         }
 
