@@ -163,6 +163,7 @@ namespace SQLAuditor.Agents
 
 
             string content = "";
+            bool truncated = false;
 
             for (int attempt = 1; attempt <= _maxRetries; attempt++)
             {
@@ -192,8 +193,11 @@ namespace SQLAuditor.Agents
 
                     response.EnsureSuccessStatusCode();
 
-                    content =
+                    var stream =
                         await ReadSseStreamAsync(response);
+
+                    content = stream.Content;
+                    truncated = stream.Truncated;
 
                     break;
                 }
@@ -226,10 +230,10 @@ namespace SQLAuditor.Agents
                 bool hasCodeFence = content.Contains("```");
                 bool hasThinkTag = content.Contains("<think>");
                 progress?.Report(
-                    $"    [Debug] Has SCRIPT_START: {hasMarkers} | Has SCRIPT_END: {hasEndMarker} | Has code fence: {hasCodeFence} | Has <think>: {hasThinkTag}");
+                    $"    [Debug] Has SCRIPT_START: {hasMarkers} | Has SCRIPT_END: {hasEndMarker} | Has code fence: {hasCodeFence} | Has <think>: {hasThinkTag} | Token-capped: {truncated}");
             }
 
-            var parsed = ParseResponse(content);
+            var parsed = ParseResponse(content, truncated);
 
             // Log a diagnostic preview when content was received but script extraction failed
             if (!string.IsNullOrWhiteSpace(content) && parsed.IsFeasible && string.IsNullOrWhiteSpace(parsed.ScriptContent))
@@ -250,7 +254,7 @@ namespace SQLAuditor.Agents
         /// streams (text/event-stream) and servers that ignore the stream flag
         /// and return a single JSON body (application/json).
         /// </summary>
-        private static async Task<string>
+        private static async Task<LlmStreamResult>
             ReadSseStreamAsync(HttpResponseMessage response)
         {
             var contentType =
@@ -268,18 +272,21 @@ namespace SQLAuditor.Agents
                         ch.GetArrayLength() > 0)
                     {
                         var choice = ch[0];
+                        var cut = IsLengthCapped(choice);
                         if (choice.TryGetProperty("message", out var msg) &&
                             msg.TryGetProperty("content", out var mc) &&
                             mc.ValueKind == JsonValueKind.String)
-                            return mc.GetString() ?? "";
+                            return new LlmStreamResult(mc.GetString() ?? "", cut);
                         if (choice.TryGetProperty("text", out var t) &&
                             t.ValueKind == JsonValueKind.String)
-                            return t.GetString() ?? "";
+                            return new LlmStreamResult(t.GetString() ?? "", cut);
                     }
                 }
                 catch (JsonException) { }
-                return "";
+                return new LlmStreamResult("", false);
             }
+
+            var truncated = false;
 
             var sb = new StringBuilder();
 
@@ -325,6 +332,9 @@ namespace SQLAuditor.Agents
                         continue;
 
                     var choice = choices[0];
+
+                    if (IsLengthCapped(choice))
+                        truncated = true;
 
                     // Standard chat streaming: choices[0].delta.content
                     if (choice.TryGetProperty("delta", out var delta))
@@ -382,7 +392,9 @@ namespace SQLAuditor.Agents
                             if (choice.TryGetProperty("message", out var msg) &&
                                 msg.TryGetProperty("content", out var mc) &&
                                 mc.ValueKind == JsonValueKind.String)
-                                return mc.GetString() ?? "";
+                                return new LlmStreamResult(
+                                    mc.GetString() ?? "",
+                                    IsLengthCapped(choice));
                         }
                     }
                     catch (JsonException) { }
@@ -393,16 +405,33 @@ namespace SQLAuditor.Agents
                     $"Preview: {raw.Substring(0, Math.Min(300, raw.Length))}");
             }
 
-            return sb.ToString();
+            return new LlmStreamResult(sb.ToString(), truncated);
         }
 
 
-        private ScriptGenerationResponse
-            ParseResponse(string content)
+        /// <summary>Provider stopped because the token budget ran out, not because the answer finished.</summary>
+        private static bool IsLengthCapped(JsonElement choice)
+        {
+            return choice.TryGetProperty("finish_reason", out var fr) &&
+                   fr.ValueKind == JsonValueKind.String &&
+                   string.Equals(fr.GetString(), "length", StringComparison.OrdinalIgnoreCase);
+        }
+
+
+        private readonly record struct LlmStreamResult(string Content, bool Truncated);
+
+
+        // Also reused by the IDE/CLI script-generation skill, where GitHub Copilot produces
+        // the raw response and this parser interprets it (the class holds no state it needs).
+        internal static ScriptGenerationResponse
+            ParseResponse(string content, bool truncated = false)
         {
 
             var response =
-                new ScriptGenerationResponse();
+                new ScriptGenerationResponse
+                {
+                    IsTruncated = truncated
+                };
 
 
             // ==========================================
@@ -524,6 +553,10 @@ namespace SQLAuditor.Agents
                 if (!string.IsNullOrWhiteSpace(remaining))
                 {
                     response.ScriptContent = remaining;
+
+                    // No closing marker means the model stopped mid-answer; the
+                    // extracted text is kept only so the retry can report it.
+                    response.IsTruncated = true;
 
                     Console.WriteLine(
                         "    ⚠ ---SCRIPT_END--- marker missing or malformed, extracted content after ---SCRIPT_START---");
@@ -821,7 +854,7 @@ namespace SQLAuditor.Agents
                     response.EnsureSuccessStatusCode();
 
                     content =
-                        await ReadSseStreamAsync(response);
+                        (await ReadSseStreamAsync(response)).Content;
 
                     break;
                 }

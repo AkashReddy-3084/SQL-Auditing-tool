@@ -36,11 +36,11 @@ internal sealed class ManualStepsGenerator
 
     public async Task<string> GenerateAsync(ChecklistItem item, CancellationToken cancellationToken = default)
     {
-        var result = await GenerateWithMetadataAsync(item, cancellationToken);
+        var result = await GenerateWithMetadataAsync(item, null, cancellationToken);
         return result.Instructions;
     }
 
-    public async Task<ManualStepsGenerationResult> GenerateWithMetadataAsync(ChecklistItem item, CancellationToken cancellationToken = default)
+    public async Task<ManualStepsGenerationResult> GenerateWithMetadataAsync(ChecklistItem item, string? auditScript = null, CancellationToken cancellationToken = default)
     {
         var systemPrompt = PromptTemplateStore.Render(
             "manual_steps_prompt.txt",
@@ -56,7 +56,7 @@ internal sealed class ManualStepsGenerator
             messages = new[]
             {
                 new { role = "system", content = systemPrompt },
-                new { role = "user", content = BuildChecklistItemPrompt(item) }
+                new { role = "user", content = BuildChecklistItemPrompt(item, auditScript) }
             }
         };
 
@@ -90,7 +90,7 @@ internal sealed class ManualStepsGenerator
         return new ManualStepsGenerationResult(instructions, txt, totalTokens);
     }
 
-    private static string BuildChecklistItemPrompt(ChecklistItem item)
+    private static string BuildChecklistItemPrompt(ChecklistItem item, string? auditScript)
     {
         var sb = new StringBuilder();
         sb.Append("ID: ").AppendLine(item.Id);
@@ -102,6 +102,13 @@ internal sealed class ManualStepsGenerator
         if (!string.IsNullOrWhiteSpace(item.Verification))
         {
             sb.Append("Verification: ").AppendLine(item.Verification);
+        }
+
+        if (!string.IsNullOrWhiteSpace(auditScript))
+        {
+            sb.AppendLine();
+            sb.AppendLine("AUDIT SCRIPT (already reviewed and read-only; this check needs administrator rights, so the operator runs it manually):");
+            sb.AppendLine(auditScript.Trim());
         }
 
         return sb.ToString().TrimEnd();

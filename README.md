@@ -116,7 +116,10 @@ checklist IDs).
 | `--help` | Show usage |
 
 Related subcommands: `resolve_review --id <id> --decision <pass\|fail\|needsreview> [--notes <text>]`
-records a decision for a `Needs Review` item and regenerates the report; `show_reports [--kind json]`
+records a decision for a `Needs Review` item and regenerates the report;
+`enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]`
+records the audit wording for a script-evaluated item (its Outcome, Score, Severity and
+Databases Verified stay script-derived); `show_reports [--kind json]`
 prints the latest report; `--dump-checklist` lists the checklist structure.
 
 Examples:
@@ -181,6 +184,7 @@ required** for the IDE flow.
 | --- | --- |
 | `load_checklist` | List checklist areas and item IDs (read-only; no SQL needed) |
 | `evaluate` | Run the ordered evaluation workflow and return outcomes |
+| `enrich_result` | Record Copilot-authored Finding/Evidence/RiskImpact/Recommendation for a script-evaluated item |
 | `resolve_review` | Record a Pass/Fail decision for an item that needs review |
 | `show_reports` | Return the generated `final_report.md` or `checklist_results.json` |
 

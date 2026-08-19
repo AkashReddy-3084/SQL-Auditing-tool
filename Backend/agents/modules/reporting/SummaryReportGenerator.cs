@@ -37,6 +37,7 @@ public sealed class ChecklistItemResult
     public string? RiskImpact { get; set; }
     public double? ScoreImpact { get; set; }
     public string? Evidence { get; set; }
+    public string? DatabasesVerified { get; set; }
 
     // Persisted under the JSON key "Databases Verified" (note the space). Consumed
     // by the Excel report; the Markdown generator ignores it.
