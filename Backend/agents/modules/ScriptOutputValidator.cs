@@ -266,7 +266,8 @@ namespace SQLAuditor.Agents
 
             if (string.Equals(scope, "DATABASE", StringComparison.OrdinalIgnoreCase))
             {
-                if (!code.Contains("'None'", StringComparison.OrdinalIgnoreCase))
+                // Literals are stripped from Code by Tokenize, so match on the literal content.
+                if (!tokens.Literals.Exists(l => l.Trim().Equals("None", StringComparison.OrdinalIgnoreCase)))
                 {
                     return Invalid(
                         "A DATABASE-scope script must set @DatabaseQueried = 'None' when no user " +
