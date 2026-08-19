@@ -387,6 +387,7 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine($"Results JSON : {jsonDefault}");
             Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
+            Console.WriteLine($"Excel        : {Path.Combine(resultsDir, "audit_report.xlsx")}");
 
             var jsonOut = GetOption(opts, "json");
             if (!string.IsNullOrWhiteSpace(jsonOut))
@@ -546,7 +547,7 @@ namespace SQLAuditor
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
             if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             {
-                Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json and results/final_report.md regenerated.");
+                Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
                 return 0;
             }
 

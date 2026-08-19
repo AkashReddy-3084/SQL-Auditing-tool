@@ -16,7 +16,7 @@ namespace SQLAuditor.Mcp;
 public static class AuditTools
 {
     [McpServerTool(Name = "evaluate")]
-    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json and results/final_report.md.")]
+    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (a 4-tab Excel workbook: Summary, Area Detail, Checklists, Risk Register).")]
     public static async Task<string> EvaluateAsync(
         [Description("STEP 1: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 2: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
@@ -160,7 +160,7 @@ public static class AuditTools
         }
 
         sb.AppendLine();
-        sb.AppendLine("Reports written to results/checklist_results.json and results/final_report.md.");
+        sb.AppendLine("Reports written to results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (4-tab Excel workbook).");
         return sb.ToString();
     }
 
@@ -209,7 +209,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Updates results/checklist_results.json and regenerates results/final_report.md. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Updates results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Use after 'evaluate' surfaces manual-review items.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
         [Description("The decision: 'pass', 'fail', or 'needsreview'.")] string decision,
@@ -222,7 +222,7 @@ public static class AuditTools
 
         var auditor = new Auditor(string.Empty);
         if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
-            return Task.FromResult($"Updated [{id}] -> {newOutcome}. results/checklist_results.json and results/final_report.md regenerated.");
+            return Task.FromResult($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
 
         return Task.FromResult(
             $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
