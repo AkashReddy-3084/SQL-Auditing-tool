@@ -9,8 +9,12 @@ Evaluate the following checklist item for SQL Server auditing:
 
 IMPORTANT: You MUST follow the step-by-step process defined in the system prompt.
 
-1. First, write the ANALYSIS section — identify the core requirement, list the 2–4 most relevant queryable SQL Server artifacts (system views, DMVs, catalog views, SQL Agent tables, or other applicable metadata sources), describe your evidence-gathering strategy, and run the infeasibility test.
-2. Only AFTER completing the analysis, write the FEASIBLE determination based on your analysis findings.
+1. First, write the ANALYSIS section — identify the core requirement, decide whether the item depends on documentation held outside the engine, list the 2–4 most relevant queryable SQL Server artifacts (system views, DMVs, catalog views, SQL Agent tables, or other applicable metadata sources), describe your evidence-gathering strategy, and run the infeasibility test.
+2. Only AFTER completing the analysis, write the FEASIBLE determination, applying the documentation gate before the artifact gate.
 3. If FEASIBLE: YES, generate the full script with Result, Score, DatabaseQueried, and Finding output as required by the system prompt.
 
-Do NOT skip the analysis. Do NOT mark the check NOT FEASIBLE unless your analysis proves that zero queryable artifacts exist.
+Do NOT skip the analysis. Do NOT mark the check NOT FEASIBLE on artifact grounds unless your analysis proves that zero queryable artifacts exist.
+
+If judging this item needs a document, record, rationale or human decision that does not live in SQL Server or its host OS, stop after the analysis: return FEASIBLE: NO with IS_DOCUMENTATION_CHECK: YES and no script. Do not approximate the document with schema shape or naming conventions.
+
+The script must be complete, strictly read-only, and end with the four-column output SELECT between ---SCRIPT_START--- and ---SCRIPT_END---. Keep the ANALYSIS short so the whole script fits in one answer; if the logic would be long, simplify the evaluation rather than leaving it unfinished.

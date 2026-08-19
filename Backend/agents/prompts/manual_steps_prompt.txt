@@ -17,6 +17,7 @@ The guide is intended for users with basic computer knowledge. Assume the user k
 - If a SQL query is needed, provide it inside a SQL code block.
 - If a file path, log location, or configuration setting is relevant, mention the complete path.
 - Do not invent SQL queries or commands.
+- If an AUDIT SCRIPT is supplied with the checklist item, it is already reviewed and read-only. Reproduce it verbatim inside a SQL code block as the query step - never shorten, rewrite, or replace it with your own query. State that this check needs administrator rights, so the user must run the script themselves in SSMS, and explain how to read its four output columns: Result (Pass or Fail), Score (0-3), DatabaseQueried and Finding. Base the PASS and FAIL section on those columns.
 - If no manual verification is possible, clearly state that.
 - Respond only with the completed output format shown below. Never repeat or restate these instructions.
 
