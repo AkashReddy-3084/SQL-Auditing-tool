@@ -59,6 +59,16 @@ A `ps1` script emits one object with the same four properties as its last statem
 
 Initialise all four at declaration so they hold a value even when no rows are returned.
 
+**Empty database set (DATABASE scope).** When no user database qualifies - none online, none accessible, or the collected set is empty - the script must never return `NULL` or a blank. It must produce exactly:
+
+```sql
+SET @DatabaseQueried = 'None';
+SET @Finding = 'No database found to be queried';
+SET @Score = 0;
+```
+
+`@Result` then derives to `'Fail'` as usual. Wrap every aggregate that builds `@DatabaseQueried`, `@Score` and `@Finding` in `ISNULL` - `STRING_AGG` and `MIN` both return `NULL` over zero rows, and a `NULL` in any of the four output columns is a defect.
+
 # 6. SCORING
 
 - `0` Fail - not configured, no evidence, non-compliant.
@@ -145,7 +155,7 @@ DATABASE (sql)
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No user databases evaluated';
+DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
 DECLARE @DbName SYSNAME;
 DECLARE @Sql NVARCHAR(MAX);
 
@@ -199,7 +209,7 @@ END
 
 SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No user databases evaluated');
+SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

@@ -589,6 +589,8 @@ namespace SQLAuditor.Lib
             var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
             // Items whose compliance can only be judged from external documentation.
             var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Items needing elevated rights: the script is still generated, but the operator runs it.
+            var adminItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
@@ -616,6 +618,9 @@ namespace SQLAuditor.Lib
 
                             if (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck) && docCheck.ValueKind == JsonValueKind.True)
                                 documentationItems.Add(prop.Name);
+
+                            if (prop.Value.TryGetProperty("IsAdminCheck", out var adminCheck) && adminCheck.ValueKind == JsonValueKind.True)
+                                adminItems.Add(prop.Name);
                         }
                     }
                 }
@@ -653,11 +658,32 @@ namespace SQLAuditor.Lib
                 return documentationItems.Contains(item.Id);
             }
 
-            // Documentation checks always go to AI-Manual, even when a script was mapped for them.
+            bool IsAdminCheck(ChecklistItem item)
+            {
+                return adminItems.Contains(item.Id);
+            }
+
+            // Both documentation and admin checks go to AI-Manual. A documentation check has no script
+            // at all; an admin check keeps its script but the operator executes it, not the tool.
             bool IsScriptMapped(ChecklistItem item)
             {
-                if (IsDocumentationCheck(item)) return false;
+                if (IsDocumentationCheck(item) || IsAdminCheck(item)) return false;
                 return mapping.TryGetValue(item.Id, out var files) && files != null && files.Length > 0;
+            }
+
+            string? ReadMappedScript(ChecklistItem item)
+            {
+                if (!mapping.TryGetValue(item.Id, out var files) || files == null) return null;
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var full = Path.IsPathRooted(f) ? f : Path.Combine(repoRoot, f.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(full)) return File.ReadAllText(full);
+                    }
+                    catch { }
+                }
+                return null;
             }
 
             var scriptItems = selectedItems.Where(IsScriptMapped).ToList();
@@ -713,7 +739,7 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it))
+                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it))
                 {
                     try
                     {
@@ -741,8 +767,11 @@ namespace SQLAuditor.Lib
                 var manualStartingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, it.ScriptFile, "AI-Manual");
                 progress?.Report(manualStartingProgress);
 
+                // An admin check keeps its generated script so the operator can run it themselves.
+                var auditScript = IsAdminCheck(it) && !IsDocumentationCheck(it) ? ReadMappedScript(it) : null;
+
                 // Only reached once MCP has declined or failed, so the guidance is never wasted work.
-                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, cancellationToken);
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, cancellationToken);
 
                 if (requestUserInput != null && nonBlockingManualFallback)
                 {
@@ -845,10 +874,10 @@ namespace SQLAuditor.Lib
                         {
                             startingScriptFile = string.Join(';', mappedFiles);
                         }
-                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it);
-                        var startingTechnique = string.IsNullOrWhiteSpace(startingScriptFile)
-                            ? (canTryMcp ? "AI-MCP" : "AI-Manual")
-                            : "Script";
+                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it);
+                        var startingTechnique = isScriptPipeline
+                            ? "Script"
+                            : (canTryMcp ? "AI-MCP" : "AI-Manual");
                         var startingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, startingScriptFile, startingTechnique);
                         progress?.Report(startingProgress);
 
@@ -1080,17 +1109,17 @@ namespace SQLAuditor.Lib
 
         public async Task<string> GenerateManualInstructionsAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
         {
-            var result = await GenerateManualInstructionsWithMetadataAsync(item, cancellationToken);
+            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, cancellationToken);
             return result.Instructions;
         }
 
-        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
+        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)
         {
             try
             {
                 if (_manualStepsGenerator != null)
                 {
-                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
                         return slm;
@@ -1105,6 +1134,10 @@ namespace SQLAuditor.Lib
             }
 
             var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item);
+            if (!string.IsNullOrWhiteSpace(auditScript))
+            {
+                fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
+            }
             return new ManualStepsGenerationResult(fallback, fallback, 0);
         }
 

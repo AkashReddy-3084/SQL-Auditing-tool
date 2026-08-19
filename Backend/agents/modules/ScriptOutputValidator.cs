@@ -121,7 +121,8 @@ namespace SQLAuditor.Agents
                 StringComparison.OrdinalIgnoreCase))
             {
                 return ValidateSql(
-                    response.ScriptContent);
+                    response.ScriptContent,
+                    response.Scope);
             }
 
 
@@ -140,7 +141,8 @@ namespace SQLAuditor.Agents
 
 
         private ValidationResult ValidateSql(
-            string script)
+            string script,
+            string? scope = null)
         {
             var tokens = Tokenize(script);
             var code = tokens.Code;
@@ -256,6 +258,28 @@ namespace SQLAuditor.Agents
                 {
                     return Invalid(
                         $"Dynamic SQL must be read-only but contains {write}.");
+                }
+            }
+
+
+            // ---- empty database set ---------------------------------------------
+
+            if (string.Equals(scope, "DATABASE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!code.Contains("'None'", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Invalid(
+                        "A DATABASE-scope script must set @DatabaseQueried = 'None' when no user " +
+                        "database qualifies, with @Finding = 'No database found to be queried' and " +
+                        "@Score = 0 so @Result derives to 'Fail'.");
+                }
+
+                if (!Regex.IsMatch(code, @"\b(ISNULL|COALESCE)\s*\(", Opts))
+                {
+                    return Invalid(
+                        "A DATABASE-scope script must wrap its aggregates in ISNULL/COALESCE - " +
+                        "STRING_AGG and MIN return NULL over zero rows, which would leak NULL into " +
+                        "Result, Score, DatabaseQueried or Finding.");
                 }
             }
 
