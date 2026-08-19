@@ -16,6 +16,9 @@ namespace SQLAuditor.Agents
 
         public string Reason { get; set; } = "";
 
+        /// <summary>Provider cut the response short, or the script had no closing marker.</summary>
+        public bool IsTruncated { get; set; }
+
         public bool IsAdminCheck { get; set; }
 
         public bool IsDocumentationCheck { get; set; }

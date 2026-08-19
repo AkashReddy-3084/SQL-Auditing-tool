@@ -1,6 +1,6 @@
 {
   "1.1.1": {
-    "script_file": "Backend/checklist/scripts/sql/1.1.1_Deployment_model_is_deliberate_and_documented_SQL_Server_Azure_SQL_MI_Azure_SQL_DB_with_rationale.sql",
+    "script_file": "Backend/checklist/scripts/sql/1.1.1.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": true
