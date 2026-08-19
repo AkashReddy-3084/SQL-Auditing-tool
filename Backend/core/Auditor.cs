@@ -587,6 +587,8 @@ namespace SQLAuditor.Lib
 
             // load deterministic mapping if present
             var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
+            // Items whose compliance can only be judged from external documentation.
+            var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
@@ -611,6 +613,9 @@ namespace SQLAuditor.Lib
                             var scriptFile = prop.Value.TryGetProperty("script_file", out var sf) ? sf.GetString() : null;
                             if (!string.IsNullOrWhiteSpace(scriptFile))
                                 mapping[prop.Name] = new[] { scriptFile! };
+
+                            if (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck) && docCheck.ValueKind == JsonValueKind.True)
+                                documentationItems.Add(prop.Name);
                         }
                     }
                 }
@@ -643,8 +648,15 @@ namespace SQLAuditor.Lib
                 }
             }
 
+            bool IsDocumentationCheck(ChecklistItem item)
+            {
+                return documentationItems.Contains(item.Id);
+            }
+
+            // Documentation checks always go to AI-Manual, even when a script was mapped for them.
             bool IsScriptMapped(ChecklistItem item)
             {
+                if (IsDocumentationCheck(item)) return false;
                 return mapping.TryGetValue(item.Id, out var files) && files != null && files.Length > 0;
             }
 
@@ -701,7 +713,7 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString))
+                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it))
                 {
                     try
                     {
@@ -829,11 +841,11 @@ namespace SQLAuditor.Lib
                         }
 
                         var startingScriptFile = string.Empty;
-                        if (mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
+                        if (!IsDocumentationCheck(it) && mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
                         {
                             startingScriptFile = string.Join(';', mappedFiles);
                         }
-                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString);
+                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it);
                         var startingTechnique = string.IsNullOrWhiteSpace(startingScriptFile)
                             ? (canTryMcp ? "AI-MCP" : "AI-Manual")
                             : "Script";
