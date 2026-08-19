@@ -37,6 +37,7 @@ public sealed class ChecklistItemResult
     public string? RiskImpact { get; set; }
     public double? ScoreImpact { get; set; }
     public string? Evidence { get; set; }
+    public string? DatabasesVerified { get; set; }
 
     // ---- Derived helpers (not serialized) ---------------------------------
     [JsonIgnore]
