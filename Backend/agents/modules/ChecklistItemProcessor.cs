@@ -397,7 +397,9 @@ namespace SQLAuditor.Agents
         }
 
 
-        private ScriptGenerationResponse
+        // Also reused by the IDE/CLI script-generation skill, where GitHub Copilot produces
+        // the raw response and this parser interprets it (the class holds no state it needs).
+        internal static ScriptGenerationResponse
             ParseResponse(string content)
         {
 

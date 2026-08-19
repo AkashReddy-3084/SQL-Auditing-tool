@@ -199,6 +199,42 @@ public static class AuditTools
         return string.IsNullOrWhiteSpace(text) ? "No checklist items matched." : text;
     }
 
+    [McpServerTool(Name = "generate_scripts")]
+    [Description("GENERATE deterministic audit SCRIPTS for checklist items — this is NOT evaluation and needs no SQL Server or credentials. Use this whenever the user asks to 'generate scripts', 'create scripts', or 'write audit scripts' for one or more checklist IDs. It reuses the same generation pipeline as the WPF app: it returns the generator system prompt plus a per-item request and instructs YOU (GitHub Copilot) to author each read-only script (with the required Result/Score/DatabaseQueried/Finding output) and then save it with 'save_generated_script'. Never call 'evaluate' for a script-generation request.")]
+    public static async Task<string> GenerateScriptsAsync(
+        [Description("Comma-separated checklist item IDs to generate scripts for, e.g. '1.1.2,3.1.1'. If missing, ask the user which checklist IDs to generate scripts for.")] string? items = null,
+        CancellationToken cancellationToken = default)
+    {
+        var ids = (items ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (ids.Length == 0)
+            return "SCRIPT GENERATION — CHECKLIST IDS REQUIRED.\n"
+                 + "Ask the user which checklist item IDs to generate scripts for (e.g. '1.1.2,3.1.1'). "
+                 + "This is script generation, not evaluation — do not ask for a SQL Server or credentials.";
+
+        var (checklistItems, unknown) = await ScriptGenerationSkill.LoadItemsAsync(ids);
+        if (checklistItems.Count == 0)
+            return "Error: none of the requested checklist IDs exist. Unknown: " + string.Join(", ", unknown);
+
+        return ScriptGenerationSkill.BuildGenerationInstructions(
+            checklistItems,
+            unknown,
+            "call save_generated_script(checklistId=\"<id>\", response=\"<full raw generator output>\")");
+    }
+
+    [McpServerTool(Name = "save_generated_script")]
+    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). The tool validates the script; on success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
+    public static async Task<string> SaveGeneratedScriptAsync(
+        [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
+        [Description("The COMPLETE raw generator output for this item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string response,
+        CancellationToken cancellationToken = default)
+    {
+        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(checklistId, response, cancellationToken);
+    }
+
     [McpServerTool(Name = "show_reports")]
     [Description("Return the most recently generated audit output: 'summary' for results/final_report.md (default) or 'json' for results/checklist_results.json.")]
     public static Task<string> ShowReportsAsync(
@@ -278,4 +314,16 @@ public static class AuditPrompts
       + "Pass or Fail, and record each decision with the 'resolve_review' tool. "
       + "When everything is resolved, show the summary with 'show_reports'. "
       + "Do not perform the evaluation yourself or duplicate its logic — always use the tools.";
+
+    [McpServerPrompt(Name = "generate_scripts")]
+    [Description("Generate deterministic audit scripts for checklist items using the sql-auditor MCP tools (not evaluation).")]
+    public static string GenerateScripts() =>
+        "Generate audit scripts (do NOT evaluate) using the sql-auditor MCP tools. "
+      + "Ask me which checklist item IDs to generate scripts for, then call the 'generate_scripts' tool with them. "
+      + "This is script generation only — do not call 'evaluate', do not connect to a SQL Server, and do not ask "
+      + "for a server name or credentials. Follow the generator system prompt the tool returns: for each item, "
+      + "write the analysis, decide feasibility, and author a read-only script that outputs Result, Score, "
+      + "DatabaseQueried and Finding. Process the items in batches of up to 10 in parallel. After generating each "
+      + "item, save it with the 'save_generated_script' tool, passing the full raw generator output. If saving "
+      + "returns a validation error, correct the script and save again (retry up to 3 times).";
 }

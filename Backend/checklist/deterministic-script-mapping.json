@@ -5,12 +5,6 @@
     "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
-  "1.1.2": {
-    "script_file": "Backend/checklist/scripts/sql/1.1.2_Environment_separation_exists_Dev_Test_Prod_with_isolated_instances_or_databases.sql",
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
-  },
   "1.1.3": {
     "script_file": null,
     "IsAdminCheck": false,
@@ -21,12 +15,6 @@
     "script_file": "Backend/checklist/scripts/sql/1.1.4_Compute_tier_service_tier_appropriate_for_workload_vCore_DTU_Business_Critical_General_Purpose.sql",
     "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
-  },
-  "1.1.5": {
-    "script_file": "Backend/checklist/scripts/sql/1.1.5_Architecture_diagram_exists_and_reflects_the_actual_implementation.sql",
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
     "MCP_Feasibility": true
   },
   "1.1.6": {
@@ -284,24 +272,6 @@
   "2.4.6": {
     "script_file": "Backend/checklist/scripts/sql/2.4.6_Parallelism_used_appropriately_no_unnecessary_serial_execution.sql",
     "IsAdminCheck": true,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
-  },
-  "3.1.1": {
-    "script_file": "Backend/checklist/scripts/sql/3.1.1_Consistent_formatting_and_naming_conventions_across_objects.sql",
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
-  },
-  "3.1.2": {
-    "script_file": "Backend/checklist/scripts/sql/3.1.2_No_SELECT_in_production_code_explicit_column_lists.sql",
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
-    "MCP_Feasibility": true
-  },
-  "3.1.3": {
-    "script_file": "Backend/checklist/scripts/sql/3.1.3_Schema_qualified_object_references_dbo_Table_not_Table.sql",
-    "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1966,5 +1936,35 @@
     "IsAdminCheck": false,
     "IsDocumentationCheck": true,
     "MCP_Feasibility": false
+  },
+  "3.1.1": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.1.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "3.1.3": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.3.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.2.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
+  },
+  "1.1.5": {
+    "script_file": "Backend/checklist/scripts/sql/1.1.5.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": true,
+    "MCP_Feasibility": true
+  },
+  "3.1.2": {
+    "script_file": "Backend/checklist/scripts/sql/3.1.2.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   }
 }
