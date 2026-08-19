@@ -28,9 +28,11 @@ SCOPE
 
 The script must not change server or database state on ANY execution path, including inside dynamic SQL text.
 
-Allowed: `SELECT`; system/catalog views and DMVs; `SERVERPROPERTY`, `DATABASEPROPERTYEX`, `OBJECT_ID`, `COL_LENGTH`, `HAS_DBACCESS`, `HAS_PERMS_BY_NAME`; `#temp` tables and `@table` variables (`CREATE`/`INSERT`/`DROP` against those only); read-only cursors; `sp_executesql` running SELECT-only text.
+Allowed: `SELECT`; system/catalog views and DMVs; `SERVERPROPERTY`, `DATABASEPROPERTYEX`, `OBJECT_ID`, `COL_LENGTH`, `HAS_DBACCESS`, `HAS_PERMS_BY_NAME`; `#temp` tables and `@table` variables (`CREATE`/`INSERT`/`DROP` against those only); read-only cursors; `sp_executesql` running read-only text.
 
 Forbidden anywhere, including inside dynamic SQL strings: `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`TRUNCATE` against anything that is not a `#temp` table or `@table` variable; `CREATE`/`ALTER`/`DROP` of a permanent object; `SELECT ... INTO` a permanent table; `GRANT`/`REVOKE`/`DENY`; `sp_configure` with a value; `RECONFIGURE`; `BACKUP`/`RESTORE`; `xp_cmdshell`; state-changing `DBCC`; explicit transactions; `SHUTDOWN`.
+
+Dynamic SQL is bound by the same rule, but it does not have to be a bare `SELECT`: the constructed string may use `SELECT`, `WITH`, `DECLARE` and `IF`/`ELSE` branching to probe capability, provided no statement inside it writes or changes state.
 
 PowerShell: read-only cmdlets only (`Get-*`, `Test-Path`, `Select-Object`, `Where-Object`). Never `Set-*`, `New-Item*`, `Remove-*`, `Add-Content`, `Clear-*`, `Start`/`Stop`/`Restart-Service`, `Out-File`, `Invoke-Expression`.
 
@@ -79,6 +81,8 @@ SET @Score = 0;
 Define reachable conditions for all four values. The maximum achievable score must never be below `2`; reach `3` whenever the script can fully verify compliance. Cap at `2` only when final compliance genuinely needs human judgement - then include the line:
 
 `-- NOTE: Automated evidence only; full compliance requires human review.`
+
+**Counting checks.** When the score depends on how many objects fail and a meaningful total is available, prefer the proportion over a raw count - for example `3` = none, `2` = under 5%, `1` = under 25%, `0` = 25% or more - so the same script scores sensibly on a 20-table and a 5,000-table database. Divide with `NULLIF(<total>, 0)` so an empty set cannot raise a divide-by-zero. Keep absolute counts where the set is inherently small or fixed, such as server settings or a handful of Agent jobs. Whichever you choose, state the thresholds in `SCORING_LOGIC`.
 
 # 7. FINDING
 

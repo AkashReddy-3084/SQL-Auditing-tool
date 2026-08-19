@@ -23,6 +23,7 @@ Apply all of them. Report every violation you find, using these ids.
 # 2. VERDICT RULES
 
 - `VALID` - no C1-C7 violation. Formatting, comment wording, extra defensive checks and an alternative but correct query approach are NOT issues. Do not invent problems.
+- NOT violations - never report these: `CREATE TABLE #...`, `INSERT INTO #...`, `DROP TABLE #...` and `INSERT INTO #... EXEC sp_executesql` against temp objects, which the DATABASE pattern requires; three-part names built with `QUOTENAME(@DbName)` on the SQL Server / Managed Instance path, since only the Azure SQL Database path forbids them; `EXEC sp_configure` with no value assigned; a read-only cursor that is closed and deallocated; a heuristic or proxy query where exact evidence is impossible in T-SQL; a script over 120 lines that is otherwise correct.
 - `INVALID` - at least one real violation. You must then return a corrected script that is complete, self-contained, read-only and fixes every issue you listed. Never a diff, never a fragment, never a note saying it is unchanged.
 - If the script cannot be repaired, return `INVALID` with the issues and omit the corrected block.
 
