@@ -1,3 +1,4 @@
+# Script 4 Branch
 # SQL Auditor
 
 Desktop application that audits a SQL Server instance against a governance checklist. Controls are evaluated three ways: deterministic T-SQL scripts, AI-assisted evaluation against a live connection, and AI-generated manual verification steps for controls that cannot be checked automatically.
