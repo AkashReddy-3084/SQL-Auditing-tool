@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using SQLAuditor.Lib;
@@ -25,6 +26,16 @@ public static class AuditTools
     /// which generates 10 items concurrently and only then persists the batch.
     /// </summary>
     private const int GenerationBatchSize = 10;
+
+    /// <summary>
+    /// Agent that owns the full per-item loop in subagent mode, defined in
+    /// .github/agents/sql-script-generator.agent.md.
+    /// </summary>
+    private const string GeneratorAgentName = "sql-script-generator";
+
+    // Subagents save concurrently, and the mapping and execution-results files are
+    // read-modify-write, so persistence is serialised across every caller of this server.
+    private static readonly SemaphoreSlim SaveGate = new(1, 1);
 
     /// <summary>
     /// Accepts a single ID (<c>1.1.2</c>), a list (<c>1.1.2,3.1.1</c>) and an inclusive
@@ -219,10 +230,11 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "generate_scripts")]
-    [Description("GENERATE deterministic audit SCRIPTS for checklist items — this is NOT evaluation and needs no SQL Server or credentials. Use this whenever the user asks to 'generate scripts', 'create scripts', or 'write audit scripts' for one or more checklist IDs (including the /generateScript command). 'items' accepts a single ID ('1.1.2'), a comma-separated list ('1.1.2,3.1.1') or an inclusive range in checklist order ('1.1.1 - 2.1.4'). Items are served in BATCHES OF 10, exactly like the WPF app: this call returns only the current batch, and you call it again with the SAME 'items' and batch+1 once every item in the batch is saved. It reuses the same generation pipeline as the WPF app: it returns the generator system prompt plus a per-item request and instructs YOU (GitHub Copilot) to author each read-only script (with the required Result/Score/DatabaseQueried/Finding output) and then save it with 'save_generated_script'. Existing scripts and mapping entries for the same ID are overwritten. Never call 'evaluate' for a script-generation request.")]
+    [Description("GENERATE deterministic audit SCRIPTS for checklist items — this is NOT evaluation and needs no SQL Server or credentials. Use this whenever the user asks to 'generate scripts', 'create scripts', or 'write audit scripts' for one or more checklist IDs (including the /generateScript command). 'items' accepts a single ID ('1.1.2'), a comma-separated list ('1.1.2,3.1.1') or an inclusive range in checklist order ('1.1.1 - 2.1.4'). Items are served ONE BATCH OF 10 AT A TIME, exactly like the WPF app: this call returns only the current batch, and you call it again with the SAME 'items' and batch+1 once every item in the batch is finished. In the default mode='subagent' it returns a dispatch manifest and you launch one 'sql-script-generator' subagent per item, each owning its full generate/validate/save loop in its own session — the closest match to the WPF app's 10 independent LLM sessions. mode='inline' instead returns the generator prompt plus every per-item request for you to author in this conversation. Existing scripts and mapping entries for the same ID are overwritten. Never call 'evaluate' for a script-generation request.")]
     public static async Task<string> GenerateScriptsAsync(
         [Description("Checklist IDs to generate scripts for: a single ID ('1.1.2'), a comma-separated list ('1.1.2,3.1.1'), or an inclusive range in checklist order ('1.1.1 - 2.1.4'). Pass the SAME value unchanged on every batch call. If missing, ask the user which checklist IDs to generate scripts for.")] string? items = null,
-        [Description("1-based batch number. Items are processed 10 at a time, mirroring the WPF flow. Omit or pass 1 for the first batch, then call again with batch=2, 3, ... after every item in the previous batch has been saved.")] int batch = 1,
+        [Description("1-based batch number. One batch of 10 items is processed at a time, mirroring the WPF flow. Omit or pass 1 for the first batch, then call again with batch=2, 3, ... after every item in the previous batch has finished.")] int batch = 1,
+        [Description("'subagent' (default) returns a fan-out manifest: launch one 'sql-script-generator' subagent per item, each owning the full loop in its own session. 'inline' returns the generator prompt and every per-item request so the calling conversation writes the scripts itself — use it as a fallback when subagents are unavailable, or for a very small batch you want to watch.")] string? mode = null,
         CancellationToken cancellationToken = default)
     {
         var spec = (items ?? string.Empty).Trim();
@@ -254,9 +266,18 @@ public static class AuditTools
         if (batch < 1) batch = 1;
 
         if (batch > totalBatches)
-            return $"ALL BATCHES COMPLETE for '{spec}'. {requestedIds.Count} item(s) fit into {totalBatches} "
-                 + $"batch(es) of {GenerationBatchSize}; batch {batch} does not exist. "
-                 + "Summarise what was generated, skipped (not feasible) and failed — do not call generate_scripts again.";
+        {
+            var done = new StringBuilder();
+            done.AppendLine($"ALL BATCHES COMPLETE for '{spec}'. {requestedIds.Count} item(s) fit into "
+                          + $"{totalBatches} batch(es) of {GenerationBatchSize}; batch {batch} does not exist.");
+            done.AppendLine();
+            done.Append(DescribeGenerationStatus(requestedIds, "Recorded outcome for every requested item"));
+            done.AppendLine();
+            done.AppendLine("Report these totals to the user (generated / not feasible / not recorded) and stop — "
+                          + "do not call generate_scripts again. Any item shown as NOT RECORDED never reached "
+                          + "save_generated_script: re-run just that ID before reporting success.");
+            return done.ToString();
+        }
 
         var batchIds = requestedIds
             .Skip((batch - 1) * GenerationBatchSize)
@@ -267,43 +288,103 @@ public static class AuditTools
         if (checklistItems.Count == 0)
             return "Error: none of the checklist IDs in this batch exist. Unknown: " + string.Join(", ", unknown);
 
+        var inline = string.Equals(mode?.Trim(), "inline", StringComparison.OrdinalIgnoreCase);
+
         var sb = new StringBuilder();
-        sb.AppendLine($"=== SCRIPT GENERATION — BATCH {batch} OF {totalBatches} ({checklistItems.Count} item(s)) ===");
+        sb.AppendLine($"=== SCRIPT GENERATION — BATCH {batch} OF {totalBatches} ({checklistItems.Count} item(s)) "
+                    + $"— {(inline ? "INLINE" : "SUBAGENT")} MODE ===");
         sb.AppendLine($"Requested: {spec}");
         sb.AppendLine($"Resolved {requestedIds.Count} checklist item(s) in checklist order: {string.Join(", ", requestedIds)}");
         if (unresolved.Count > 0)
             sb.AppendLine("Not found in the checklist and skipped: " + string.Join(", ", unresolved));
 
+        // Each batch reports the previous one, so a silently dropped item surfaces immediately.
+        if (batch > 1)
+        {
+            var previousIds = requestedIds
+                .Skip((batch - 2) * GenerationBatchSize)
+                .Take(GenerationBatchSize)
+                .ToList();
+
+            sb.AppendLine();
+            sb.Append(DescribeGenerationStatus(previousIds, $"Outcome of batch {batch - 1}"));
+            sb.AppendLine("Any item above shown as NOT RECORDED was never saved — re-run that single ID before "
+                        + "continuing with this batch.");
+        }
+
         var alreadyGenerated = DescribeExistingScripts(batchIds);
         if (alreadyGenerated.Length > 0)
+        {
+            sb.AppendLine();
             sb.AppendLine($"Already generated and WILL BE OVERWRITTEN on save: {alreadyGenerated}. "
                         + "Generate them again from scratch — do not skip them and do not reuse the old content.");
+        }
 
-        sb.AppendLine($"Generate ONLY the {checklistItems.Count} item(s) in this batch, in parallel. "
-                    + "Do not start the next batch until every item here has been saved.");
         sb.AppendLine();
-
-        sb.Append(ScriptGenerationSkill.BuildGenerationInstructions(
-            checklistItems,
-            unknown,
-            "call save_generated_script(checklistId=\"<id>\", response=\"<full raw generator output>\")"));
+        if (inline)
+        {
+            sb.AppendLine($"Generate ONLY the {checklistItems.Count} item(s) in this batch yourself. "
+                        + "Do not start the next batch until every item here has been saved.");
+            sb.AppendLine();
+            sb.Append(ScriptGenerationSkill.BuildGenerationInstructions(
+                checklistItems,
+                unknown,
+                "call save_generated_script(checklistId=\"<id>\", response=\"<full raw generator output>\")"));
+        }
+        else
+        {
+            sb.Append(BuildSubagentDispatch(batchIds));
+        }
 
         sb.AppendLine();
         sb.AppendLine($"=== END OF BATCH {batch} OF {totalBatches} ===");
         if (batch < totalBatches)
         {
             var nextCount = Math.Min(GenerationBatchSize, requestedIds.Count - (batch * GenerationBatchSize));
-            sb.AppendLine($"After ALL {checklistItems.Count} item(s) above are saved (or recorded as NOT FEASIBLE), "
-                        + $"continue with the next {nextCount} item(s) by calling:");
-            sb.AppendLine($"    generate_scripts(items=\"{spec}\", batch={batch + 1})");
+            sb.AppendLine($"After ALL {checklistItems.Count} item(s) above are finished (saved, recorded as NOT "
+                        + $"FEASIBLE, or failed), continue with the next {nextCount} item(s) by calling:");
+            sb.AppendLine($"    generate_scripts(items=\"{spec}\", batch={batch + 1}{(inline ? ", mode=\"inline\"" : "")})");
             sb.AppendLine("Pass 'items' unchanged so the batches stay aligned. Do not stop or summarise before the last batch.");
         }
         else
         {
-            sb.AppendLine("This is the FINAL batch. Once every item here is saved, report the totals "
-                        + "(generated / not feasible / failed) and stop — do not call generate_scripts again.");
+            sb.AppendLine("This is the FINAL batch. Once every item here is finished, confirm the recorded outcomes "
+                        + $"by calling generate_scripts(items=\"{spec}\", batch={batch + 1}), then report the totals and stop.");
         }
 
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Fan-out instructions for one batch: one <c>sql-script-generator</c> subagent per item,
+    /// each owning the full generate/validate/save loop in its own session. This is the IDE
+    /// equivalent of the concurrent, independent <c>ProcessItemAsync</c> tasks in the WPF flow.
+    /// </summary>
+    private static string BuildSubagentDispatch(IReadOnlyList<string> batchIds)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("## HOW TO PROCESS THIS BATCH — SUBAGENT FAN-OUT");
+        sb.AppendLine($"Do NOT write these {batchIds.Count} scripts yourself and do NOT read the generator prompt.");
+        sb.AppendLine($"Launch ONE '{GeneratorAgentName}' subagent per item, ALL IN A SINGLE MESSAGE so they run");
+        sb.AppendLine("concurrently in independent sessions — the IDE equivalent of the WPF app generating the 10");
+        sb.AppendLine("items of a batch in 10 separate LLM sessions.");
+        sb.AppendLine();
+        sb.AppendLine("Each subagent owns the FULL loop for its ONE item and reports back a single status line:");
+        sb.AppendLine("  get_item_generation_prompt -> author the raw response -> save_generated_script (format gate)");
+        sb.AppendLine("  -> C1-C7 review -> save_generated_script with the verdict -> retry up to 3 times.");
+        sb.AppendLine();
+        sb.AppendLine("Dispatch exactly these calls, together, now:");
+        foreach (var id in batchIds)
+        {
+            sb.AppendLine($"  runSubagent(agentName=\"{GeneratorAgentName}\", description=\"Generate script {id}\", "
+                        + $"prompt=\"Generate and save the SQL Auditor audit script for checklist item {id}. "
+                        + $"Follow your agent contract exactly: start by calling get_item_generation_prompt(checklistId=\\\"{id}\\\").\")");
+        }
+        sb.AppendLine();
+        sb.AppendLine("While in this mode you must NOT call get_item_generation_prompt, validate_generated_script or");
+        sb.AppendLine("save_generated_script yourself — the subagents do. Your only jobs are dispatching the batch,");
+        sb.AppendLine("collecting the status lines, and advancing to the next batch.");
+        sb.AppendLine("If the subagents cannot be launched at all, fall back to this same batch with mode=\"inline\".");
         return sb.ToString();
     }
 
@@ -388,6 +469,103 @@ public static class AuditTools
         }
     }
 
+    /// <summary>
+    /// Reports what execution-results.json actually recorded for the given IDs. Subagent
+    /// transcripts are not visible to the orchestrator, so this is how a batch is verified:
+    /// an item that never reached save_generated_script shows as NOT RECORDED.
+    /// </summary>
+    private static string DescribeGenerationStatus(IReadOnlyList<string> ids, string heading)
+    {
+        var recorded = ReadGenerationStatus();
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"## {heading}");
+        foreach (var id in ids)
+            sb.AppendLine($"  {id} — {(recorded.TryGetValue(id, out var s) ? s : "NOT RECORDED")}");
+
+        return sb.ToString();
+    }
+
+    private static Dictionary<string, string> ReadGenerationStatus()
+    {
+        var recorded = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var path = Path.Combine(ScriptGenerationSkill.ResolveBasePath(), "results", "execution-results.json");
+            if (!File.Exists(path)) return recorded;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (!doc.RootElement.TryGetProperty("results", out var results)
+                || results.ValueKind != JsonValueKind.Array)
+                return recorded;
+
+            foreach (var entry in results.EnumerateArray())
+            {
+                var id = Text(entry, "ChecklistId");
+                if (string.IsNullOrWhiteSpace(id)) continue;
+
+                var status = Text(entry, "Status");
+                var scriptPath = Text(entry, "ScriptPath");
+                var reason = Text(entry, "Reason");
+
+                var detail = scriptPath.Length > 0
+                    ? $" ({scriptPath})"
+                    : reason.Length > 0
+                        ? $" ({(reason.Length > 120 ? reason[..120] + "…" : reason)})"
+                        : string.Empty;
+
+                recorded[id] = (status.Length > 0 ? status : "Recorded") + detail;
+            }
+        }
+        catch
+        {
+            // A missing or malformed results file just means nothing can be confirmed.
+        }
+
+        return recorded;
+
+        static string Text(JsonElement element, string property) =>
+            element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? string.Empty
+                : string.Empty;
+    }
+
+    [McpServerTool(Name = "get_item_generation_prompt")]
+    [Description("Return the generator system prompt plus the filled request for ONE checklist item, built from Backend/agents/prompts/script_generator_system.txt and script_generator_user.txt. This is the entry point for the 'sql-script-generator' subagent: it fetches its own item's prompt here instead of receiving it second-hand, so the canonical templates are never paraphrased. Author the raw response from what this returns, then save it with 'save_generated_script'. Needs no SQL Server and no credentials.")]
+    public static async Task<string> GetItemGenerationPromptAsync(
+        [Description("The single checklist item ID to generate a script for, e.g. '1.1.2'.")] string checklistId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(checklistId))
+            return "Error: 'checklistId' is required.";
+
+        var (checklistItems, unknown) = await ScriptGenerationSkill.LoadItemsAsync(new[] { checklistId });
+        if (checklistItems.Count == 0)
+            return $"Error: checklist ID '{checklistId.Trim()}' does not exist. "
+                 + "Use 'load_checklist' to discover valid IDs. Do not invent a checklist item.";
+
+        var item = checklistItems[0];
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== SINGLE-ITEM SCRIPT GENERATION — [{item.ChecklistId}] ===");
+        sb.AppendLine("This request contains EXACTLY ONE item. Ignore any batching guidance in the text below —");
+        sb.AppendLine("batching is handled by the orchestrator, not by you.");
+
+        var alreadyGenerated = DescribeExistingScripts(new[] { item.ChecklistId });
+        if (alreadyGenerated.Length > 0)
+            sb.AppendLine($"A script already exists for this item ({alreadyGenerated}) and WILL BE OVERWRITTEN when "
+                        + "you save. Generate it again from scratch — do not read or reuse the old content.");
+
+        sb.AppendLine();
+        sb.Append(ScriptGenerationSkill.BuildGenerationInstructions(
+            checklistItems,
+            unknown,
+            $"call save_generated_script(checklistId=\"{item.ChecklistId}\", response=\"<full raw generator output>\")"));
+
+        return sb.ToString();
+    }
+
     [McpServerTool(Name = "validate_generated_script")]
     [Description("Return the standard C1-C7 review request for one script YOU generated, built from Backend/agents/prompts/script_validation_system.txt and script_validation_user.txt. Provide the checklist ID and the COMPLETE raw generator response. Review the script using ONLY the checks in the returned prompt, then call 'save_generated_script' with the resulting verdict. 'save_generated_script' returns this same prompt if called without a verdict, so nothing is saved until the review is done.")]
     public static async Task<string> ValidateGeneratedScriptAsync(
@@ -404,19 +582,29 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "save_generated_script")]
-    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
+    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts' or 'get_item_generation_prompt'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. Writes are serialised, so parallel subagents can each call this safely. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
     public static async Task<string> SaveGeneratedScriptAsync(
         [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
         [Description("The COMPLETE raw generator output for this item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string response,
         [Description("The verdict from the C1-C7 review, in the validation template's response format. Omit on the first call to receive the validation prompt.")] string? validationVerdict = null,
         CancellationToken cancellationToken = default)
     {
-        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
-            checklistId,
-            response,
-            validationVerdict,
-            SaveWithVerdictHint,
-            cancellationToken);
+        // Serialised because the mapping and execution-results files are read-modify-write and
+        // subagent mode has up to 10 items saving at once.
+        await SaveGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
+                checklistId,
+                response,
+                validationVerdict,
+                SaveWithVerdictHint,
+                cancellationToken);
+        }
+        finally
+        {
+            SaveGate.Release();
+        }
     }
 
     [McpServerTool(Name = "show_reports")]
@@ -507,15 +695,16 @@ public static class AuditPrompts
       + "('1.1.2,3.1.1') or an inclusive range ('1.1.1 - 2.1.4') — then call the 'generate_scripts' tool "
       + "with that value as 'items' and batch=1. "
       + "This is script generation only — do not call 'evaluate', do not connect to a SQL Server, and do not ask "
-      + "for a server name or credentials. Follow the generator system prompt the tool returns: for each item, "
-      + "write the analysis, decide feasibility, and author a read-only script that outputs Result, Score, "
-      + "DatabaseQueried and Finding. The tool serves the items in batches of 10, mirroring the WPF app: generate "
-      + "the items of the current batch in parallel, and only after every one of them is saved call "
-      + "'generate_scripts' again with the SAME 'items' and the next batch number, until the tool reports the "
-      + "final batch. After generating each item, save it with the 'save_generated_script' tool, passing the full "
-      + "raw generator output. That returns the standard C1-C7 validation prompt: review the script using only "
-      + "those checks, then call 'save_generated_script' again with the verdict. Nothing is written to disk until "
-      + "you do. If saving returns a validation error, correct the script and save again (retry up to 3 times). "
+      + "for a server name or credentials. "
+      + "The tool serves ONE BATCH OF 10 ITEMS AT A TIME and defaults to subagent mode: for each batch it returns "
+      + "a dispatch manifest, and you launch one 'sql-script-generator' subagent per item, all in a single message "
+      + "so they run in independent sessions. Each subagent owns its item's whole loop — fetching the prompt, "
+      + "writing the script, running the C1-C7 review, saving, and retrying up to 3 times — and reports one status "
+      + "line back. Do not write the scripts yourself in that mode. Only after every subagent in the batch has "
+      + "returned, call 'generate_scripts' again with the SAME 'items' and the next batch number, until the tool "
+      + "reports the final batch; then call it once more to confirm the recorded outcomes. "
+      + "If subagents cannot be launched, re-request the same batch with mode=\"inline\" and generate the scripts "
+      + "yourself, following the generator system prompt the tool returns. "
       + "Scripts and mapping entries for IDs that already have one are overwritten, so never skip an item because "
       + "a script already exists.";
 }

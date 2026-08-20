@@ -1,9 +1,10 @@
 # Skill: generate_scripts
 
-> Wired: exposed as the `generate_scripts`, `validate_generated_script` and
-> `save_generated_script` MCP tools in `IDE/AuditTools.cs`, and surfaced in VS Code as the
-> `/generateScript` command (`.github/prompts/generateScript.prompt.md`) backed by the
-> `.github/skills/generate-script` skill.
+> Wired: exposed as the `generate_scripts`, `get_item_generation_prompt`,
+> `validate_generated_script` and `save_generated_script` MCP tools in `IDE/AuditTools.cs`, and
+> surfaced in VS Code as the `/generateScript` command
+> (`.github/prompts/generateScript.prompt.md`) backed by the `.github/skills/generate-script`
+> skill and the `.github/agents/sql-script-generator.agent.md` per-item subagent.
 
 ## Purpose
 Generate deterministic, read-only SQL/PowerShell audit scripts for one or more checklist
@@ -24,11 +25,12 @@ and no credentials.
 |-------------|----------|--------------------------------------------------------------------|
 | items       | Yes      | Checklist IDs: single (`1.1.2`), list (`1.1.2,3.1.1`) or inclusive range in checklist order (`1.1.1 - 2.1.4`). |
 | batch       | No       | 1-based batch number (10 items per batch). Defaults to 1; pass the same `items` with `batch+1` for the next batch. |
-| checklistId | Yes†     | (save) The checklist ID the generated script belongs to.           |
+| mode        | No       | `subagent` (default) returns a fan-out manifest; `inline` returns the prompts for the calling conversation to author. |
+| checklistId | Yes†     | (get/save) The checklist ID being generated.                       |
 | response    | Yes†     | (save) The complete raw generator output for that item.            |
 | validationVerdict | Yes† | (save) The C1-C7 verdict. Omit on the first call to receive the validation prompt. |
 
-† Used by `save_generated_script` after the model authors each script.
+† Used by `get_item_generation_prompt` and `save_generated_script` inside the per-item subagent.
 
 ## Prompt templates (mandatory)
 Every stage runs on the standard templates in `Backend/agents/prompts/`; the host never
@@ -44,25 +46,37 @@ substitutes its own reasoning. A missing or empty template is a hard error.
    sorted in checklist order. A range is resolved by *position* in `master-checklist.json`,
    not by numeric comparison, so `1.1.1 - 2.1.4` means every item between those two entries.
    Unresolvable IDs are reported and skipped.
-2. The resolved list is served in batches of 10 (`GenerationBatchSize`, matching
-   `ScriptGeneratorAgent.RunAsync`). One call returns the generator system prompt plus the
-   per-item requests for **that batch only**, notes which IDs already have a script (they are
-   overwritten on save), and prints the exact next call:
-   `generate_scripts(items="<same value>", batch=<n+1>)`. Calling past the last batch returns
-   an "all batches complete" message instead of prompts.
-3. Copilot Chat is the AI: for each item in the batch it writes the ANALYSIS, decides
-   FEASIBLE, and emits the raw response (FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC
-   fields plus the script between `---SCRIPT_START---` and `---SCRIPT_END---`). The batch is
-   generated in parallel and fully saved before the next batch is requested, mirroring the
-   WPF flow.
-4. `save_generated_script` runs the deterministic gate (`ScriptOutputValidator`), then —
+2. The resolved list is served ONE BATCH OF 10 AT A TIME (`GenerationBatchSize`, matching
+   `ScriptGeneratorAgent.RunAsync`). One call covers **that batch only**, notes which IDs already
+   have a script (they are overwritten on save), reports what `execution-results.json` recorded
+   for the *previous* batch, and prints the exact next call:
+   `generate_scripts(items="<same value>", batch=<n+1>)`. Calling past the last batch returns the
+   recorded outcome for every requested ID instead of prompts, so a silently dropped item shows
+   up as `NOT RECORDED`.
+3. **Subagent mode (default).** The batch response is a dispatch manifest: one
+   `runSubagent(agentName="sql-script-generator", ...)` line per item, launched together so the
+   items are generated concurrently in independent sessions — the IDE equivalent of the WPF
+   flow's 10 concurrent `ProcessItemAsync` tasks, each with its own LLM session. Every subagent
+   owns its item's whole loop (fetch prompt → generate → format gate → C1-C7 review → save →
+   retry ×3) and returns a single status line. The subagent inherits the parent's model: the
+   agent file deliberately sets no `model:`.
+4. **Inline mode (`mode="inline"`).** Fallback when subagents are unavailable, and reasonable
+   for 1-3 items. The batch response carries the generator system prompt plus every per-item
+   request, and the calling conversation authors and saves the scripts itself.
+5. Whoever authors an item writes the ANALYSIS, decides FEASIBLE, and emits the raw response
+   (FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields plus the script between
+   `---SCRIPT_START---` and `---SCRIPT_END---`).
+6. `save_generated_script` runs the deterministic gate (`ScriptOutputValidator`), then —
    when no verdict was supplied — returns the filled validation prompts and saves nothing.
    `validate_generated_script` returns that same review request on demand.
-5. Copilot performs the C1-C7 review using only those templates and calls
+7. The reviewer performs the C1-C7 review using only those templates and calls
    `save_generated_script` again with the verdict. `VERDICT: VALID` saves; `VERDICT: INVALID`
    with a corrected script re-runs the format gate against the correction and then saves;
    `VERDICT: INVALID` without one is rejected (retry up to 3 times). A reply with no
    `VERDICT:` line is rejected so free-form review cannot bypass the templates.
+8. Persistence is serialised behind a semaphore in `AuditTools`, because the mapping and
+   execution-results files are read-modify-write and subagent mode has up to 10 items saving
+   at once.
 
 ## Output
 - Every feasible script outputs the four required fields: `Result`, `Score`,
@@ -80,7 +94,8 @@ substitutes its own reasoning. A missing or empty template is a hard error.
 
 ## Reuses
 - `SQLAuditor.Lib.ScriptGenerationSkill.LoadItemsAsync(ids)` (ID validation + item load)
-- `SQLAuditor.Lib.ScriptGenerationSkill.BuildGenerationInstructions(...)` (generation prompts)
+- `SQLAuditor.Lib.ScriptGenerationSkill.BuildGenerationInstructions(...)` (generation prompts,
+  for a whole batch in inline mode and for a single item in `get_item_generation_prompt`)
 - `SQLAuditor.Lib.ScriptGenerationSkill.BuildValidationInstructions(...)` (validation prompts)
 - `SQLAuditor.Lib.ScriptGenerationSkill.SaveGeneratedScriptAsync(...)` (validate + save)
 - `SQLAuditor.Agents.ScriptOutputValidator`, `ChecklistItemProcessor.ParseValidationResponse`,

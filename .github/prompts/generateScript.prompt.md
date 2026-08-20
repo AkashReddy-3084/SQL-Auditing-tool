@@ -21,19 +21,23 @@ Follow the repository skill `.github/skills/generate-script/SKILL.md` exactly. I
    parses single IDs, comma-separated lists and ranges itself — do not pre-expand them and
    do not reformat them. Only ask a question if no checklist ID was supplied at all.
 3. Use the MCP tools, not `tools/sql-auditor.ps1` and not file-editing tools.
-4. The tool serves the items in **batches of 10**, mirroring the WPF Generate Scripts flow.
-   For the current batch: generate every item (ANALYSIS → FEASIBLE → the raw response with
-   the `---SCRIPT_START---` / `---SCRIPT_END---` markers) following the generator system
-   prompt the tool returned.
-5. Save each item with `save_generated_script`. The first call runs the format gate and
-   returns the C1-C7 validation prompt without saving; review the script using only those
-   checks and call `save_generated_script` again with the verdict. Correct and retry up to
-   3 times on a validation failure.
-6. Only after every item in the batch is saved (or recorded as not feasible/failed), call
-   `generate_scripts` again with the **same** `items` value and the next batch number.
-   Keep going without stopping until the tool reports the final batch.
-7. Scripts, `deterministic-script-mapping.json` and `execution-results.json` entries for an
+4. The tool serves **one batch of 10 items at a time** and defaults to **subagent mode**: it
+   returns a dispatch manifest, not the scripts. Issue every `runSubagent` call it lists **in a
+   single message** so the items are generated concurrently in independent sessions. Each
+   `sql-script-generator` subagent owns its item's whole loop — fetching the prompt, writing the
+   script, running the C1-C7 review, saving, retrying up to 3 times — and returns one status line.
+5. In subagent mode do NOT write any script yourself and do NOT call
+   `get_item_generation_prompt`, `validate_generated_script` or `save_generated_script`. Your job
+   is to dispatch, collect the status lines, and advance the batch.
+6. Only after every subagent in the batch has returned, call `generate_scripts` again with the
+   **same** `items` value and the next batch number. Its header reports what was actually recorded
+   for the previous batch — re-dispatch any ID shown as `NOT RECORDED`. Keep going without
+   stopping until the tool reports the final batch, then call it once more to confirm the
+   recorded outcome for every requested ID.
+7. If subagents cannot be launched, re-request the same batch with `mode="inline"` and generate
+   and save the scripts yourself, following the generator system prompt the tool returns.
+8. Scripts, `deterministic-script-mapping.json` and `execution-results.json` entries for an
    ID that already has a script are **overwritten** by the tool. Regenerate those items from
    scratch — never skip them and never reuse the previous content.
-8. Finish with a per-ID summary: generated (script type + scope), not feasible (reason),
-   failed (last validation error).
+9. Finish with a per-ID summary: generated (script type + scope), not feasible (reason),
+   failed (last validation error), based on the tool's recorded-outcome table.
