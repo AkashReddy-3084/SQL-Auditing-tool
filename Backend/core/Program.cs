@@ -676,7 +676,8 @@ namespace SQLAuditor
         // Non-interactive CLI: `save_generated_script` subcommand
         // Validates and saves one Copilot-generated script (used after generate_scripts).
         // The raw response can be supplied via --response-file <path> (preferred for large
-        // scripts) or inline via --response "<text>".
+        // scripts) or inline via --response "<text>". Called without a verdict it returns the
+        // standard C1-C7 validation prompt; pass the review back via --validation-file/--validation.
         // ---------------------------------------------------------------------
         static async Task<int> RunSaveGeneratedScriptCommandAsync(string[] args)
         {
@@ -684,6 +685,8 @@ namespace SQLAuditor
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
                 Console.WriteLine("Usage: sqlauditor save_generated_script --id <id> (--response-file <path> | --response \"<raw response>\")");
+                Console.WriteLine("                                       [--validation-file <path> | --validation \"<verdict>\"]");
+                Console.WriteLine("  Without a verdict it prints the C1-C7 validation prompt and saves nothing.");
                 return 0;
             }
 
@@ -712,12 +715,31 @@ namespace SQLAuditor
                 return 2;
             }
 
+            var verdict = GetOption(opts, "validation");
+            var verdictFile = GetOption(opts, "validation-file") ?? GetOption(opts, "validationfile");
+            if (string.IsNullOrWhiteSpace(verdict) && !string.IsNullOrWhiteSpace(verdictFile))
+            {
+                if (!File.Exists(verdictFile))
+                {
+                    Console.Error.WriteLine($"Error: --validation-file not found: {verdictFile}");
+                    return 2;
+                }
+                verdict = await File.ReadAllTextAsync(verdictFile);
+            }
+
             try
             {
-                var result = await SQLAuditor.Lib.ScriptGenerationSkill.SaveGeneratedScriptAsync(id, response);
+                var result = await SQLAuditor.Lib.ScriptGenerationSkill.SaveGeneratedScriptAsync(
+                    id,
+                    response,
+                    verdict,
+                    "run: sqlauditor save_generated_script --id <id> --response-file <path> --validation-file <path-to-verdict-file>");
                 Console.WriteLine(result);
                 // A validation failure is surfaced to Copilot as a non-zero exit so it retries.
                 return result.StartsWith("VALIDATION FAILED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("VALIDATION REJECTED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("VALIDATION VERDICT NOT RECOGNISED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("CORRECTED SCRIPT STILL INVALID", StringComparison.OrdinalIgnoreCase)
                     || result.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
             }
             catch (Exception ex)

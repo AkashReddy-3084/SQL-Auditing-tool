@@ -14,13 +14,16 @@ namespace SQLAuditor.Lib;
 /// <summary>
 /// Shared "generate scripts" skill for the IDE (MCP) and CLI hosts. Unlike the WPF app —
 /// which drives <see cref="ScriptGeneratorAgent"/> against a configured LLM endpoint —
-/// GitHub Copilot is the AI here, so this helper makes NO LLM/API calls. It reuses the
-/// existing pipeline pieces (the generation prompts, <see cref="ScriptOutputValidator"/>,
-/// the <see cref="ScriptGenerationResponse"/> parser, and the exact on-disk layout that
-/// <see cref="ScriptGeneratorAgent"/> produces): Copilot generates each script from the
-/// prompt this class hands it, then calls back to <see cref="SaveGeneratedScriptAsync"/>,
-/// which validates, and on success saves the script and updates the mapping/results —
-/// mirroring the WPF pipeline (generate → validate → correct/retry → save → update).
+/// GitHub Copilot is the AI here, so this helper makes NO LLM/API calls. It runs the same
+/// pipeline on the same four prompt templates in Backend/agents/prompts
+/// (script_generator_system.txt, script_generator_user.txt, script_validation_system.txt,
+/// script_validation_user.txt), plus <see cref="ScriptOutputValidator"/>, the
+/// <see cref="ScriptGenerationResponse"/> parser and the exact on-disk layout that
+/// <see cref="ScriptGeneratorAgent"/> produces. Copilot generates each script from the
+/// generation prompts this class hands it, then calls back to
+/// <see cref="SaveGeneratedScriptAsync"/>, which runs the deterministic format gate, hands
+/// back the validation prompts for the C1-C7 review, and only saves once that review returns
+/// a verdict — mirroring the WPF pipeline (generate → validate → correct/retry → save → update).
 /// </summary>
 public static class ScriptGenerationSkill
 {
@@ -48,6 +51,33 @@ public static class ScriptGenerationSkill
         throw new DirectoryNotFoundException(
             "Cannot locate the repository root (Backend/checklist/master-checklist.json not found). "
             + "Run from the SQL-Auditing-tool folder.");
+    }
+
+    /// <summary>
+    /// Folder holding the four canonical prompt templates this flow must run on:
+    /// script_generator_system.txt, script_generator_user.txt, script_validation_system.txt
+    /// and script_validation_user.txt.
+    /// </summary>
+    public static string ResolvePromptsDir() =>
+        Path.Combine(ResolveBasePath(), "agents", "prompts");
+
+    // Missing template is a hard failure: silently falling back would let the host answer from
+    // its own reasoning instead of the standard schema and validation rules.
+    private static string ReadPromptTemplate(string fileName)
+    {
+        var path = Path.Combine(ResolvePromptsDir(), fileName);
+        if (!File.Exists(path))
+            throw new FileNotFoundException(
+                $"Required prompt template '{fileName}' was not found at '{path}'. "
+                + "Script generation and validation must run on the standard templates.",
+                path);
+
+        var text = File.ReadAllText(path);
+        if (string.IsNullOrWhiteSpace(text))
+            throw new InvalidDataException(
+                $"Required prompt template '{fileName}' at '{path}' is empty.");
+
+        return text;
     }
 
     /// <summary>
@@ -108,10 +138,8 @@ public static class ScriptGenerationSkill
         IReadOnlyList<string> unknown,
         string saveInvocationHint)
     {
-        var basePath = ResolveBasePath();
-        var promptsDir = Path.Combine(basePath, "agents", "prompts");
-        var systemPrompt = File.ReadAllText(Path.Combine(promptsDir, "script_generator_system.txt"));
-        var userTemplate = File.ReadAllText(Path.Combine(promptsDir, "script_generator_user.txt"));
+        var systemPrompt = ReadPromptTemplate("script_generator_system.txt");
+        var userTemplate = ReadPromptTemplate("script_generator_user.txt");
 
         var sb = new StringBuilder();
         sb.AppendLine("=== SCRIPT GENERATION (not evaluation) ===");
@@ -139,8 +167,12 @@ public static class ScriptGenerationSkill
         sb.AppendLine("  and Finding (see the system prompt for the required templates).");
         sb.AppendLine($"- After generating an item, save it: {saveInvocationHint}");
         sb.AppendLine("  Pass the COMPLETE raw response (all fields + the script between the markers) as 'response'.");
-        sb.AppendLine("- The save step validates the script. If it returns a validation error, CORRECT the script and");
-        sb.AppendLine("  save again (retry up to 3 times), exactly like the pipeline's correction/retry loop.");
+        sb.AppendLine("- The save step runs the deterministic format gate and then returns the VALIDATION SYSTEM");
+        sb.AppendLine("  PROMPT for that script. Review the script with ONLY the C1-C7 checks that prompt defines —");
+        sb.AppendLine("  not your own criteria — and save again with the resulting verdict. Nothing is written to");
+        sb.AppendLine("  disk until that verdict is supplied.");
+        sb.AppendLine("- If a save returns a validation error, CORRECT the script and save again (retry up to 3");
+        sb.AppendLine("  times), exactly like the pipeline's correction/retry loop.");
         sb.AppendLine();
 
         sb.AppendLine("===== GENERATOR SYSTEM PROMPT (follow this precisely for every item) =====");
@@ -160,14 +192,57 @@ public static class ScriptGenerationSkill
     }
 
     /// <summary>
+    /// Builds the review request for ONE generated script from the canonical validation templates
+    /// (script_validation_system.txt + script_validation_user.txt). This is the IDE/CLI equivalent
+    /// of <see cref="ChecklistItemProcessor.ValidateScriptAsync"/>: Copilot performs the C1-C7
+    /// review the template defines and hands the verdict back to
+    /// <see cref="SaveGeneratedScriptAsync"/>.
+    /// </summary>
+    public static string BuildValidationInstructions(
+        ScriptGenChecklistItem item,
+        ScriptGenerationResponse response,
+        string saveInvocationHint)
+    {
+        var systemPrompt = ReadPromptTemplate("script_validation_system.txt");
+        var userTemplate = ReadPromptTemplate("script_validation_user.txt");
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== VALIDATION REQUIRED — [{item.ChecklistId}] (NOT SAVED YET) ===");
+        sb.AppendLine("The script passed the deterministic format gate. It is NOT written to disk until you");
+        sb.AppendLine("return a verdict. Act as the script validator: apply the VALIDATION SYSTEM PROMPT below");
+        sb.AppendLine("to the script in the request that follows, using ONLY its C1-C7 checks and verdict rules.");
+        sb.AppendLine("Do not substitute your own review criteria and do not re-run the generator prompt.");
+        sb.AppendLine();
+        sb.AppendLine($"Then save again WITH the verdict: {saveInvocationHint}");
+        sb.AppendLine("The verdict must use the template's response format exactly:");
+        sb.AppendLine("  - 'VERDICT: VALID' on its own when no C1-C7 violation exists.");
+        sb.AppendLine("  - 'VERDICT: INVALID' plus ISSUES, and the complete corrected script between");
+        sb.AppendLine("    ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- when it is repairable.");
+        sb.AppendLine("A verdict without a 'VERDICT:' line is rejected and nothing is saved.");
+        sb.AppendLine();
+        sb.AppendLine("===== VALIDATION SYSTEM PROMPT (follow this precisely) =====");
+        sb.AppendLine(systemPrompt);
+        sb.AppendLine("===== END VALIDATION SYSTEM PROMPT =====");
+        sb.AppendLine();
+        sb.AppendLine("===== VALIDATION REQUEST =====");
+        sb.AppendLine(FillValidationPrompt(userTemplate, item, response));
+
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Validates a Copilot-generated raw response and, when valid, persists it exactly like
     /// <see cref="ScriptGeneratorAgent"/> does: writes the script file, updates the deterministic
-    /// script mapping and the execution-results file. On a validation failure it returns actionable
-    /// feedback so Copilot can correct the script and resubmit (the pipeline's correction/retry step).
+    /// script mapping and the execution-results file. Mirrors the WPF pipeline stage for stage —
+    /// deterministic format gate, then the template-driven C1-C7 review supplied in
+    /// <paramref name="validationVerdict"/>, then save. On any failure it returns actionable
+    /// feedback so Copilot can correct the script and resubmit.
     /// </summary>
     public static async Task<string> SaveGeneratedScriptAsync(
         string checklistId,
         string rawResponse,
+        string? validationVerdict = null,
+        string? saveInvocationHint = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(checklistId))
@@ -218,6 +293,65 @@ public static class ScriptGenerationSkill
                  + "This is the pipeline's correction/retry step; retry up to 3 times before giving up.";
         }
 
+        // STEP — content review driven by script_validation_system.txt / script_validation_user.txt.
+        // Same stage ChecklistItemProcessor.ValidateScriptAsync runs in the WPF pipeline; here the
+        // host performs it, so nothing is saved until it returns a verdict from those templates.
+        var reviewItem = item ?? new ScriptGenChecklistItem
+        {
+            ChecklistId = checklistId,
+            Category = category,
+            CheckName = checkName,
+            Scope = response.Scope,
+            Description = checkName,
+            ExpectedOutcome = checkName
+        };
+
+        if (string.IsNullOrWhiteSpace(validationVerdict))
+        {
+            return BuildValidationInstructions(
+                reviewItem,
+                response,
+                saveInvocationHint
+                    ?? "call the save command again with the same checklist ID and response, plus the verdict.");
+        }
+
+        // Require the template's verdict line explicitly — the shared parser defaults to valid when
+        // no marker is present, which would let a free-form reply bypass the review.
+        if (!Regex.IsMatch(validationVerdict, @"VERDICT:\s*(VALID|INVALID)", RegexOptions.IgnoreCase))
+        {
+            return $"VALIDATION VERDICT NOT RECOGNISED for [{checklistId}]. Nothing was saved.\n"
+                 + "Review the script against the C1-C7 checks in script_validation_system.txt and resubmit "
+                 + "a verdict that starts with 'VERDICT: VALID' or 'VERDICT: INVALID' in the template's "
+                 + "response format.";
+        }
+
+        var review = ChecklistItemProcessor.ParseValidationResponse(validationVerdict);
+        var correctionNote = string.Empty;
+
+        if (!review.IsValid)
+        {
+            if (string.IsNullOrWhiteSpace(review.CorrectedScript))
+            {
+                return $"VALIDATION REJECTED [{checklistId}] (C1-C7): "
+                     + $"{(string.IsNullOrWhiteSpace(review.Issues) ? "no issues listed" : review.Issues)}\n"
+                     + "Nothing was saved. Supply the complete corrected script between "
+                     + "---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- in the verdict, or "
+                     + "regenerate the item and start the save/validate cycle again (up to 3 times).";
+            }
+
+            response.ScriptContent = review.CorrectedScript;
+
+            var revalidation = new ScriptOutputValidator().Validate(response);
+            if (!revalidation.IsValid)
+            {
+                return $"CORRECTED SCRIPT STILL INVALID for [{checklistId}]: {revalidation.Error}\n"
+                     + $"Review issues were: {review.Issues}\n"
+                     + "Nothing was saved. Correct the script and resubmit.";
+            }
+
+            correctionNote = " Corrected script from the C1-C7 review was applied.";
+        }
+
         // STEP — save the script using the same file layout as ScriptGeneratorAgent.
         var safeId = Regex.Replace(checklistId, @"[^a-zA-Z0-9_.-]+", "_").Trim('_');
         if (string.IsNullOrWhiteSpace(safeId)) safeId = "unknown";
@@ -243,7 +377,7 @@ public static class ScriptGenerationSkill
         });
 
         return $"Saved [{checklistId}] -> {response.ScriptType}/{filename} "
-             + $"(Scope: {response.Scope}). Mapping and execution-results updated.";
+             + $"(Scope: {response.Scope}). Mapping and execution-results updated.{correctionNote}";
     }
 
     private static string FillUserPrompt(string template, ScriptGenChecklistItem item) =>
@@ -254,6 +388,20 @@ public static class ScriptGenerationSkill
             .Replace("{description}", item.Description)
             .Replace("{expected_outcome}", item.ExpectedOutcome)
             .Replace("{scope}", item.Scope ?? "");
+
+    // Placeholder set mirrors ChecklistItemProcessor.ValidateScriptAsync exactly.
+    private static string FillValidationPrompt(
+        string template, ScriptGenChecklistItem item, ScriptGenerationResponse response) =>
+        template
+            .Replace("{checklist_id}", item.ChecklistId)
+            .Replace("{category}", item.Category)
+            .Replace("{check_name}", item.CheckName)
+            .Replace("{description}", item.Description)
+            .Replace("{expected_outcome}", item.ExpectedOutcome)
+            .Replace("{script_type}", response.ScriptType ?? "")
+            .Replace("{scope}", response.Scope ?? "")
+            .Replace("{scoring_logic}", response.ScoringLogic ?? "")
+            .Replace("{script_content}", response.ScriptContent ?? "");
 
     private static void UpsertMapping(
         string basePath, string checklistId, string? scriptFile, ScriptGenerationResponse response)

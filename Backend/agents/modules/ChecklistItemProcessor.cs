@@ -886,7 +886,8 @@ namespace SQLAuditor.Agents
         }
 
 
-        private ScriptValidationResult
+        // Also reused by the IDE/CLI script-generation skill to read back Copilot's C1-C7 verdict.
+        internal static ScriptValidationResult
             ParseValidationResponse(string content)
         {
 

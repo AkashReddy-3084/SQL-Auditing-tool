@@ -15,6 +15,10 @@ namespace SQLAuditor.Mcp;
 [McpServerToolType]
 public static class AuditTools
 {
+    private const string SaveWithVerdictHint =
+        "call save_generated_script(checklistId=\"<id>\", response=\"<same full raw generator output>\", "
+        + "validationVerdict=\"<your VERDICT block>\")";
+
     [McpServerTool(Name = "evaluate")]
     [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (a 4-tab Excel workbook: Summary, Area Detail, Checklists, Risk Register).")]
     public static async Task<string> EvaluateAsync(
@@ -225,14 +229,35 @@ public static class AuditTools
             "call save_generated_script(checklistId=\"<id>\", response=\"<full raw generator output>\")");
     }
 
+    [McpServerTool(Name = "validate_generated_script")]
+    [Description("Return the standard C1-C7 review request for one script YOU generated, built from Backend/agents/prompts/script_validation_system.txt and script_validation_user.txt. Provide the checklist ID and the COMPLETE raw generator response. Review the script using ONLY the checks in the returned prompt, then call 'save_generated_script' with the resulting verdict. 'save_generated_script' returns this same prompt if called without a verdict, so nothing is saved until the review is done.")]
+    public static async Task<string> ValidateGeneratedScriptAsync(
+        [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
+        [Description("The COMPLETE raw generator output for this item, exactly as produced from the generator prompt.")] string response,
+        CancellationToken cancellationToken = default)
+    {
+        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
+            checklistId,
+            response,
+            validationVerdict: null,
+            saveInvocationHint: SaveWithVerdictHint,
+            cancellationToken);
+    }
+
     [McpServerTool(Name = "save_generated_script")]
-    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). The tool validates the script; on success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
+    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
     public static async Task<string> SaveGeneratedScriptAsync(
         [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
         [Description("The COMPLETE raw generator output for this item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string response,
+        [Description("The verdict from the C1-C7 review, in the validation template's response format. Omit on the first call to receive the validation prompt.")] string? validationVerdict = null,
         CancellationToken cancellationToken = default)
     {
-        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(checklistId, response, cancellationToken);
+        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
+            checklistId,
+            response,
+            validationVerdict,
+            SaveWithVerdictHint,
+            cancellationToken);
     }
 
     [McpServerTool(Name = "show_reports")]
@@ -324,6 +349,8 @@ public static class AuditPrompts
       + "for a server name or credentials. Follow the generator system prompt the tool returns: for each item, "
       + "write the analysis, decide feasibility, and author a read-only script that outputs Result, Score, "
       + "DatabaseQueried and Finding. Process the items in batches of up to 10 in parallel. After generating each "
-      + "item, save it with the 'save_generated_script' tool, passing the full raw generator output. If saving "
+      + "item, save it with the 'save_generated_script' tool, passing the full raw generator output. That returns "
+      + "the standard C1-C7 validation prompt: review the script using only those checks, then call "
+      + "'save_generated_script' again with the verdict. Nothing is written to disk until you do. If saving "
       + "returns a validation error, correct the script and save again (retry up to 3 times).";
 }

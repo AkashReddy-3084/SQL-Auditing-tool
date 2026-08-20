@@ -54,7 +54,7 @@ public static class ProviderConfig
         if (string.IsNullOrWhiteSpace(value))
         {
             throw new InvalidOperationException(
-                $"Required setting '{key}' is not configured. Copy .env.example to .env in the repository root and fill it in, or set '{key}' as an environment variable.");
+                $"Required setting '{key}' is not configured. The desktop app asks for the provider settings at runtime; otherwise set '{key}' as an environment variable or add it to a .env file in the repository root.");
         }
 
         value = value.Trim();

@@ -17,7 +17,10 @@ High-level architecture and flow documentation: see `ARCHITECTURE.md`.
 You will also need:
 
 - A Windows account or SQL login on the target instance with at least `VIEW SERVER STATE`.
-- An OpenAI-compatible LLM endpoint and API key, for the AI-assisted checks.
+- An OpenAI-compatible LLM endpoint and API key **for the desktop app only**, which asks for
+  them at runtime — no config file is required. The CLI and the MCP server use GitHub Copilot
+  as their AI instead and need no provider settings at all
+  (see [LLM provider settings](#2-llm-provider-settings)).
 
 Confirm your toolchain before starting:
 
@@ -35,38 +38,34 @@ git clone https://github.com/AkashReddy-3084/SQL-Auditing-tool.git
 cd SQL-Auditing-tool
 ```
 
-### 2. Create your configuration file
+### 2. LLM provider settings
 
-```powershell
-Copy-Item .env.example .env
-```
+The repository ships **no `.env`** and none is needed. Who acts as the AI depends on the host:
 
-### 3. Fill in `.env`
-
-Open `.env` and set each value:
-
-| Key | Required | Description |
+| Host | AI | Configuration |
 | --- | --- | --- |
-| `PROVIDER_BASE_URL` | Yes | Base URL of the LLM endpoint, without `/chat/completions` |
-| `PROVIDER_API_KEY` | Yes | Bearer token for the endpoint |
-| `MODEL` | Yes | Model name to request |
-| `PROVIDER_TIMEOUT_SECONDS` | No | HTTP timeout in seconds; defaults to 240 |
+| Desktop app (WPF) | Your OpenAI-compatible endpoint | Base URL, API Key and Model entered on the LLM panel at runtime; held in memory for the session only |
+| CLI | GitHub Copilot CLI | None — the binary makes no LLM calls |
+| MCP server (VS Code) | GitHub Copilot Chat, via MCP sampling | None — nothing sensitive belongs in `.vscode/mcp.json` |
 
-`.env` is git-ignored and must never be committed. Values in `.env` take precedence over any environment variables of the same name, so a stale variable left over on your machine cannot break the app.
+If you do want the desktop app to pick its settings up automatically, it also honours
+`PROVIDER_BASE_URL`, `PROVIDER_API_KEY`, `MODEL` and `PROVIDER_TIMEOUT_SECONDS` from the
+environment or from a git-ignored `.env` at the repository root. Nothing in the repo requires
+it.
 
-### 4. Restore dependencies
+### 3. Restore dependencies
 
 ```powershell
 dotnet restore Frontend/MainWindow/SQLAuditor.Wpf.csproj
 ```
 
-### 5. Build
+### 4. Build
 
 ```powershell
 dotnet build Frontend/MainWindow/SQLAuditor.Wpf.csproj
 ```
 
-### 6. Run
+### 5. Run
 
 ```powershell
 dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
@@ -75,9 +74,11 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 ## Using the application
 
 1. **Login** — enter the SQL Server FQDN, choose Windows Authentication or SQL Login, and click *Verify Access*. Named instances such as `localhost\SQLEXPRESS` are supported.
-2. **Checklist** — select the controls to evaluate.
-3. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
-4. **Summary** — generates the scored report and lets you export it.
+2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
+3. **Checklist** — select the controls to evaluate.
+4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
+5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklist/scripts/`.
+6. **Summary** — generates the scored report and lets you export it.
 
 ## Command-line interface (CLI)
 
@@ -85,7 +86,8 @@ The same evaluation engine is available as a console command for automation and 
 reuses the checklist, scoring, and report generation. The CLI makes **no LLM/API calls**
 and needs **no `.env` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL`**. Controls that
 need human judgement come back as **Needs Review** for a person — or GitHub Copilot CLI — to
-decide.
+decide, and `generate_scripts` hands the standard generator prompt to Copilot CLI in the same
+spirit.
 
 ### Build
 
@@ -119,7 +121,8 @@ Related subcommands: `resolve_review --id <id> --decision <pass\|fail\|needsrevi
 records a decision for a `Needs Review` item and regenerates the report;
 `enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]`
 records the audit wording for a script-evaluated item (its Outcome, Score, Severity and
-Databases Verified stay script-derived); `show_reports [--kind json]`
+Databases Verified stay script-derived); `generate_scripts --items <ids>` runs the script
+generation pipeline (see below); `show_reports [--kind json]`
 prints the latest report; `--dump-checklist` lists the checklist structure.
 
 Examples:
@@ -149,13 +152,29 @@ optional notes). Results are written to `results/checklist_results.json` and
 The command returns an exit code for scripting: `0` success, `1` one or more controls
 failed, `2` usage/validation error, `3` unexpected error.
 
+### Generate audit scripts
+
+```powershell
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
+```
+
+This is **generation, not evaluation**: no SQL Server, no credentials, no LLM settings.
+`generate_scripts` prints the generator system prompt from `Backend/agents/prompts/` plus one
+filled request per item; Copilot CLI (or you) answers it, and `save_generated_script` runs the
+rest of the pipeline — the deterministic format gate, the C1-C7 validation prompt, the verdict
+and any corrected script — before writing to `Backend/checklist/scripts/{sql,ps1}/` and
+updating `Backend/checklist/deterministic-script-mapping.json` and
+`Backend/results/execution-results.json`. Without `--validation-file` the save command prints
+the validation prompt and saves nothing.
+
 ## GitHub Copilot CLI integration (skill)
 
 The auditor can be driven from **GitHub Copilot CLI** using the `sql-auditor` skill in
 `.github/skills/sql-auditor/`. In this mode **Copilot CLI itself is the AI layer** — signed
 in with the same GitHub Copilot account used by `/login`. The `SQLAuditor` CLI runs the
-evaluation engine only and makes **no LLM/API calls**; **no `.env` / `PROVIDER_BASE_URL` /
-`PROVIDER_API_KEY` / `MODEL`** is used or requested.
+engine, the validation gates and the persistence steps only, and makes **no LLM/API calls**;
+**no `.env` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL`** is used or requested.
 
 Workflow:
 
@@ -174,9 +193,10 @@ Workflow:
 
 The auditor can be driven from **GitHub Copilot Chat** in VS Code through a Model Context
 Protocol (MCP) server. In this mode **Copilot Chat is the AI** — it orchestrates the
-conversation and reviews items that need judgement. The MCP server itself makes **no
-direct LLM/API calls**, so **no `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL` is
-required** for the IDE flow.
+conversation, reviews items that need judgement, and (through MCP **sampling**) answers the
+generation and validation prompts that `generate_scripts` runs. The server makes **no direct
+LLM/API calls**, so **no `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL` is required** for
+the IDE flow.
 
 ### Tools exposed
 
@@ -184,6 +204,8 @@ required** for the IDE flow.
 | --- | --- |
 | `load_checklist` | List checklist areas and item IDs (read-only; no SQL needed) |
 | `evaluate` | Run the ordered evaluation workflow and return outcomes |
+| `generate_scripts` | Run the script-generation pipeline for the given checklist IDs, sampling Copilot for each generation and validation step (no SQL needed) |
+| `save_generated_script` / `validate_generated_script` | Fallback for clients without sampling: validate and save a script the model authored from the returned prompt |
 | `enrich_result` | Record Copilot-authored Finding/Evidence/RiskImpact/Recommendation for a script-evaluated item |
 | `resolve_review` | Record a Pass/Fail decision for an item that needs review |
 | `show_reports` | Return the generated `final_report.md` or `checklist_results.json` |
@@ -233,7 +255,9 @@ Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mir
 6. Copilot shows the final **summary/report** (`show_reports`).
 
 Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
-`mark 3.1.1 as pass, notes: verified naming standards`.
+`mark 3.1.1 as pass, notes: verified naming standards`,
+`generate scripts for checklist 1.1.2, 3.1.1` (this calls `generate_scripts`, never
+`evaluate`).
 
 ## Output
 
@@ -251,7 +275,8 @@ The `results/` folder is git-ignored, as it contains server names and connection
 
 | Symptom | Cause |
 | --- | --- |
-| `Setting 'PROVIDER_API_KEY' still holds the placeholder value` | `.env` was copied but not filled in, or an environment variable of the same name holds a placeholder |
+| `Setting 'PROVIDER_API_KEY' still holds the placeholder value` | The variable (or the `.env` entry) holds a `<placeholder>` instead of a real value |
+| `generate_scripts` falls back to "this client did not offer sampling" | The MCP client does not support `sampling/createMessage`; answer the returned prompt and save with `save_generated_script` |
 | `401 Unauthorized` from the provider | Invalid or expired API key |
 | `error code: 524` or `TaskCanceledException` | The LLM took too long; the request exceeded the provider gateway limit |
 | `Could not open a connection to SQL Server` | Wrong FQDN, instance not running, or TCP/named pipes disabled |

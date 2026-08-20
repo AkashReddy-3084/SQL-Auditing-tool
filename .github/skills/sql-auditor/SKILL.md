@@ -50,8 +50,9 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```
 - **save_generated_script** — validate and save one script you generated (after generate_scripts):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file>
+  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file> [--validation-file <path-to-verdict-file>]
   ```
+  Without `--validation-file` it prints the standard C1-C7 validation prompt and saves nothing.
 - **load_checklist** — list the checklist structure (read-only):
   ```powershell
   powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --dump-checklist
@@ -123,9 +124,15 @@ are needed.
    Every feasible script must output `Result`, `Score`, `DatabaseQueried`, and `Finding`.
    Process the items in batches of up to 10 in parallel.
 3. Save each generated item by writing its complete raw response to a file and running
-   **save_generated_script** with `--id` and `--response-file`. If it reports
-   `VALIDATION FAILED`, correct the script and save again (retry up to 3 times). On success it
-   writes the script under `Backend/checklist/scripts/` and updates
+   **save_generated_script** with `--id` and `--response-file`. The first call runs the format
+   gate and prints the validation system/user prompt for that script. Review the script using
+   ONLY those C1-C7 checks, write your verdict to a file, and run **save_generated_script**
+   again adding `--validation-file`. Use `VERDICT: VALID`, or `VERDICT: INVALID` with `ISSUES:`
+   and the corrected script between `---CORRECTED_SCRIPT_START---` and
+   `---CORRECTED_SCRIPT_END---`. Nothing is written to disk until a verdict is supplied. If it
+   reports `VALIDATION FAILED` or `VALIDATION REJECTED`, correct the script and save again
+   (retry up to 3 times). On success it writes the script under
+   `Backend/checklist/scripts/` and updates
    `Backend/checklist/deterministic-script-mapping.json` and
    `Backend/results/execution-results.json`.
 
@@ -141,6 +148,7 @@ powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 resolve_review --
 # Generate audit scripts for two controls (no server needed), then save one
 powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_scripts --items 1.1.2,3.1.1
 powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt
+powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt --validation-file .\results\3.1.1.verdict.txt
 
 # Show the final report
 powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --show-reports
