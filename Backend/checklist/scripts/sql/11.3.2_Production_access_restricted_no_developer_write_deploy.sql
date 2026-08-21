@@ -1,58 +1,136 @@
-DECLARE @Score INT = 3;
-DECLARE @Result NVARCHAR(10) = 'Pass';
-DECLARE @DevLoginCount INT = 0;
-DECLARE @DisabledDevCount INT = 0;
-DECLARE @WriteDevCount INT = 0;
+-- Checklist: Production access restricted (no developer write/deploy)
+-- Scope: DATABASE
+-- Scoring: 0: Fail - Developer accounts/roles with write/deploy permissions found. 1: Partial Pass - Developer accounts found but restricted to read-only. 2: Mostly Pass - No developer accounts found, but some accounts with broad permissions exist. 3: Pass - No developer accounts found with write/deploy permissions.
 
--- Check for enabled developer/test/qa logins
-SELECT @DevLoginCount = COUNT(*)
-FROM sys.server_principals
-WHERE type IN ('S', 'U')
-  AND is_disabled = 0
-  AND (name LIKE '%dev%' OR name LIKE '%developer%' OR name LIKE '%test%' OR name LIKE '%qa%' OR name LIKE '%staging%')
-  AND name NOT LIKE '##%';
+DECLARE @Score INT = 0;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @DbName NVARCHAR(256);
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Check if any enabled developer logins have write/deploy permissions (sysadmin, dbcreator)
-SELECT @WriteDevCount = COUNT(*)
-FROM sys.server_principals sp
-JOIN sys.server_role_members srm ON sp.principal_id = srm.member_principal_id
-JOIN sys.server_principals sr ON srm.role_principal_id = sr.principal_id
-WHERE sp.type IN ('S', 'U')
-  AND sp.is_disabled = 0
-  AND (sp.name LIKE '%dev%' OR sp.name LIKE '%developer%' OR sp.name LIKE '%test%' OR sp.name LIKE '%qa%' OR sp.name LIKE '%staging%')
-  AND sr.name IN ('sysadmin', 'dbcreator')
-  AND sp.name NOT LIKE '##%';
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
--- Check for CONTROL SERVER permission (direct query, no OBJECT_ID wrapper)
-DECLARE @ControlServerCount INT = 0;
-SELECT @ControlServerCount = COUNT(*)
-FROM sys.server_permissions sp
-JOIN sys.server_principals s ON sp.grantee_principal_id = s.principal_id
-WHERE s.type IN ('S', 'U')
-  AND s.is_disabled = 0
-  AND (s.name LIKE '%dev%' OR s.name LIKE '%developer%' OR s.name LIKE '%test%' OR s.name LIKE '%qa%' OR s.name LIKE '%staging%')
-  AND sp.permission_name = 'CONTROL SERVER'
-  AND s.name NOT LIKE '##%';
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state = 0;
 
-SET @WriteDevCount = @WriteDevCount + @ControlServerCount;
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DbName;
 
--- Check for disabled developer logins
-SELECT @DisabledDevCount = COUNT(*)
-FROM sys.server_principals
-WHERE type IN ('S', 'U')
-  AND is_disabled = 1
-  AND (name LIKE '%dev%' OR name LIKE '%developer%' OR name LIKE '%test%' OR name LIKE '%qa%' OR name LIKE '%staging%')
-  AND name NOT LIKE '##%';
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+        DECLARE @DevWrite NVARCHAR(MAX) = NULL;
+        DECLARE @DevRead NVARCHAR(MAX) = NULL;
+        DECLARE @BroadPerms NVARCHAR(MAX) = NULL;
 
--- Determine score based on findings
-IF @WriteDevCount > 0
-    SET @Score = 0;
-ELSE IF @DisabledDevCount > 0
-    SET @Score = 2;
-ELSE IF @DevLoginCount > 0
-    SET @Score = 1;
-ELSE
-    SET @Score = 3;
+        SELECT @DevWrite = STRING_AGG(name, '' '')
+        FROM (
+            SELECT DISTINCT p.name
+            FROM sys.database_principals p
+            WHERE p.type IN (''S'', ''U'', ''G'')
+              AND (p.name LIKE ''%dev%'' OR p.name LIKE ''%developer%'' OR p.name LIKE ''%test%'' OR p.name LIKE ''%qa%'')
+              AND (
+                  EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id WHERE rm.member_principal_id = p.principal_id AND r.name = ''db_owner'')
+                  OR EXISTS (SELECT 1 FROM sys.database_permissions dp WHERE dp.grantee_principal_id = p.principal_id AND dp.state IN (''G'', ''W'') AND dp.permission_name IN (''ALTER'', ''CONTROL'', ''INSERT'', ''UPDATE'', ''DELETE''))
+              )
+        ) AS t;
+
+        SELECT @DevRead = STRING_AGG(name, '' '')
+        FROM (
+            SELECT DISTINCT p.name
+            FROM sys.database_principals p
+            WHERE p.type IN (''S'', ''U'', ''G'')
+              AND (p.name LIKE ''%dev%'' OR p.name LIKE ''%developer%'' OR p.name LIKE ''%test%'' OR p.name LIKE ''%qa%'')
+              AND NOT EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id WHERE rm.member_principal_id = p.principal_id AND r.name = ''db_owner'')
+              AND NOT EXISTS (SELECT 1 FROM sys.database_permissions dp WHERE dp.grantee_principal_id = p.principal_id AND dp.state IN (''G'', ''W'') AND dp.permission_name IN (''ALTER'', ''CONTROL'', ''INSERT'', ''UPDATE'', ''DELETE''))
+              AND EXISTS (SELECT 1 FROM sys.database_permissions dp WHERE dp.grantee_principal_id = p.principal_id AND dp.state IN (''G'', ''W'') AND dp.permission_name IN (''SELECT'', ''VIEW DEFINITION''))
+        ) AS t;
+
+        SELECT @BroadPerms = STRING_AGG(name, '' '')
+        FROM (
+            SELECT DISTINCT p.name
+            FROM sys.database_principals p
+            WHERE p.type IN (''S'', ''U'', ''G'')
+              AND NOT (p.name LIKE ''%dev%'' OR p.name LIKE ''%developer%'' OR p.name LIKE ''%test%'' OR p.name LIKE ''%qa%'')
+              AND EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id WHERE rm.member_principal_id = p.principal_id AND r.name IN (''db_owner'', ''db_ddladmin'', ''db_securityadmin''))
+        ) AS t;
+
+        DECLARE @DbScore INT;
+        DECLARE @DbFinding NVARCHAR(MAX);
+
+        IF @DevWrite IS NOT NULL
+        BEGIN
+            SET @DbScore = 0;
+            SET @DbFinding = ''Developer accounts with write/deploy access: '' + @DevWrite;
+        END
+        ELSE IF @DevRead IS NOT NULL
+        BEGIN
+            SET @DbScore = 1;
+            SET @DbFinding = ''Developer accounts with read-only access: '' + @DevRead;
+        END
+        ELSE IF @BroadPerms IS NOT NULL
+        BEGIN
+            SET @DbScore = 2;
+            SET @DbFinding = ''No developer accounts found. Accounts with broad permissions: '' + @BroadPerms;
+        END
+        ELSE
+        BEGIN
+            SET @DbScore = 3;
+            SET @DbFinding = ''No developer accounts found with write/deploy permissions.'';
+        END
+
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+        ';
+
+        EXEC sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (@DbName, 0, 'Database evaluation failed');
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @DbName;
+END
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+DROP TABLE #DbResults;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

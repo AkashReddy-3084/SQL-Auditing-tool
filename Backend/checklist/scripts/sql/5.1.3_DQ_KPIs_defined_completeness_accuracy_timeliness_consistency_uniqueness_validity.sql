@@ -1,60 +1,140 @@
 -- Checklist: DQ KPIs defined: completeness, accuracy, timeliness, consistency, uniqueness, validity
 -- Scope: DATABASE
--- Scoring: 0=No DQ references found; 1=1-2 dimensions referenced; 2=3-6 dimensions referenced (capped at 2 due to proxy evidence); Result=Pass if Score>=2
+-- Scoring: 0: None of the 6 KPIs found. 1: 1-2 KPIs found. 2: 3-5 KPIs found. 3: All 6 KPIs found.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
+    SET @DbName = DB_NAME();
+    SET @DatabaseQueried = @DbName;
+    
     BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @DimsFound INT = 0;
-        SELECT @DimsFound = COUNT(DISTINCT Dim)
-        FROM (
-            SELECT ''completeness'' AS Dim FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%completeness%'' OR t.name LIKE ''%completeness%''
-            UNION ALL SELECT ''accuracy'' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%accuracy%'' OR t.name LIKE ''%accuracy%''
-            UNION ALL SELECT ''timeliness'' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%timeliness%'' OR t.name LIKE ''%timeliness%''
-            UNION ALL SELECT ''consistency'' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%consistency%'' OR t.name LIKE ''%consistency%''
-            UNION ALL SELECT ''uniqueness'' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%uniqueness%'' OR t.name LIKE ''%uniqueness%''
-            UNION ALL SELECT ''validity'' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name + ''.'' + t.name LIKE ''%validity%'' OR t.name LIKE ''%validity%''
-            UNION ALL SELECT ''completeness'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%completeness%''
-            UNION ALL SELECT ''accuracy'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%accuracy%''
-            UNION ALL SELECT ''timeliness'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%timeliness%''
-            UNION ALL SELECT ''consistency'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%consistency%''
-            UNION ALL SELECT ''uniqueness'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%uniqueness%''
-            UNION ALL SELECT ''validity'' FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%validity%''
-        ) AS Dims;
-
-        DECLARE @DbScore INT = CASE
-            WHEN @DimsFound = 0 THEN 0
-            WHEN @DimsFound <= 2 THEN 1
-            ELSE 2
+        SET @Sql = N'
+        DECLARE @Kpis TABLE (KpiName NVARCHAR(50));
+        INSERT INTO @Kpis VALUES (''completeness''), (''accuracy''), (''timeliness''), (''consistency''), (''uniqueness''), (''validity'');
+        
+        DECLARE @FoundKpis NVARCHAR(MAX) = '';
+        DECLARE @Count INT = 0;
+        
+        SELECT @FoundKpis = STRING_AGG(k.KpiName, '',''), @Count = COUNT(*)
+        FROM @Kpis k
+        WHERE EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE LOWER(CONVERT(NVARCHAR(MAX), ep.value)) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+           OR EXISTS (SELECT 1 FROM sys.tables t WHERE LOWER(t.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+           OR EXISTS (SELECT 1 FROM sys.columns c WHERE LOWER(c.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+           OR EXISTS (SELECT 1 FROM sys.procedures p WHERE LOWER(p.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+           OR EXISTS (SELECT 1 FROM sys.views v WHERE LOWER(v.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'');
+        
+        DECLARE @DbScore INT = CASE 
+            WHEN @Count = 0 THEN 0
+            WHEN @Count <= 2 THEN 1
+            WHEN @Count <= 5 THEN 2
+            ELSE 3
         END;
-        INSERT INTO #DbResults VALUES (@DbNameParam, @DbScore);
+        
+        DECLARE @DbFinding NVARCHAR(MAX) = CASE 
+            WHEN @Count = 0 THEN ''No DQ KPIs found''
+            ELSE ''Found '' + CAST(@Count AS NVARCHAR(10)) + '' KPI(s): '' + @FoundKpis
+        END;
+        
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (@pDbName, @DbScore, @DbFinding);
         ';
-        EXEC sp_executesql @Sql, N'@DbNameParam NVARCHAR(256)', @DbNameParam = @DbName;
+        EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
     END TRY
     BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (@DbName, 0, 'Database evaluation failed');
     END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @Kpis TABLE (KpiName NVARCHAR(50));
+            INSERT INTO @Kpis VALUES (''completeness''), (''accuracy''), (''timeliness''), (''consistency''), (''uniqueness''), (''validity'');
+            
+            DECLARE @FoundKpis NVARCHAR(MAX) = '';
+            DECLARE @Count INT = 0;
+            
+            SELECT @FoundKpis = STRING_AGG(k.KpiName, '',''), @Count = COUNT(*)
+            FROM @Kpis k
+            WHERE EXISTS (SELECT 1 FROM sys.extended_properties ep WHERE LOWER(CONVERT(NVARCHAR(MAX), ep.value)) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+               OR EXISTS (SELECT 1 FROM sys.tables t WHERE LOWER(t.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+               OR EXISTS (SELECT 1 FROM sys.columns c WHERE LOWER(c.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+               OR EXISTS (SELECT 1 FROM sys.procedures p WHERE LOWER(p.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'')
+               OR EXISTS (SELECT 1 FROM sys.views v WHERE LOWER(v.name) LIKE ''%'' + LOWER(k.KpiName) + ''%'');
+            
+            DECLARE @DbScore INT = CASE 
+                WHEN @Count = 0 THEN 0
+                WHEN @Count <= 2 THEN 1
+                WHEN @Count <= 5 THEN 2
+                ELSE 3
+            END;
+            
+            DECLARE @DbFinding NVARCHAR(MAX) = CASE 
+                WHEN @Count = 0 THEN ''No DQ KPIs found''
+                ELSE ''Found '' + CAST(@Count AS NVARCHAR(10)) + '' KPI(s): '' + @FoundKpis
+            END;
+            
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@pDbName, @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
+
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+
+SET @Finding = ISNULL((
+    SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+    FROM #DbResults
+    WHERE Finding IS NOT NULL AND Finding <> ''
+), 'No non-compliant findings found');
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,59 +1,88 @@
 -- Checklist: No hardcoded literals for environment-specific values
 -- Scope: DATABASE
--- Scoring: 3=Pass (0 matches), 2=Mostly Pass (1-2 matches), 1=Partial Pass (3-5 matches), 0=Fail (>5 matches)
+-- Scoring: 3: No hardcoded literals found. 2: 1-3 instances found. 1: 4-10 instances found. 0: >10 instances found.
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @MatchCount INT = 0;
+DECLARE @MatchList NVARCHAR(MAX) = '';
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), MatchCount INT, DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        INSERT INTO #DbResults (DbName, MatchCount)
-        SELECT ''' + @DbName + ''', COUNT(*)
-        FROM sys.sql_modules m
-        JOIN sys.objects o ON m.object_id = o.object_id
-        WHERE m.definition LIKE ''%\\%\\%''
-           OR m.definition LIKE ''%C:\%''
-           OR m.definition LIKE ''%D:\%''
-           OR m.definition LIKE ''%http://%''
-           OR m.definition LIKE ''%https://%''
-           OR m.definition LIKE ''%''''PROD''''%''
-           OR m.definition LIKE ''%''''DEV''''%''
-           OR m.definition LIKE ''%''''TEST''''%''
-           OR m.definition LIKE ''%''''QA''''%''
-           OR m.definition LIKE ''%''''UAT''''%''
-           OR m.definition LIKE ''%''''STG''''%'';';
-        EXEC sp_executesql @Sql;
-        
-        UPDATE #DbResults
-        SET DbScore = CASE 
-            WHEN MatchCount = 0 THEN 3
-            WHEN MatchCount BETWEEN 1 AND 2 THEN 2
-            WHEN MatchCount BETWEEN 3 AND 5 THEN 1
-            ELSE 0
-        END
-        WHERE DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    SELECT @MatchCount = COUNT(*), @MatchList = ISNULL(STRING_AGG(o.name, '',''), ''None'')
+    FROM sys.sql_modules m
+    JOIN sys.objects o ON m.object_id = o.object_id
+    WHERE o.is_ms_shipped = 0
+      AND (
+        m.definition LIKE ''%Data Source=%'' OR
+        m.definition LIKE ''%Initial Catalog=%'' OR
+        m.definition LIKE ''%server\%'' OR
+        m.definition LIKE ''%C:\%'' OR
+        m.definition LIKE ''%http://%'' OR
+        m.definition LIKE ''%DEV%'' OR
+        m.definition LIKE ''%PROD%'' OR
+        m.definition LIKE ''%QA%'' OR
+        m.definition LIKE ''%TEST%'' OR
+        m.definition LIKE ''%STG%'' OR
+        m.definition LIKE ''%UAT%''
+      );';
+    EXEC sp_executesql @Sql, N'@MatchCount INT OUTPUT, @MatchList NVARCHAR(MAX) OUTPUT', @MatchCount OUTPUT, @MatchList OUTPUT;
+    
+    IF @MatchCount = 0 SET @Score = 3;
+    ELSE IF @MatchCount <= 3 SET @Score = 2;
+    ELSE IF @MatchCount <= 10 SET @Score = 1;
+    ELSE SET @Score = 0;
+    
+    SET @Finding = CASE WHEN @MatchCount = 0 THEN 'No hardcoded literals found' ELSE 'Found in: ' + @MatchList END;
+    INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (@DbName, @Score, @Finding);
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
+    
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+    
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @MatchCount = 0;
+            SET @MatchList = '';
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            SELECT @MatchCount = COUNT(*), @MatchList = ISNULL(STRING_AGG(o.name, '',''), ''None'')
+            FROM sys.sql_modules m
+            JOIN sys.objects o ON m.object_id = o.object_id
+            WHERE o.is_ms_shipped = 0
+              AND (
+                m.definition LIKE ''%Data Source=%'' OR
+                m.definition LIKE ''%Initial Catalog=%'' OR
+                m.definition LIKE ''%server\%'' OR
+                m.definition LIKE ''%C:\%'' OR
+                m.definition LIKE ''%http://%'' OR
+                m.definition LIKE ''%DEV%'' OR
+                m.definition LIKE ''%PROD%'' OR
+                m.definition LIKE ''%QA%'' OR
+                m.definition LIKE ''%TEST%'' OR
+                m.definition LIKE ''%STG%'' OR
+                m.definition LIKE ''%UAT%''
+              );';
+            EXEC sp_executesql @Sql, N'@MatchCount INT OUTPUT, @MatchList NVARCHAR(MAX) OUTPUT', @MatchCount OUTPUT, @MatchList OUTPUT;
+            
+            IF @MatchCount = 0 SET @Score = 3;
+            ELSE IF @MatchCount <= 3 SET @Score = 2;
+            ELSE IF @MatchCount <= 10 SET @Score =

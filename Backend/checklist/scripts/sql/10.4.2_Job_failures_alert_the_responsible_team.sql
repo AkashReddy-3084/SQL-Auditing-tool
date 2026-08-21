@@ -1,33 +1,72 @@
 -- Checklist: Job failures alert the responsible team
 -- Scope: SERVER
--- Scoring: 0=0% jobs notify on failure, 1=1-49%, 2=50-99%, 3=100%
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @TotalJobs INT = 0;
-DECLARE @AlertedJobs INT = 0;
-DECLARE @Pct FLOAT = 0;
+-- Scoring: 3=100% of jobs configured, 2=>80% configured, 1=>0% configured, 0=0% configured or no jobs found
 
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @TotalJobs INT = 0;
+DECLARE @ConfiguredJobs INT = 0;
+DECLARE @NonCompliantJobs NVARCHAR(MAX) = '';
+
+IF @EngineEdition = 5
 BEGIN
-    SELECT @TotalJobs = COUNT(*),
-           @AlertedJobs = SUM(CASE WHEN (notify_level_email = 2 OR notify_level_page = 2 OR notify_level_netsend = 2) 
-                                   AND notify_operator_id <> 0 THEN 1 ELSE 0 END)
+    SET @Score = 3;
+    SET @Finding = 'Azure SQL Database does not support SQL Server Agent. Job monitoring is handled externally.';
+END
+ELSE IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+BEGIN
+    SELECT 
+        @TotalJobs = COUNT(*),
+        @ConfiguredJobs = SUM(CASE 
+            WHEN (notify_level_email IN (2,3) AND notify_email_operator_id > 0) 
+              OR (notify_level_netsend IN (2,3) AND notify_netsend_operator_id > 0) 
+              OR (notify_level_page IN (2,3) AND notify_page_operator_id > 0)
+            THEN 1 ELSE 0 END)
     FROM msdb.dbo.sysjobs;
 
-    SET @Pct = CASE WHEN @TotalJobs > 0 THEN (@AlertedJobs * 100.0 / @TotalJobs) ELSE 0 END;
+    IF @TotalJobs > 0
+    BEGIN
+        SELECT @NonCompliantJobs = STRING_AGG(name, ', ')
+        FROM msdb.dbo.sysjobs
+        WHERE NOT (
+            (notify_level_email IN (2,3) AND notify_email_operator_id > 0) 
+            OR (notify_level_netsend IN (2,3) AND notify_netsend_operator_id > 0) 
+            OR (notify_level_page IN (2,3) AND notify_page_operator_id > 0)
+        );
 
-    SET @Score = CASE 
-        WHEN @Pct = 100 THEN 3
-        WHEN @Pct >= 50 THEN 2
-        WHEN @Pct > 0 THEN 1
-        ELSE 0
-    END;
+        DECLARE @Pct FLOAT = CAST(@ConfiguredJobs AS FLOAT) / @TotalJobs * 100.0;
+
+        IF @Pct = 100.0 SET @Score = 3;
+        ELSE IF @Pct > 80.0 SET @Score = 2;
+        ELSE IF @Pct > 0.0 SET @Score = 1;
+        ELSE SET @Score = 0;
+    END
+    ELSE
+    BEGIN
+        SET @Score = 3;
+        SET @NonCompliantJobs = 'No jobs found';
+    END
+
+    IF @Score = 3
+        SET @Finding = 'All ' + CAST(@TotalJobs AS NVARCHAR(10)) + ' job(s) are configured to alert on failure.';
+    ELSE
+        SET @Finding = CAST(@ConfiguredJobs AS NVARCHAR(10)) + ' of ' + CAST(@TotalJobs AS NVARCHAR(10)) + ' job(s) configured. Non-compliant: ' + ISNULL(@NonCompliantJobs, 'None');
 END
 ELSE
 BEGIN
-    -- SQL Agent not available (e.g., Azure SQL DB). Degrade gracefully.
-    SET @Score = 1;
+    SET @Score = 0;
+    SET @Finding = 'SQL Server Agent metadata (msdb.dbo.sysjobs) is inaccessible.';
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,48 +1,69 @@
--- Checklist: Log/rowcount reconciliation captured per ETL run
--- Scope: DATABASE
--- Scoring: 0=No logging evidence found; 1=Logging tables exist by naming convention but lack explicit rowcount/reconciliation columns; 2=Logging tables with explicit rowcount/reconciliation columns detected (proxy evidence); 3=Fully verified compliance (reserved for cases where actual run logs are queryable, otherwise capped at 2)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+-- Checklist: 10.4.5 Log/rowcount reconciliation captured per ETL run
+-- Scope: SERVER
+-- Scoring: 3 if >=80% of evaluated runs/procedures contain rowcount/reconciliation evidence; 2 if >=50%; 1 if >=20%; 0 if <20% or no runs found.
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @TotalRuns INT = 0;
+DECLARE @CompliantRuns INT = 0;
+DECLARE @Percentage DECIMAL(5,2) = 0;
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Score INT;
+DECLARE @Result NVARCHAR(10);
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        INSERT INTO #DbResults
-        SELECT ''' + @DbName + N''',
-               CASE
-                   WHEN EXISTS (SELECT 1 FROM sys.tables t JOIN sys.columns c ON t.object_id = c.object_id
-                                WHERE (t.name LIKE ''%log%'' OR t.name LIKE ''%reconcil%'' OR t.name LIKE ''%etl%'' OR t.name LIKE ''%load%'' OR t.name LIKE ''%sync%'')
-                                   AND (c.name LIKE ''%row_count%'' OR c.name LIKE ''%processed_rows%'' OR c.name LIKE ''%source_rows%'' OR c.name LIKE ''%target_rows%'' OR c.name LIKE ''%record_count%''))
-                   THEN 2
-                   WHEN EXISTS (SELECT 1 FROM sys.tables t 
-                                WHERE t.name LIKE ''%log%'' OR t.name LIKE ''%reconcil%'' OR t.name LIKE ''%etl%'' OR t.name LIKE ''%load%'' OR t.name LIKE ''%sync%'')
-                   THEN 1
-                   ELSE 0
-               END;';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+    -- Azure SQL Database: No SQL Agent/msdb. Evaluate current database procedures for logging patterns.
+    SELECT 
+        @TotalRuns = COUNT(*),
+        @CompliantRuns = SUM(CASE 
+            WHEN OBJECT_DEFINITION(p.object_id) LIKE '%row%' OR OBJECT_DEFINITION(p.object_id) LIKE '%count%' 
+              OR OBJECT_DEFINITION(p.object_id) LIKE '%insert%' OR OBJECT_DEFINITION(p.object_id) LIKE '%update%' 
+              OR OBJECT_DEFINITION(p.object_id) LIKE '%delete%' OR OBJECT_DEFINITION(p.object_id) LIKE '%log%' 
+              OR OBJECT_DEFINITION(p.object_id) LIKE '%reconcil%' 
+            THEN 1 ELSE 0 END)
+    FROM sys.procedures p
+    WHERE p.is_ms_shipped = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    SET @Percentage = CASE WHEN @TotalRuns > 0 THEN (@CompliantRuns * 100.0) / @TotalRuns ELSE 0 END;
+    SET @Finding = CONCAT('Azure SQL DB: Evaluated ', @TotalRuns, ' user procedures. ', @CompliantRuns, ' contain logging/reconciliation patterns (', CONVERT(VARCHAR(10), @Percentage), '%).');
+    SET @DatabaseQueried = DB_NAME();
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: Evaluate SQL Agent job history (last 30 days)
+    DECLARE @CutoffDate INT = CONVERT(INT, CONVERT(VARCHAR(8), GETDATE() - 30, 112));
+    
+    SELECT 
+        @TotalRuns = COUNT(*),
+        @CompliantRuns = SUM(CASE 
+            WHEN ISNULL(h.messages, '') LIKE '%row%' OR ISNULL(h.messages, '') LIKE '%count%' OR ISNULL(h.messages, '') LIKE '%inserted%' 
+              OR ISNULL(h.messages, '') LIKE '%updated%' OR ISNULL(h.messages, '') LIKE '%deleted%' OR ISNULL(h.messages, '') LIKE '%reconcil%' 
+              OR ISNULL(h.messages, '') LIKE '%loaded%' OR ISNULL(h.messages, '') LIKE '%processed%' OR ISNULL(h.messages, '') LIKE '%records%' 
+              OR ISNULL(h.messages, '') LIKE '%rows%' 
+            THEN 1 ELSE 0 END)
+    FROM msdb.dbo.sysjobhistory h
+    JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+    WHERE h.run_date >= @CutoffDate
+      AND h.step_id = 0;
+
+    SET @Percentage = CASE WHEN @TotalRuns > 0 THEN (@CompliantRuns * 100.0) / @TotalRuns ELSE 0 END;
+    SET @Finding = CONCAT('Evaluated ', @TotalRuns, ' recent job runs. ', @CompliantRuns, ' contained rowcount/reconciliation evidence (', CONVERT(VARCHAR(10), @Percentage), '%).');
+    SET @DatabaseQueried = 'master';
+END
+
+SET @Score = CASE 
+    WHEN @TotalRuns = 0 THEN 0
+    WHEN @Percentage >= 80 THEN 3
+    WHEN @Percentage >= 50 THEN 2
+    WHEN @Percentage >= 20 THEN 1
+    ELSE 0
+END;
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,50 +1,168 @@
 -- Checklist: Schema/object-level permissions align with least privilege
 -- Scope: DATABASE
--- Scoring: 0=Fail (>5 broad grants), 1=Partial Pass (1-5 broad grants), 2=Mostly Pass (0 broad grants), 3=Pass (requires human review, script caps at 2)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0: public has ALTER/CONTROL/REFERENCES/DELETE/UPDATE/INSERT. 1: public has SELECT/EXECUTE on >15 objects. 2: public has SELECT/EXECUTE on <=15 objects. 3: public has no explicit grants or only SELECT/EXECUTE on <=5 objects.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @Violations INT = 0;
-        SELECT @Violations = COUNT(*)
-        FROM sys.database_permissions dp
-        JOIN sys.database_principals p ON dp.grantee_principal_id = p.principal_id
-        WHERE dp.major_id > 0
-          AND dp.class IN (1, 3)
-          AND dp.state IN (''G'', ''W'')
-          AND p.name IN (''public'', ''db_owner'', ''db_ddladmin'')
-          AND dp.permission_name IN (''SELECT'', ''INSERT'', ''UPDATE'', ''DELETE'', ''EXECUTE'', ''ALTER'', ''CONTROL'', ''REFERENCES'');
-        
-        INSERT INTO #DbResults
-        SELECT ''' + REPLACE(@DbName, '''', '''''') + ''',
-               CASE WHEN @Violations = 0 THEN 2
-                    WHEN @Violations <= 5 THEN 1
-                    ELSE 0 END;';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @PublicId INT = (SELECT principal_id FROM sys.database_principals WHERE name = ''public'');
+    DECLARE @DangerousCount INT = 0;
+    DECLARE @SafeCount INT = 0;
+    DECLARE @DangerousObjs NVARCHAR(MAX) = '''';
+    DECLARE @SafeObjs NVARCHAR(MAX) = '''';
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    SELECT @DangerousCount = COUNT(*),
+           @DangerousObjs = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
+    FROM sys.database_permissions p
+    JOIN sys.objects o ON p.major_id = o.object_id
+    WHERE p.grantee_principal_id = @PublicId
+      AND p.minor_id = 0
+      AND p.permission_name IN (''ALTER'', ''CONTROL'', ''REFERENCES'', ''DELETE'', ''UPDATE'', ''INSERT'');
+
+    SELECT @SafeCount = COUNT(*),
+           @SafeObjs = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
+    FROM sys.database_permissions p
+    JOIN sys.objects o ON p.major_id = o.object_id
+    WHERE p.grantee_principal_id = @PublicId
+      AND p.minor_id = 0
+      AND p.permission_name IN (''SELECT'', ''EXECUTE'', ''VIEW DEFINITION'');
+
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
+
+    IF @DangerousCount > 0
+        SET @DbScore = 0;
+    ELSE IF @SafeCount > 15
+        SET @DbScore = 1;
+    ELSE IF @SafeCount > 5
+        SET @DbScore = 2;
+    ELSE
+        SET @DbScore = 3;
+
+    SET @DbFinding = CASE
+        WHEN @DbScore = 0 THEN ''public has dangerous permissions ('' + ISNULL(@DangerousObjs, ''None'') + '')''
+        WHEN @DbScore = 1 THEN ''public has SELECT/EXECUTE on '' + CAST(@SafeCount AS NVARCHAR) + '' objects ('' + ISNULL(@SafeObjs, ''None'') + '')''
+        WHEN @DbScore = 2 THEN ''public has SELECT/EXECUTE on '' + CAST(@SafeCount AS NVARCHAR) + '' objects ('' + ISNULL(@SafeObjs, ''None'') + '')''
+        ELSE ''public has minimal or no explicit grants''
+    END;
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (' + QUOTENAME(@DbName, '''') + ', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
+END
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @PublicId INT = (SELECT principal_id FROM sys.database_principals WHERE name = ''public'');
+            DECLARE @DangerousCount INT = 0;
+            DECLARE @SafeCount INT = 0;
+            DECLARE @DangerousObjs NVARCHAR(MAX) = '''';
+            DECLARE @SafeObjs NVARCHAR(MAX) = '''';
+
+            SELECT @DangerousCount = COUNT(*),
+                   @DangerousObjs = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
+            FROM sys.database_permissions p
+            JOIN sys.objects o ON p.major_id = o.object_id
+            WHERE p.grantee_principal_id = @PublicId
+              AND p.minor_id = 0
+              AND p.permission_name IN (''ALTER'', ''CONTROL'', ''REFERENCES'', ''DELETE'', ''UPDATE'', ''INSERT'');
+
+            SELECT @SafeCount = COUNT(*),
+                   @SafeObjs = STRING_AGG(QUOTENAME(SCHEMA_NAME(o.schema_id)) + ''.'' + QUOTENAME(o.name), '', '')
+            FROM sys.database_permissions p
+            JOIN sys.objects o ON p.major_id = o.object_id
+            WHERE p.grantee_principal_id = @PublicId
+              AND p.minor_id = 0
+              AND p.permission_name IN (''SELECT'', ''EXECUTE'', ''VIEW DEFINITION'');
+
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            IF @DangerousCount > 0
+                SET @DbScore = 0;
+            ELSE IF @SafeCount > 15
+                SET @DbScore = 1;
+            ELSE IF @SafeCount > 5
+                SET @DbScore = 2;
+            ELSE
+                SET @DbScore = 3;
+
+            SET @DbFinding = CASE
+                WHEN @DbScore = 0 THEN ''public has dangerous permissions ('' + ISNULL(@DangerousObjs, ''None'') + '')''
+                WHEN @DbScore = 1 THEN ''public has SELECT/EXECUTE on '' + CAST(@SafeCount AS NVARCHAR) + '' objects ('' + ISNULL(@SafeObjs, ''None'') + '')''
+                WHEN @DbScore = 2 THEN ''public has SELECT/EXECUTE on '' + CAST(@SafeCount AS NVARCHAR) + '' objects ('' + ISNULL(@SafeObjs, ''None'') + '')''
+                ELSE ''public has minimal or no explicit grants''
+            END;
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (' + QUOTENAME(@DbName, '''') + ', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

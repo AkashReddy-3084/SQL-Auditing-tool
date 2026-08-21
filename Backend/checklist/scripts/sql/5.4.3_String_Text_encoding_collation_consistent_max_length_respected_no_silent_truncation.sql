@@ -1,61 +1,126 @@
 -- Checklist: String / Text: encoding/collation consistent; max length respected; no silent truncation
 -- Scope: DATABASE
--- Scoring: 3=Fully compliant (ANSI_PADDING ON, 100% collation match, no fixed-length strings, no zero-length columns); 2=Minor gaps (ANSI_PADDING ON, <5% collation mismatch or fixed-length strings present); 1=Significant gaps (ANSI_PADDING OFF, zero-length columns, or >5% mismatch); 0=No string columns or severe misconfiguration
+-- Scoring: 3: 0 non-compliant columns; 2: 1-5; 1: 6-20; 0: >20. Non-compliant = collation differs from DB default, or max_length <= 0 (varchar(max)/text/ntext).
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @DbScore INT = 0;
-        DECLARE @DbCollation NVARCHAR(128) = DATABASEPROPERTYEX(DB_NAME(), ''Collation'');
-        DECLARE @AnsiPadding INT = DATABASEPROPERTYEX(DB_NAME(), ''IsAnsiPadding'');
-        DECLARE @TotalStrings INT = 0;
-        DECLARE @MismatchedCollation INT = 0;
-        DECLARE @FixedLengthStrings INT = 0;
-        DECLARE @ZeroLengthStrings INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+    DECLARE @DbCollation NVARCHAR(128) = DATABASEPROPERTYEX(DB_ID(), ''Collation'');
+    DECLARE @NonCompliantCount INT = 0;
+    DECLARE @NonCompliantList NVARCHAR(MAX) = '''';
 
-        SELECT @TotalStrings = COUNT(*),
-               @MismatchedCollation = SUM(CASE WHEN c.collation_name <> @DbCollation THEN 1 ELSE 0 END),
-               @FixedLengthStrings = SUM(CASE WHEN t.name IN (''char'', ''nchar'') THEN 1 ELSE 0 END),
-               @ZeroLengthStrings = SUM(CASE WHEN c.max_length = 0 THEN 1 ELSE 0 END)
-        FROM sys.columns c
-        JOIN sys.types t ON c.user_type_id = t.user_type_id
-        JOIN sys.tables tbl ON c.object_id = tbl.object_id
-        WHERE t.name IN (''varchar'', ''nvarchar'', ''char'', ''nchar'', ''text'', ''ntext'');
+    SELECT @NonCompliantCount = COUNT(*),
+           @NonCompliantList = ISNULL(STRING_AGG(s.name + ''.'' + t.name + ''.'' + c.name, '', ''), '''')
+    FROM sys.columns c
+    JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+    JOIN sys.tables t ON c.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE tp.name IN (''varchar'', ''nvarchar'', ''char'', ''nchar'', ''text'', ''ntext'')
+      AND (c.max_length <= 0 OR c.collation_name <> @DbCollation);
 
-        IF @TotalStrings = 0 SET @DbScore = 3;
-        ELSE BEGIN
-            IF @AnsiPadding = 0 OR @ZeroLengthStrings > 0 SET @DbScore = 1;
-            ELSE BEGIN
-                IF @MismatchedCollation = 0 AND @FixedLengthStrings = 0 SET @DbScore = 3;
-                ELSE IF @MismatchedCollation = 0 SET @DbScore = 2;
-                ELSE IF CAST(@MismatchedCollation AS FLOAT) / @TotalStrings < 0.05 SET @DbScore = 2;
-                ELSE SET @DbScore = 1;
-            END
-        END
-        SELECT @DbScore;';
-        INSERT INTO #DbResults
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    DECLARE @DbScore INT;
+    IF @NonCompliantCount = 0 SET @DbScore = 3;
+    ELSE IF @NonCompliantCount <= 5 SET @DbScore = 2;
+    ELSE IF @NonCompliantCount <= 20 SET @DbScore = 1;
+    ELSE SET @DbScore = 0;
+
+    DECLARE @DbFinding NVARCHAR(MAX);
+    IF @NonCompliantCount = 0
+        SET @DbFinding = ''All string columns comply with collation and max length rules.'';
+    ELSE
+        SET @DbFinding = CAST(@NonCompliantCount AS NVARCHAR(10)) + '' non-compliant columns: '' + @NonCompliantList;
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (@DbName, @DbScore, @DbFinding);';
+
+    EXEC sp_executesql @Sql, N'@DbName NVARCHAR(128)', @DbName = @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @DbCollation NVARCHAR(128) = DATABASEPROPERTYEX(DB_ID(), ''Collation'');
+            DECLARE @NonCompliantCount INT = 0;
+            DECLARE @NonCompliantList NVARCHAR(MAX) = '''';
+
+            SELECT @NonCompliantCount = COUNT(*),
+                   @NonCompliantList = ISNULL(STRING_AGG(s.name + ''.'' + t.name + ''.'' + c.name, '', ''), '''')
+            FROM sys.columns c
+            JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+            JOIN sys.tables t ON c.object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE tp.name IN (''varchar'', ''nvarchar'', ''char'', ''nchar'', ''text'', ''ntext'')
+              AND (c.max_length <= 0 OR c.collation_name <> @DbCollation);
+
+            DECLARE @DbScore INT;
+            IF @NonCompliantCount = 0 SET @DbScore = 3;
+            ELSE IF @NonCompliantCount <= 5 SET @DbScore = 2;
+            ELSE IF @NonCompliantCount <= 20 SET @DbScore = 1;
+            ELSE SET @DbScore = 0;
+
+            DECLARE @DbFinding NVARCHAR(MAX);
+            IF @NonCompliantCount = 0
+                SET @DbFinding = ''All string columns comply with collation and max length rules.'';
+            ELSE
+                SET @DbFinding = CAST(@NonCompliantCount AS NVARCHAR(10)) + '' non-compliant columns: '' + @NonCompliantList;
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, @DbScore, @DbFinding);';
+
+            EXEC sp_executesql @Sql, N'@DbName NVARCHAR(128)', @DbName = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
 
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+
+SET @Finding = ISNULL((
+    SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+    FROM #DbResults
+    WHERE Finding IS NOT NULL AND Finding <> ''
+), 'No non-compliant findings found');
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

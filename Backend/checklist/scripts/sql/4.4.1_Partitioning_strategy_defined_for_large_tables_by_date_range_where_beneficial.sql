@@ -1,73 +1,122 @@
 -- Checklist: Partitioning strategy defined for large tables (by date/range) where beneficial
 -- Scope: DATABASE
--- Scoring: 0=No partitioned tables, 1=Partitioned tables exist but none of the top 5 largest are partitioned, 2=Some of the top 5 largest tables are partitioned, 3=All of the top 5 largest tables are partitioned
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0: Large tables exist but none are partitioned by range. 1: Some large tables are partitioned by range. 2: Majority of large tables are partitioned by range. 3: All large tables (>1M rows) are partitioned by range, or no large tables exist.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @LargeTables INT = 0;
-        DECLARE @LargePartitionedTables INT = 0;
-        DECLARE @PartitionedTables INT = 0;
-        DECLARE @DbScore INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    SET NOCOUNT ON;
+    DECLARE @LargeThreshold INT = 1000000;
+    DECLARE @LargeTables TABLE (TableName NVARCHAR(256), RowCount BIGINT, IsRangePartitioned BIT);
+    INSERT INTO @LargeTables
+    SELECT 
+        QUOTENAME(SCHEMA_NAME(t.schema_id)) + ''.'' + QUOTENAME(t.name),
+        SUM(ps.row_count),
+        CASE WHEN pf.type = ''R'' THEN 1 ELSE 0 END
+    FROM sys.tables t
+    JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id < 2
+    JOIN sys.dm_db_partition_stats ps ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+    LEFT JOIN sys.partition_schemes pscheme ON i.data_space_id = pscheme.data_space_id
+    LEFT JOIN sys.partition_functions pf ON pscheme.function_id = pf.function_id
+    GROUP BY t.object_id, t.schema_id, t.name, pf.type
+    HAVING SUM(ps.row_count) >= @LargeThreshold;
 
-        SELECT @LargeTables = COUNT(*)
-        FROM (
-            SELECT TOP 5 t.object_id
-            FROM sys.tables t
-            JOIN sys.dm_db_partition_stats p ON t.object_id = p.object_id
-            WHERE t.type = ''U''
-            GROUP BY t.object_id
-            ORDER BY SUM(p.used_page_count) DESC
-        ) AS TopTables;
+    DECLARE @TotalLarge INT = (SELECT COUNT(*) FROM @LargeTables);
+    DECLARE @PartitionedRange INT = (SELECT COUNT(*) FROM @LargeTables WHERE IsRangePartitioned = 1);
+    DECLARE @NonCompliant NVARCHAR(MAX) = (SELECT STRING_AGG(TableName, ''', ''') FROM @LargeTables WHERE IsRangePartitioned = 0);
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
 
-        SELECT @LargePartitionedTables = COUNT(*)
-        FROM (
-            SELECT TOP 5 t.object_id
-            FROM sys.tables t
-            JOIN sys.dm_db_partition_stats p ON t.object_id = p.object_id
-            WHERE t.type = ''U''
-            GROUP BY t.object_id
-            ORDER BY SUM(p.used_page_count) DESC
-        ) AS TopTables
-        JOIN sys.indexes i ON TopTables.object_id = i.object_id
-        WHERE i.type <= 1 AND i.data_space_id > 100;
+    IF @TotalLarge = 0
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''No large tables (>1M rows) found.'';
+    END
+    ELSE IF @PartitionedRange = @TotalLarge
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''All large tables are partitioned by range.'';
+    END
+    ELSE IF @PartitionedRange >= @TotalLarge * 0.5
+    BEGIN
+        SET @DbScore = 2;
+        SET @DbFinding = ''Most large tables are partitioned by range. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
+    ELSE IF @PartitionedRange > 0
+    BEGIN
+        SET @DbScore = 1;
+        SET @DbFinding = ''Some large tables are partitioned by range. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
+    ELSE
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''Large tables exist but none are partitioned by range. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
 
-        SELECT @PartitionedTables = COUNT(DISTINCT object_id)
-        FROM sys.indexes
-        WHERE type <= 1 AND data_space_id > 100;
-
-        IF @LargeTables = 0 SET @DbScore = 3;
-        ELSE IF @PartitionedTables = 0 SET @DbScore = 0;
-        ELSE IF @LargePartitionedTables = 0 SET @DbScore = 1;
-        ELSE IF @LargePartitionedTables < @LargeTables SET @DbScore = 2;
-        ELSE SET @DbScore = 3;
-
-        INSERT INTO #DbResults VALUES (@DB, @DbScore);';
-        EXEC sp_executesql @Sql, N'@DB NVARCHAR(256)', @DB = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            SET NOCOUNT ON;
+            DECLARE @LargeThreshold INT = 1000000;
+            DECLARE @LargeTables TABLE (TableName NVARCHAR(256), RowCount BIGINT, IsRangePartitioned BIT);
+            INSERT INTO @LargeTables
+            SELECT 
+                QUOTENAME(SCHEMA_NAME(t.schema_id)) + ''.'' + QUOTENAME(t.name),
+                SUM(ps.row_count),
+                CASE WHEN pf.type = ''R'' THEN 1 ELSE 0 END
+            FROM sys.tables t
+            JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id < 2
+            JOIN sys.dm_db_partition_stats ps ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+            LEFT JOIN sys.partition_schemes pscheme ON i.data_space_id = pscheme.data_space_id
+            LEFT JOIN sys.partition_functions pf ON pscheme.function_id = pf.function_id
+            GROUP BY t.object_id, t.schema_id, t.name, pf.type
+            HAVING SUM(ps.row_count) >= @LargeThreshold;
+
+            DECLARE @TotalLarge INT = (SELECT COUNT(*) FROM @LargeTables);
+            DECLARE @PartitionedRange INT = (SELECT COUNT(*) FROM @LargeTables WHERE IsRangePartitioned = 1);
+            DECLARE @NonCompliant NVARCHAR(MAX) = (SELECT STRING_AGG(TableName, ''', ''') FROM @LargeTables WHERE IsRangePartitioned = 0);
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            IF @TotalLarge = 0
+            BEGIN
+                SET @DbScore = 3;
+                SET @DbFinding = ''No large tables (>1M rows) found.'';
+            END
+            ELSE IF @PartitionedRange = @TotalLarge
+            BEGIN
+                SET @DbScore = 3;
+                SET @DbFinding = ''All large tables are partitioned by range.'';
+            END
+            ELSE IF @PartitionedRange >= @TotalLarge * 0.5
+            BEGIN
+                SET @DbScore = 2;
+                SET @DbFinding = ''Most large tables are partition

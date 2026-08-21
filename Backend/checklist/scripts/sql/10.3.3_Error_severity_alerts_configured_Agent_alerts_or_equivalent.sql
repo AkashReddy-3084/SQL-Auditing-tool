@@ -1,17 +1,56 @@
 -- Checklist: Error/severity alerts configured (Agent alerts or equivalent)
 -- Scope: SERVER
--- Scoring: 0=No alerts found, 1=Alerts exist but disabled, 2=Alerts enabled but lack operator, 3=Alerts enabled and linked to operator.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 0: No error/severity alerts found. 1: Alerts exist but are disabled or lack operator notifications. 2: At least one alert enabled with operator notification. 3: Two or more alerts enabled with operator notifications.
 
-SELECT @Score = CASE 
-    WHEN COUNT(*) = 0 THEN 0
-    WHEN MAX(CASE WHEN enabled = 1 AND has_notification = 1 THEN 1 ELSE 0 END) = 1 THEN 3
-    WHEN MAX(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) = 1 THEN 2
-    ELSE 1
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @AlertCount INT = 0;
+DECLARE @EnabledWithOperatorCount INT = 0;
+
+IF @EngineEdition <> 5 AND OBJECT_ID('msdb.dbo.sysalerts') IS NOT NULL
+BEGIN
+    SELECT 
+        @AlertCount = COUNT(*),
+        @EnabledWithOperatorCount = SUM(CASE WHEN a.enabled = 1 AND EXISTS (SELECT 1 FROM msdb.dbo.sysnotifications n WHERE n.alert_id = a.id) THEN 1 ELSE 0 END)
+    FROM msdb.dbo.sysalerts a
+    WHERE a.message_id > 0 OR a.severity > 0;
+
+    -- Fix: Handle NULL from SUM() when no rows match the CASE condition
+    SET @EnabledWithOperatorCount = ISNULL(@EnabledWithOperatorCount, 0);
+
+    IF @AlertCount = 0
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = 'No error/severity alerts configured.';
+    END
+    ELSE IF @EnabledWithOperatorCount = 0
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = CAST(@AlertCount AS NVARCHAR) + ' alert(s) found, but none are enabled or have operator notifications.';
+    END
+    ELSE IF @EnabledWithOperatorCount = 1
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = CAST(@EnabledWithOperatorCount AS NVARCHAR) + ' enabled alert(s) with operator notification(s) configured.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = CAST(@EnabledWithOperatorCount AS NVARCHAR) + ' enabled alert(s) with operator notification(s) configured.';
+    END
 END
-FROM msdb.dbo.sysalerts
-WHERE event_source_type IN (0, 1) AND event_source > 0;
+ELSE
+BEGIN
+    SET @Score = 1;
+    SET @Finding = 'SQL Agent alerts not available on this platform/edition. Manual review required for equivalent monitoring.';
+    -- NOTE: This script provides automated evidence. Full compliance requires human review.
+END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

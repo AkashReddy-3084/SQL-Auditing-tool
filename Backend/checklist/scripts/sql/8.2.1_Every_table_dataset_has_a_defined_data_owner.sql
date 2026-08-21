@@ -1,57 +1,170 @@
 -- Checklist: Every table/dataset has a defined data owner
 -- Scope: DATABASE
--- Scoring: 0=0% tables have owner metadata, 1=1-49%, 2=50-100%, 3=Capped at 2 (proxy evidence requires human validation of actual values)
+-- Scoring: 3=All tables have owner; 2=>90% have owner; 1=>50% have owner; 0=<=50% have owner
+
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @DbName NVARCHAR(128);
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+    -- Azure SQL Database: Evaluate current connected database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
         DECLARE @TotalTables INT;
         DECLARE @TablesWithOwner INT;
-        DECLARE @Pct FLOAT;
-        DECLARE @DbScore INT;
+        DECLARE @MissingTables NVARCHAR(MAX);
 
         SELECT @TotalTables = COUNT(*) FROM sys.tables;
-        SELECT @TablesWithOwner = COUNT(DISTINCT t.object_id)
+
+        SELECT @TablesWithOwner = COUNT(*)
         FROM sys.tables t
-        INNER JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.minor_id = 0
-        WHERE ep.name LIKE ''%owner%'' OR ep.name LIKE ''%steward%'' OR ep.name LIKE ''%contact%'' OR ep.name LIKE ''%DataOwner%'';
+        INNER JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.class = 1
+        WHERE ep.name IN (''DataOwner'', ''Owner'', ''Data_Owner'', ''data_owner'', ''owner'');
 
-        SET @Pct = CASE WHEN @TotalTables = 0 THEN 100.0 ELSE (@TablesWithOwner * 100.0) / @TotalTables END;
+        SELECT @MissingTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+        FROM sys.tables t
+        LEFT JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.class = 1
+            AND ep.name IN (''DataOwner'', ''Owner'', ''Data_Owner'', ''data_owner'', ''owner'')
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE ep.name IS NULL;
 
-        SET @DbScore = CASE
-            WHEN @Pct >= 50 THEN 2
-            WHEN @Pct >= 1 THEN 1
-            ELSE 0
-        END;
+        DECLARE @DbScore INT;
+        DECLARE @DbFinding NVARCHAR(MAX);
 
-        INSERT INTO #DbResults VALUES (@DbName, @DbScore);
-        ';
-        EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        IF @TotalTables = 0
+        BEGIN
+            SET @DbScore = 3;
+            SET @DbFinding = ''No tables found'';
+        END
+        ELSE
+        BEGIN
+            IF @TablesWithOwner = @TotalTables
+                SET @DbScore = 3;
+            ELSE IF CAST(@TablesWithOwner AS FLOAT) / @TotalTables >= 0.9
+                SET @DbScore = 2;
+            ELSE IF CAST(@TablesWithOwner AS FLOAT) / @TotalTables >= 0.5
+                SET @DbScore = 1;
+            ELSE
+                SET @DbScore = 0;
+
+            SET @DbFinding = ISNULL(@MissingTables, ''No non-compliant objects found'');
+        END
+
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (' + QUOTENAME(@DbName, '''') + N', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: Iterate all online user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalTables INT;
+            DECLARE @TablesWithOwner INT;
+            DECLARE @MissingTables NVARCHAR(MAX);
+
+            SELECT @TotalTables = COUNT(*) FROM sys.tables;
+
+            SELECT @TablesWithOwner = COUNT(*)
+            FROM sys.tables t
+            INNER JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.class = 1
+            WHERE ep.name IN (''DataOwner'', ''Owner'', ''Data_Owner'', ''data_owner'', ''owner'');
+
+            SELECT @MissingTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+            FROM sys.tables t
+            LEFT JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND ep.class = 1
+                AND ep.name IN (''DataOwner'', ''Owner'', ''Data_Owner'', ''data_owner'', ''owner'')
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE ep.name IS NULL;
+
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            IF @TotalTables = 0
+            BEGIN
+                SET @DbScore = 3;
+                SET @DbFinding = ''No tables found'';
+            END
+            ELSE
+            BEGIN
+                IF @TablesWithOwner = @TotalTables
+                    SET @DbScore = 3;
+                ELSE IF CAST(@TablesWithOwner AS FLOAT) / @TotalTables >= 0.9
+                    SET @DbScore = 2;
+                ELSE IF CAST(@TablesWithOwner AS FLOAT) / @TotalTables >= 0.5
+                    SET @DbScore = 1;
+                ELSE
+                    SET @DbScore = 0;
+
+                SET @DbFinding = ISNULL(@MissingTables, ''No non-compliant objects found'');
+            END
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (' + QUOTENAME(@DbName, '''') + N', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

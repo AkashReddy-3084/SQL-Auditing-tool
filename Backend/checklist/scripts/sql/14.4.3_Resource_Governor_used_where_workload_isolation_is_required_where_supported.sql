@@ -1,48 +1,75 @@
 -- Checklist: Resource Governor used where workload isolation is required (where supported)
 -- Scope: SERVER
--- Scoring: 0=Disabled, 1=Enabled/No Custom Groups, 2=Enabled/Custom Groups, 3=Enabled/Custom Groups & Pools (or Not Supported)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Scoring: 
+-- 0: Resource Governor is disabled.
+-- 1: Resource Governor is enabled but no classifier function is assigned.
+-- 2: Resource Governor is enabled with a classifier function, but no custom workload groups or external resource pools are configured.
+-- 3: Resource Governor is enabled, classifier function assigned, and at least one custom workload group or external resource pool is configured.
 
--- Check if Resource Governor is supported on this platform (e.g., missing in Azure SQL DB or Standard Edition)
-IF OBJECT_ID('sys.resource_governor_configuration') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT;
+DECLARE @IsEnabled INT;
+DECLARE @ClassifierFuncId INT;
+DECLARE @CustomGroups INT;
+DECLARE @CustomPools INT;
+
+SET @EngineEdition = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+SET @DatabaseQueried = 'master';
+
+IF @EngineEdition = 5
 BEGIN
-    -- Check if Resource Governor is enabled
-    IF EXISTS (SELECT 1 FROM sys.resource_governor_configuration WHERE is_enabled = 1)
+    SET @Score = 3;
+    SET @Finding = 'Resource Governor is not supported in Azure SQL Database. Check marked as Pass per "where supported" clause.';
+END
+ELSE IF OBJECT_ID('sys.resource_governor_configuration') IS NOT NULL
+BEGIN
+    SELECT 
+        @IsEnabled = is_enabled,
+        @ClassifierFuncId = classifier_function_id
+    FROM sys.resource_governor_configuration;
+
+    SELECT @CustomGroups = COUNT(*) 
+    FROM sys.resource_governor_workload_groups 
+    WHERE name NOT IN ('default');
+
+    SELECT @CustomPools = COUNT(*) 
+    FROM sys.resource_governor_external_resource_pools 
+    WHERE name NOT IN ('default');
+
+    IF @IsEnabled = 0
     BEGIN
-        -- Count custom workload groups (exclude the built-in 'default' group)
-        DECLARE @CustomGroupCount INT;
-        SELECT @CustomGroupCount = COUNT(*) FROM sys.resource_governor_workload_groups
-        WHERE name <> 'default';
-
-        IF @CustomGroupCount > 0
-        BEGIN
-            -- Count custom resource pools (exclude built-in 'default' and 'internal' pools)
-            DECLARE @CustomPoolCount INT;
-            SELECT @CustomPoolCount = COUNT(*) FROM sys.resource_governor_resource_pools
-            WHERE name NOT IN ('default', 'internal');
-
-            IF @CustomPoolCount > 0
-                SET @Score = 3; -- Strong evidence of deliberate isolation strategy
-            ELSE
-                SET @Score = 2; -- Evidence of isolation configuration
-        END
-        ELSE
-        BEGIN
-            SET @Score = 1; -- Enabled but no isolation configured
-        END
+        SET @Score = 0;
+        SET @Finding = 'Resource Governor is disabled.';
+    END
+    ELSE IF @ClassifierFuncId IS NULL
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = 'Resource Governor is enabled but no classifier function is assigned.';
+    END
+    ELSE IF @CustomGroups = 0 AND @CustomPools = 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = 'Resource Governor is enabled with a classifier function, but no custom workload groups or external resource pools are configured.';
     END
     ELSE
     BEGIN
-        SET @Score = 0; -- Feature exists but is disabled
+        SET @Score = 3;
+        SET @Finding = 'Resource Governor is fully configured with classifier function, ' + CAST(@CustomGroups AS NVARCHAR(10)) + ' custom workload group(s), and ' + CAST(@CustomPools AS NVARCHAR(10)) + ' custom external resource pool(s).';
     END
 END
 ELSE
 BEGIN
-    -- Feature not supported on this edition/platform (e.g. Azure SQL DB, Standard Edition)
-    -- Checklist requirement is "where supported", so this is a Pass.
-    SET @Score = 3;
+    SET @Score = 2;
+    SET @Finding = 'Resource Governor metadata views are unavailable on this platform/version. Partial credit assigned.';
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

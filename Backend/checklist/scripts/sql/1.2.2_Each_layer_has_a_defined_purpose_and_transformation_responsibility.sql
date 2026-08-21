@@ -1,65 +1,95 @@
 -- Checklist: Each layer has a defined purpose and transformation responsibility
 -- Scope: DATABASE
--- Scoring: 0=No identifiable layer schemas; 1=Layer schemas exist but contain zero tables; 2=Layer schemas with tables and transformation procedures but undocumented purpose; 3=Layer schemas with tables, documented purpose (extended properties), and transformation procedures
+-- Scoring: 3=Clear layer separation (>=2 layer schemas with tables) + documentation (extended properties); 2=Layer separation (>=2 schemas with tables) but missing documentation; 1=Partial separation (1 schema or naming conventions in dbo); 0=No evidence of layered architecture.
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
-SET NOCOUNT ON;
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @LayerCount INT = 0;
-        DECLARE @TableCount INT = 0;
-        DECLARE @DocCount INT = 0;
-        DECLARE @ProcCount INT = 0;
-        DECLARE @DbScore INT = 0;
-
-        SELECT @LayerCount = COUNT(*) FROM sys.schemas
-        WHERE name LIKE ''%stag%'' OR name LIKE ''%ods%'' OR name LIKE ''%dw%'' OR name LIKE ''%mart%'' OR name LIKE ''%raw%'' OR name LIKE ''%curated%'' OR name LIKE ''%presentation%'';
-
-        SELECT @TableCount = COUNT(*) FROM sys.tables t
-        JOIN sys.schemas s ON t.schema_id = s.schema_id
-        WHERE s.name LIKE ''%stag%'' OR s.name LIKE ''%ods%'' OR s.name LIKE ''%dw%'' OR s.name LIKE ''%mart%'' OR s.name LIKE ''%raw%'' OR s.name LIKE ''%curated%'' OR s.name LIKE ''%presentation%'';
-
-        SELECT @DocCount = COUNT(*) FROM sys.extended_properties ep
-        JOIN sys.schemas s ON ep.major_id = s.schema_id AND ep.minor_id = 0
-        WHERE s.name LIKE ''%stag%'' OR s.name LIKE ''%ods%'' OR s.name LIKE ''%dw%'' OR s.name LIKE ''%mart%'' OR s.name LIKE ''%raw%'' OR s.name LIKE ''%curated%'' OR s.name LIKE ''%presentation%'';
-
-        SELECT @ProcCount = COUNT(*) FROM sys.procedures p
-        JOIN sys.schemas s ON p.schema_id = s.schema_id
-        WHERE s.name LIKE ''%stag%'' OR s.name LIKE ''%ods%'' OR s.name LIKE ''%dw%'' OR s.name LIKE ''%mart%'' OR s.name LIKE ''%raw%'' OR s.name LIKE ''%curated%'' OR s.name LIKE ''%presentation%''
-        AND p.name LIKE ''%load%'' OR p.name LIKE ''%transform%'' OR p.name LIKE ''%etl%'' OR p.name LIKE ''%sync%'';
-
-        IF @LayerCount = 0 SET @DbScore = 0;
-        ELSE IF @TableCount = 0 SET @DbScore = 1;
-        ELSE IF @DocCount > 0 AND @ProcCount > 0 SET @DbScore = 3;
-        ELSE SET @DbScore = 2;
-
-        INSERT INTO #DbResults VALUES (@DbNameParam, @DbScore);
-        ';
-        EXEC sp_executesql @Sql, N'@DbNameParam NVARCHAR(256)', @DbNameParam = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @LayerCount INT = 0;
+    DECLARE @DocCount INT = 0;
+    DECLARE @LayerNames NVARCHAR(MAX) = '''';
+    
+    SELECT @LayerCount = COUNT(DISTINCT s.name),
+           @DocCount = COUNT(DISTINCT CASE WHEN ep.name IS NOT NULL THEN s.name END),
+           @LayerNames = STRING_AGG(s.name, '','') WITHIN GROUP (ORDER BY s.name)
+    FROM sys.schemas s
+    LEFT JOIN sys.tables t ON t.schema_id = s.schema_id
+    LEFT JOIN sys.extended_properties ep ON ep.major_id = s.schema_id AND ep.minor_id = 0
+    WHERE s.name IN (''staging'', ''stg'', ''ods'', ''dw'', ''mart'', ''data_warehouse'', ''stage'', ''landing'', ''bronze'', ''silver'', ''gold'')
+      AND EXISTS (SELECT 1 FROM sys.tables t2 WHERE t2.schema_id = s.schema_id);
+      
+    DECLARE @DbScore INT = 0;
+    DECLARE @DbFinding NVARCHAR(MAX) = ''No layered architecture evidence found'';
+    
+    IF @LayerCount >= 2 AND @DocCount >= 2
+        SET @DbScore = 3;
+    ELSE IF @LayerCount >= 2
+        SET @DbScore = 2;
+    ELSE IF @LayerCount = 1
+        SET @DbScore = 1;
+        
+    IF @DbScore >= 1
+        SET @DbFinding = ''Layer schemas found: '' + ISNULL(@LayerNames, ''None'') + ''; Docs: '' + CAST(@DocCount AS NVARCHAR(10));
+        
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (@pDbName, @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @LayerCount INT = 0;
+            DECLARE @DocCount INT = 0;
+            DECLARE @LayerNames NVARCHAR(MAX) = '''';
+            
+            SELECT @LayerCount = COUNT(DISTINCT s.name),
+                   @DocCount = COUNT(DISTINCT CASE WHEN ep.name IS NOT NULL THEN s.name END),
+                   @LayerNames = STRING_AGG(s.name, '','') WITHIN GROUP (ORDER BY s.name)
+            FROM sys.schemas s
+            LEFT JOIN sys.tables t ON t.schema_id = s.schema_id
+            LEFT JOIN sys.extended_properties ep ON ep.major_id = s.schema_id AND ep.minor_id = 0
+            WHERE s.name IN (''staging'', ''stg'', ''ods'', ''dw'', ''mart'', ''data_warehouse'', ''stage'', ''landing'', ''bronze'', ''silver'', ''gold'')
+              AND EXISTS (SELECT 1 FROM sys.tables t2 WHERE t2.schema_id = s.schema_id);
+              
+            DECLARE @DbScore INT = 0;
+            DECLARE @DbFinding NVARCHAR(MAX) = ''No layered architecture evidence found'';
+            
+            IF @LayerCount >= 2 AND @DocCount >= 2
+                SET @DbScore = 3;
+            ELSE IF @LayerCount >= 2
+                SET @DbScore = 2;
+            ELSE IF @LayerCount = 1
+                SET @DbScore = 1;
+                
+            IF @DbScore >= 1
+                SET @DbFinding = ''Layer schemas found: '' + ISNULL(@LayerNames, ''None'') + ''; Docs: '' +

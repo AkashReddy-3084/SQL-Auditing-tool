@@ -1,51 +1,142 @@
 -- Checklist: Consent / purpose tracking integrated where applicable
 -- Scope: DATABASE
--- Scoring: 0=No evidence found; 1=1-2 relevant columns/tables found; 2=3+ relevant columns/tables found; 3=Comprehensive tracking across all major tables (capped at 2 for proxy evidence per guidelines)
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+-- Scoring: 0=No evidence found; 1=Minimal evidence (1-2 relevant columns/tables); 2=Good evidence (3-5 relevant columns/tables or extended properties); 3=Strong evidence (6+ relevant items indicating structured tracking). NOTE: This script provides automated evidence. Full compliance requires human review.
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
-DECLARE @MatchCount INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    SET @MatchCount = 0; -- Reset for each database to prevent stale values
-    
-    BEGIN TRY
-        SET @Sql = N'SELECT @MatchCount = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON c.object_id = t.object_id
-            WHERE c.name LIKE ''%consent%'' OR c.name LIKE ''%purpose%'' OR c.name LIKE ''%tracking%''
-               OR c.name LIKE ''%privacy%'' OR c.name LIKE ''%gdpr%'' OR c.name LIKE ''%ccpa%''
-               OR t.name LIKE ''%consent%'' OR t.name LIKE ''%purpose%'' OR t.name LIKE ''%tracking%'';';
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+        DECLARE @MatchCount INT = 0;
+        DECLARE @MatchList NVARCHAR(MAX) = '';
+        DECLARE @DbScore INT = 0;
         
-        EXEC sp_executesql @Sql, N'@MatchCount INT OUTPUT', @MatchCount OUTPUT;
+        SELECT @MatchCount = COUNT(*),
+               @MatchList = STRING_AGG(QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name) + ''.'' + QUOTENAME(c.name), '', '')
+        FROM sys.columns c
+        JOIN sys.tables t ON c.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE c.name LIKE ''%consent%'' OR c.name LIKE ''%purpose%'' OR c.name LIKE ''%tracking%'' 
+           OR c.name LIKE ''%gdpr%'' OR c.name LIKE ''%privacy%'' OR c.name LIKE ''%opt%'' OR c.name LIKE ''%preference%'';
+           
+        IF @MatchCount > 0
+        BEGIN
+            SELECT @MatchCount = @MatchCount + COUNT(*),
+                   @MatchList = @MatchList + '', '' + STRING_AGG(QUOTENAME(ep.name), '', '')
+            FROM sys.extended_properties ep
+            WHERE ep.name LIKE ''%consent%'' OR ep.name LIKE ''%purpose%'' OR ep.name LIKE ''%tracking%'' 
+               OR ep.name LIKE ''%gdpr%'' OR ep.name LIKE ''%privacy%'';
+        END
         
-        IF @MatchCount >= 3
-            INSERT INTO #DbResults VALUES (@DbName, 2);
-        ELSE IF @MatchCount >= 1
-            INSERT INTO #DbResults VALUES (@DbName, 1);
-        ELSE
-            INSERT INTO #DbResults VALUES (@DbName, 0);
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        IF @MatchCount = 0 SET @DbScore = 0;
+        ELSE IF @MatchCount BETWEEN 1 AND 2 SET @DbScore = 1;
+        ELSE IF @MatchCount BETWEEN 3 AND 5 SET @DbScore = 2;
+        ELSE SET @DbScore = 3;
+        
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (''' + QUOTENAME(@DbName, '''') + ''', @DbScore, ISNULL(@MatchList, ''No non-compliant objects found''));
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @MatchCount INT = 0;
+            DECLARE @MatchList NVARCHAR(MAX) = '';
+            DECLARE @DbScore INT = 0;
+            
+            SELECT @MatchCount = COUNT(*),
+                   @MatchList = STRING_AGG(QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name) + ''.'' + QUOTENAME(c.name), '', '')
+            FROM sys.columns c
+            JOIN sys.tables t ON c.object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE c.name LIKE ''%consent%'' OR c.name LIKE ''%purpose%'' OR c.name LIKE ''%tracking%'' 
+               OR c.name LIKE ''%gdpr%'' OR c.name LIKE ''%privacy%'' OR c.name LIKE ''%opt%'' OR c.name LIKE ''%preference%'';
+               
+            IF @MatchCount > 0
+            BEGIN
+                SELECT @MatchCount = @MatchCount + COUNT(*),
+                       @MatchList = @MatchList + '', '' + STRING_AGG(QUOTENAME(ep.name), '', '')
+                FROM sys.extended_properties ep
+                WHERE ep.name LIKE ''%consent%'' OR ep.name LIKE ''%purpose%'' OR ep.name LIKE ''%tracking%'' 
+                   OR ep.name LIKE ''%gdpr%'' OR ep.name LIKE ''%privacy%'';
+            END
+            
+            IF @MatchCount = 0 SET @DbScore = 0;
+            ELSE IF @MatchCount BETWEEN 1 AND 2 SET @DbScore = 1;
+            ELSE IF @MatchCount BETWEEN 3 AND 5 SET @DbScore = 2;
+            ELSE SET @DbScore = 3;
+            
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (''' + QUOTENAME(@DbName, '''') + ''', @DbScore, ISNULL(@MatchList, ''No non-compliant objects found''));
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

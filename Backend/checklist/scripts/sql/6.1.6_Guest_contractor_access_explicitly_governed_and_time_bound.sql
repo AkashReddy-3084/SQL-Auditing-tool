@@ -1,48 +1,76 @@
 -- Checklist: Guest/contractor access explicitly governed and time-bound
 -- Scope: SERVER
--- Scoring: 0=Fail, 1=Partial Pass, 2=Mostly Pass, 3=Pass
--- NOTE: SQL Server lacks native login expiration. Compliance relies on external governance (IAM/PIM) and role restrictions.
--- Max score is capped at 2 per checklist scoring logic when guest logins exist.
+-- Scoring: 0: No accounts found or all identified accounts lack time-bound controls. 1: Mixed governance; some accounts have controls, others lack them. 2: All accounts show time-bound governance, but some rely on indirect proxies (e.g., recent creation). 3: All identified accounts have explicit time-bound controls (expiration enforced or disabled).
 
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @TotalGuests INT = 0;
-DECLARE @SysadminGuests INT = 0;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Identify potential guest/contractor logins via naming conventions
-SELECT @TotalGuests = COUNT(*)
+DECLARE @GuestLogins TABLE (
+    LoginName NVARCHAR(256),
+    IsExpiredChecked BIT,
+    IsDisabled BIT,
+    DaysOld INT,
+    GovernanceStatus NVARCHAR(50)
+);
+
+INSERT INTO @GuestLogins
+SELECT 
+    sp.name,
+    ISNULL(slo.is_expiration_checked, 0),
+    sp.is_disabled,
+    ISNULL(DATEDIFF(day, sp.create_date, GETDATE()), 9999),
+    CASE 
+        WHEN sp.is_disabled = 1 THEN 'Disabled'
+        WHEN ISNULL(slo.is_expiration_checked, 0) = 1 THEN 'Expiration Enforced'
+        WHEN ISNULL(DATEDIFF(day, sp.create_date, GETDATE()), 9999) <= 90 THEN 'Recent Creation'
+        ELSE 'No Time-Bound Control'
+    END AS GovernanceStatus
 FROM sys.server_principals sp
+LEFT JOIN sys.sql_logins slo ON sp.principal_id = slo.principal_id
 WHERE sp.type IN ('S', 'U')
-  AND (LOWER(sp.name) LIKE '%guest%' OR LOWER(sp.name) LIKE '%contractor%' OR LOWER(sp.name) LIKE '%temp%' 
-    OR LOWER(sp.name) LIKE '%ext%' OR LOWER(sp.name) LIKE '%vendor%' OR LOWER(sp.name) LIKE '%consultant%');
+  AND (sp.name LIKE '%guest%' OR sp.name LIKE '%contractor%' OR sp.name LIKE '%temp%')
+  AND sp.name NOT LIKE '##%';
 
-IF @TotalGuests = 0
+DECLARE @Total INT = (SELECT COUNT(*) FROM @GuestLogins);
+DECLARE @Explicit INT = (SELECT COUNT(*) FROM @GuestLogins WHERE GovernanceStatus IN ('Disabled', 'Expiration Enforced'));
+DECLARE @Proxy INT = (SELECT COUNT(*) FROM @GuestLogins WHERE GovernanceStatus = 'Recent Creation');
+DECLARE @None INT = (SELECT COUNT(*) FROM @GuestLogins WHERE GovernanceStatus = 'No Time-Bound Control');
+
+IF @Total = 0
+BEGIN
+    SET @Score = 0;
+    SET @Finding = 'No guest/contractor accounts identified. Cannot verify time-bound governance.';
+END
+ELSE IF @None = 0 AND @Proxy = 0
 BEGIN
     SET @Score = 3;
+    SET @Finding = 'All ' + CAST(@Total AS NVARCHAR) + ' identified guest/contractor account(s) have explicit time-bound controls.';
+END
+ELSE IF @None = 0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = 'All ' + CAST(@Total AS NVARCHAR) + ' account(s) show time-bound governance. ' + CAST(@Proxy AS NVARCHAR) + ' rely on indirect proxies (recent creation).';
+END
+ELSE IF @Explicit + @Proxy > 0
+BEGIN
+    SET @Score = 1;
+    SET @Finding = CAST(@Total AS NVARCHAR) + ' account(s) found. ' + CAST(@None AS NVARCHAR) + ' lack time-bound controls: ' + 
+        (SELECT STRING_AGG(LoginName, ', ') FROM @GuestLogins WHERE GovernanceStatus = 'No Time-Bound Control');
 END
 ELSE
 BEGIN
-    -- Count guests with sysadmin role (primary restriction check)
-    SELECT @SysadminGuests = COUNT(*)
-    FROM sys.server_principals sp
-    JOIN sys.server_role_members srm ON sp.principal_id = srm.member_principal_id
-    JOIN sys.server_principals sr ON srm.role_principal_id = sr.principal_id
-    WHERE sp.type IN ('S', 'U')
-      AND (LOWER(sp.name) LIKE '%guest%' OR LOWER(sp.name) LIKE '%contractor%' OR LOWER(sp.name) LIKE '%temp%' 
-        OR LOWER(sp.name) LIKE '%ext%' OR LOWER(sp.name) LIKE '%vendor%' OR LOWER(sp.name) LIKE '%consultant%')
-      AND sr.name = 'sysadmin';
-
-    DECLARE @CompliantGuests INT = @TotalGuests - @SysadminGuests;
-
-    IF @SysadminGuests > 0
-        SET @Score = 0;
-    ELSE IF @CompliantGuests = @TotalGuests
-        SET @Score = 2; -- Capped at 2 per checklist: platform lacks native expiration support
-    ELSE IF @CompliantGuests > 0
-        SET @Score = 1;
-    ELSE
-        SET @Score = 0;
+    SET @Score = 0;
+    SET @Finding = CAST(@Total AS NVARCHAR) + ' account(s) found. All lack time-bound controls: ' + 
+        (SELECT STRING_AGG(LoginName, ', ') FROM @GuestLogins);
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

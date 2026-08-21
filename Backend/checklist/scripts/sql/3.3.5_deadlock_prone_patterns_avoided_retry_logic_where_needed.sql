@@ -1,59 +1,199 @@
 -- Checklist: Deadlock-prone patterns avoided; retry logic where needed
 -- Scope: DATABASE
--- Scoring: 0 = <20% coverage, 1 = 20-49%, 2 = 50-79%, 3 = >=80% of relevant procedures contain retry/deadlock mitigation logic.
+-- Scoring: 3=All transactional procedures implement TRY/CATCH error handling; 2=Most have proper handling with minor gaps; 1=Some lack error handling/retry logic; 0=Many procedures use transactions without proper error handling or retry mechanisms.
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @TotalRelevant INT = 0;
-        DECLARE @WithRetry INT = 0;
-        
-        SELECT @TotalRelevant = COUNT(*) FROM sys.procedures p
-        JOIN sys.sql_modules m ON p.object_id = m.object_id
-        WHERE m.definition LIKE CHAR(37) + ''BEGIN TRAN'' + CHAR(37) 
-           OR m.definition LIKE CHAR(37) + ''UPDATE '' + CHAR(37) 
-           OR m.definition LIKE CHAR(37) + ''INSERT '' + CHAR(37) 
-           OR m.definition LIKE CHAR(37) + ''DELETE '' + CHAR(37);
-        
-        SELECT @WithRetry = COUNT(*) FROM sys.procedures p
-        JOIN sys.sql_modules m ON p.object_id = m.object_id
-        WHERE (m.definition LIKE CHAR(37) + ''TRY'' + CHAR(37) AND m.definition LIKE CHAR(37) + ''CATCH'' + CHAR(37))
-          AND (m.definition LIKE CHAR(37) + ''WHILE'' + CHAR(37) OR m.definition LIKE CHAR(37) + ''WAITFOR'' + CHAR(37) OR m.definition LIKE CHAR(37) + ''LOCK_TIMEOUT'' + CHAR(37) OR m.definition LIKE CHAR(37) + ''XACT_ABORT'' + CHAR(37));
-          
-        DECLARE @Pct FLOAT = CASE WHEN @TotalRelevant > 0 THEN (@WithRetry * 100.0 / @TotalRelevant) ELSE 0 END;
-        DECLARE @DbScore INT = 0;
-        
-        IF @Pct >= 80 SET @DbScore = 3;
-        ELSE IF @Pct >= 50 SET @DbScore = 2;
-        ELSE IF @Pct >= 20 SET @DbScore = 1;
-        ELSE SET @DbScore = 0;
-        
-        INSERT INTO #DbResults VALUES (''' + @DbName + ''', @DbScore);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalTrans INT = 0;
+    DECLARE @WithTryCatch INT = 0;
+    DECLARE @NonCompliant NVARCHAR(MAX) = '''';
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    SELECT @TotalTrans = COUNT(*)
+    FROM sys.procedures p
+    JOIN sys.sql_modules m ON p.object_id = m.object_id
+    WHERE m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'';
+
+    SELECT @WithTryCatch = COUNT(*)
+    FROM sys.procedures p
+    JOIN sys.sql_modules m ON p.object_id = m.object_id
+    WHERE (m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'')
+      AND m.definition LIKE ''%TRY%''
+      AND m.definition LIKE ''%CATCH%'';
+
+    IF @TotalTrans > 0
+    BEGIN
+        SELECT @NonCompliant = STRING_AGG(p.name, '', '')
+        FROM sys.procedures p
+        JOIN sys.sql_modules m ON p.object_id = m.object_id
+        WHERE (m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'')
+          AND (m.definition NOT LIKE ''%TRY%'' OR m.definition NOT LIKE ''%CATCH%'');
+    END
+
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
+
+    IF @TotalTrans = 0
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''No transactional procedures found'';
+    END
+    ELSE IF @WithTryCatch = @TotalTrans
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''All '' + CAST(@TotalTrans AS NVARCHAR) + '' transactional procedures implement TRY/CATCH error handling'';
+    END
+    ELSE IF CAST(@WithTryCatch AS FLOAT) / @TotalTrans >= 0.8
+    BEGIN
+        SET @DbScore = 2;
+        SET @DbFinding = ''Most procedures have error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
+    ELSE IF CAST(@WithTryCatch AS FLOAT) / @TotalTrans >= 0.5
+    BEGIN
+        SET @DbScore = 1;
+        SET @DbFinding = ''Some procedures lack error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
+    ELSE
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''Many procedures lack error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+    END
+
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @TotalTrans INT = 0;
+            DECLARE @WithTryCatch INT = 0;
+            DECLARE @NonCompliant NVARCHAR(MAX) = '''';
+
+            SELECT @TotalTrans = COUNT(*)
+            FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'';
+
+            SELECT @WithTryCatch = COUNT(*)
+            FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE (m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'')
+              AND m.definition LIKE ''%TRY%''
+              AND m.definition LIKE ''%CATCH%'';
+
+            IF @TotalTrans > 0
+            BEGIN
+                SELECT @NonCompliant = STRING_AGG(p.name, '', '')
+                FROM sys.procedures p
+                JOIN sys.sql_modules m ON p.object_id = m.object_id
+                WHERE (m.definition LIKE ''%BEGIN TRAN%'' OR m.definition LIKE ''%BEGIN TRANSACTION%'')
+                  AND (m.definition NOT LIKE ''%TRY%'' OR m.definition NOT LIKE ''%CATCH%'');
+            END
+
+            DECLARE @DbScore INT;
+            DECLARE @DbFinding NVARCHAR(MAX);
+
+            IF @TotalTrans = 0
+            BEGIN
+                SET @DbScore = 3;
+                SET @DbFinding = ''No transactional procedures found'';
+            END
+            ELSE IF @WithTryCatch = @TotalTrans
+            BEGIN
+                SET @DbScore = 3;
+                SET @DbFinding = ''All '' + CAST(@TotalTrans AS NVARCHAR) + '' transactional procedures implement TRY/CATCH error handling'';
+            END
+            ELSE IF CAST(@WithTryCatch AS FLOAT) / @TotalTrans >= 0.8
+            BEGIN
+                SET @DbScore = 2;
+                SET @DbFinding = ''Most procedures have error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+            END
+            ELSE IF CAST(@WithTryCatch AS FLOAT) / @TotalTrans >= 0.5
+            BEGIN
+                SET @DbScore = 1;
+                SET @DbFinding = ''Some procedures lack error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+            END
+            ELSE
+            BEGIN
+                SET @DbScore = 0;
+                SET @DbFinding = ''Many procedures lack error handling. Non-compliant: '' + ISNULL(@NonCompliant, ''None'');
+            END
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (''' + @DbName + ''', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

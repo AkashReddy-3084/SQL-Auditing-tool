@@ -1,77 +1,137 @@
 -- Checklist: Data minimization applied — only necessary personal data stored
 -- Scope: DATABASE
--- Scoring: 0=Fail (error/no access), 1=Partial Pass (PII found, untagged), 2=Mostly Pass (PII found, tagged/classified), 3=Pass (No PII found)
-SET NOCOUNT ON;
+-- Scoring: 0: No personal data columns or classification metadata found (verification impossible). 1: Personal data columns identified via naming patterns, but lack formal classification. 2: Personal data columns identified and formally classified, enabling human review for necessity. 3: Not achievable automatically (requires business context).
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        -- Safely escape single quotes in database name for string literal embedding
-        DECLARE @SafeDbName NVARCHAR(256) = REPLACE(@DbName, '''', '''''');
-        
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @HasPII BIT = 0;
-        DECLARE @HasClassification BIT = 0;
-        DECLARE @DbScore INT = 3;
+    SET @Sql = N'DECLARE @PiiList NVARCHAR(MAX) = (
+        SELECT STRING_AGG(t.name + ''.'' + c.name, '', '')
+        FROM sys.columns c
+        JOIN sys.tables t ON c.object_id = t.object_id
+        WHERE c.name LIKE ''%ssn%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%address%'' OR c.name LIKE ''%pii%'' OR c.name LIKE ''%personal%'' OR c.name LIKE ''%credit%'' OR c.name LIKE ''%tax%'' OR c.name LIKE ''%nationalid%''
+    );
+    DECLARE @ClassifiedCount INT = (
+        SELECT COUNT(*) FROM sys.extended_properties ep
+        JOIN sys.columns c ON ep.major_id = c.object_id AND ep.minor_id = c.column_id
+        WHERE ep.name = ''Microsoft Information Classification''
+    );
+    DECLARE @PiiCount INT = ISNULL((SELECT COUNT(*) FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%ssn%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%address%'' OR c.name LIKE ''%pii%'' OR c.name LIKE ''%personal%'' OR c.name LIKE ''%credit%'' OR c.name LIKE ''%tax%'' OR c.name LIKE ''%nationalid%''), 0);
 
-        IF EXISTS (
-            SELECT 1 FROM sys.columns c
-            JOIN sys.types t ON c.user_type_id = t.user_type_id
-            WHERE t.name IN (''nvarchar'', ''varchar'', ''nchar'', ''char'')
-            AND (
-                c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%ssn%'' OR
-                c.name LIKE ''%passport%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%birth%'' OR
-                c.name LIKE ''%address%'' OR c.name LIKE ''%credit_card%'' OR c.name LIKE ''%tax_id%'' OR
-                c.name LIKE ''%mobile%'' OR c.name LIKE ''%ip_address%'' OR c.name LIKE ''%mac_address%''
-            )
-        ) SET @HasPII = 1;
+    SELECT DB_NAME() AS DbName,
+        CASE
+            WHEN @PiiCount = 0 AND @ClassifiedCount = 0 THEN 0
+            WHEN @PiiCount > 0 AND @ClassifiedCount = 0 THEN 1
+            ELSE 2
+        END AS DbScore,
+        CASE
+            WHEN @PiiCount = 0 AND @ClassifiedCount = 0 THEN ''No personal data columns or classification metadata found''
+            WHEN @PiiCount > 0 AND @ClassifiedCount = 0 THEN ''Personal data columns identified by name: '' + ISNULL(@PiiList, ''None'')
+            ELSE ''Personal data columns identified and classified: '' + ISNULL(@PiiList, ''None'')
+        END AS DbFinding;';
 
-        IF @HasPII = 1
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM sys.extended_properties ep
-                JOIN sys.columns c ON ep.major_id = c.object_id AND ep.minor_id = c.column_id
-                WHERE ep.name IN (''DataClassification'', ''SensitivityLabel'', ''MS_Description'')
-                AND (
-                    c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%ssn%'' OR
-                    c.name LIKE ''%passport%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%birth%'' OR
-                    c.name LIKE ''%address%'' OR c.name LIKE ''%credit_card%'' OR c.name LIKE ''%tax_id%'' OR
-                    c.name LIKE ''%mobile%'' OR c.name LIKE ''%ip_address%'' OR c.name LIKE ''%mac_address%''
-                )
-            ) SET @HasClassification = 1;
-        END
-
-        IF @HasPII = 0 SET @DbScore = 3;
-        ELSE IF @HasClassification = 1 SET @DbScore = 2;
-        ELSE SET @DbScore = 1;
-
-        INSERT INTO #DbResults VALUES (''' + @SafeDbName + ''', @DbScore);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    EXEC(@Sql);
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @PiiList NVARCHAR(MAX) = (
+                SELECT STRING_AGG(t.name + ''.'' + c.name, '', '')
+                FROM sys.columns c
+                JOIN sys.tables t ON c.object_id = t.object_id
+                WHERE c.name LIKE ''%ssn%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%address%'' OR c.name LIKE ''%pii%'' OR c.name LIKE ''%personal%'' OR c.name LIKE ''%credit%'' OR c.name LIKE ''%tax%'' OR c.name LIKE ''%nationalid%''
+            );
+            DECLARE @ClassifiedCount INT = (
+                SELECT COUNT(*) FROM sys.extended_properties ep
+                JOIN sys.columns c ON ep.major_id = c.object_id AND ep.minor_id = c.column_id
+                WHERE ep.name = ''Microsoft Information Classification''
+            );
+            DECLARE @PiiCount INT = ISNULL((SELECT COUNT(*) FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE c.name LIKE ''%ssn%'' OR c.name LIKE ''%dob%'' OR c.name LIKE ''%email%'' OR c.name LIKE ''%phone%'' OR c.name LIKE ''%address%'' OR c.name LIKE ''%pii%'' OR c.name LIKE ''%personal%'' OR c.name LIKE ''%credit%'' OR c.name LIKE ''%tax%'' OR c.name LIKE ''%nationalid%''), 0);
+
+            SELECT ''' + @DbName + ''' AS DbName,
+                CASE
+                    WHEN @PiiCount = 0 AND @ClassifiedCount = 0 THEN 0
+                    WHEN @PiiCount > 0 AND @ClassifiedCount = 0 THEN 1
+                    ELSE 2
+                END AS DbScore,
+                CASE
+                    WHEN @PiiCount = 0 AND @ClassifiedCount = 0 THEN ''No personal data columns or classification metadata found''
+                    WHEN @PiiCount > 0 AND @ClassifiedCount = 0 THEN ''Personal data columns identified by name: '' + ISNULL(@PiiList, ''None'')
+                    ELSE ''Personal data columns identified and classified: '' + ISNULL(@PiiList, ''None'')
+                END AS DbFinding;';
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            EXEC(@Sql);
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
+SET @Finding = @Finding + CHAR(13) + CHAR(10) + '-- NOTE: This script provides automated evidence. Full compliance requires human review.';
+
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
+DROP TABLE #DbResults;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

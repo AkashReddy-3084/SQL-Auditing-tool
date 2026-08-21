@@ -17,7 +17,7 @@ namespace SQLAuditor.Lib
 
     public record ChecklistResult
     {
-        public ChecklistResult(string id, string description, string verification, string outcome, string evidence, string scriptFile, string technique = "")
+        public ChecklistResult(string id, string description, string verification, string outcome, string? evidence, string scriptFile, string technique = "")
         {
             Id = id;
             Description = description;
@@ -28,6 +28,10 @@ namespace SQLAuditor.Lib
             Technique = technique;
         }
 
+        // Serialized fields, declared in the exact order required for
+        // checklist_results.json: Id, Description, Outcome, Score, Evidence,
+        // Severity, Finding, Recommendation, RiskImpact, Technique, Databases Verified.
+
         public string Id { get; init; }
 
         public string Description { get; init; }
@@ -37,19 +41,11 @@ namespace SQLAuditor.Lib
 
         public string Outcome { get; init; }
 
-        // ---- Report enrichment fields (consumed by the Summary Report generator) ----
-        // Populated by the MCP evaluator when available and back-filled with
-        // deterministic defaults by ChecklistResultEnricher before persistence so
-        // that checklist_results.json is always compatible with SummaryReportGenerator.
-
         [JsonPropertyName("Score")]
         public int? Score { get; init; }
 
-        [JsonPropertyName("ImplementationStatus")]
-        public string ImplementationStatus { get; init; } = string.Empty;
-
         [JsonPropertyName("Evidence")]
-        public string Evidence { get; init; }
+        public string? Evidence { get; init; }
 
         [JsonPropertyName("Severity")]
         public string Severity { get; init; } = string.Empty;
@@ -60,14 +56,28 @@ namespace SQLAuditor.Lib
         [JsonPropertyName("Recommendation")]
         public string? Recommendation { get; init; }
 
-        [JsonPropertyName("Effort")]
+        [JsonPropertyName("RiskImpact")]
+        public string? RiskImpact { get; init; }
+
+        public string Technique { get; init; }
+
+        [JsonPropertyName("Databases Verified")]
+        public string? DatabasesVerified { get; init; }
+
+        // ---- Internal-only fields (never serialized) ----
+
+        // Effort and ScriptFile are consumed by the enricher/report generator but are
+        // intentionally excluded from the persisted JSON schema.
+        [JsonIgnore]
         public string? Effort { get; init; }
 
-        [JsonPropertyName("RiskImpact")]
-        public string RiskImpact { get; init; } = string.Empty;
+        [JsonIgnore]
+        public string ScriptFile { get; init; }
 
-        [JsonPropertyName("ScoreImpact")]
-        public double? ScoreImpact { get; init; }
+        // The structured verdict a Script-technique evaluation produced. Kept in memory
+        // so the AI enricher can reason over the real SQL result set; never serialized.
+        [JsonIgnore]
+        public SqlScriptOutcome? ScriptOutcome { get; init; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         [JsonPropertyName("NotApplicable")]
@@ -80,19 +90,6 @@ namespace SQLAuditor.Lib
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         [JsonPropertyName("rawAttribute")]
         public JsonElement? RawAttribute { get; init; }
-
-        [JsonPropertyName("RawOutput")]
-        public string RawOutput { get; init; } = string.Empty;
-
-        [JsonPropertyName("mcp_tokens_used")]
-        public int McpTokensUsed { get; init; }
-
-        [JsonPropertyName("slm_tokens_used")]
-        public int SlmTokensUsed { get; init; }
-
-        public string ScriptFile { get; init; }
-
-        public string Technique { get; init; }
 
         [JsonIgnore]
         public string? McpUsage { get; init; }
@@ -109,6 +106,7 @@ namespace SQLAuditor.Lib
         private string _connectionString;
         private SqlServerMcpEvaluator? _mcpEvaluator;
         private ManualStepsGenerator? _manualStepsGenerator;
+        private ScriptResultAiEnricher? _scriptEnricher;
 
         public Auditor(string connectionString)
         {
@@ -127,6 +125,7 @@ namespace SQLAuditor.Lib
             if (_llmDisabled) return;
             try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
             try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
+            try { _scriptEnricher ??= ScriptResultAiEnricher.CreateFromEnvironment(); } catch { }
         }
 
         // When set, the auditor never creates LLM evaluators (even if .env or env vars
@@ -545,7 +544,7 @@ namespace SQLAuditor.Lib
             var scriptsDir = Path.Combine(repoRoot, "Backend", "checklist", "scripts", "sql");
             Directory.CreateDirectory(scriptsDir);
             var safeId = System.Text.RegularExpressions.Regex.Replace(checklistId ?? "unknown", "[^a-zA-Z0-9_.-]", "_");
-            var fileName = string.IsNullOrWhiteSpace(suggestedFileName) ? ($"{safeId}_generated_{DateTime.UtcNow:yyyyMMddHHmmss}.sql") : suggestedFileName;
+            var fileName = string.IsNullOrWhiteSpace(suggestedFileName)? $"{safeId}.sql" : suggestedFileName;
             var fullPath = Path.Combine(scriptsDir, fileName);
             await File.WriteAllTextAsync(fullPath, scriptText ?? string.Empty);
 
@@ -553,16 +552,22 @@ namespace SQLAuditor.Lib
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
-                System.Collections.Generic.Dictionary<string, string[]> mapping = new();
+                var mappingDict = new System.Collections.Generic.Dictionary<string, JsonElement>();
                 if (File.Exists(mapPath))
                 {
-                    try { mapping = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]>>(File.ReadAllText(mapPath)) ?? new(); } catch { mapping = new(); }
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(File.ReadAllText(mapPath));
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                            mappingDict[prop.Name] = prop.Value.Clone();
+                    }
+                    catch { mappingDict = new(); }
                 }
 
                 var rel = Path.Combine("Backend", "checklist", "scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
-                // Replace existing entry or append if missing
-                mapping[checklistId] = new[] { rel };
-                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mapping, new JsonSerializerOptions { WriteIndented = true }));
+                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
+                mappingDict[checklistId] = newEntry;
+                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mappingDict, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { /* best-effort only */ }
 
@@ -581,11 +586,44 @@ namespace SQLAuditor.Lib
 
             // load deterministic mapping if present
             var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
+            // Items whose compliance can only be judged from external documentation.
+            var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Items needing elevated rights: the script is still generated, but the operator runs it.
+            var adminItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
-                if (File.Exists(mapPath)) mapping = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]>>(File.ReadAllText(mapPath)) ?? new();
-                // Normalize any legacy SQL/scripts/checks references to Backend/checklist/tools/sql
+                if (File.Exists(mapPath))
+                {
+                    var mapJson = File.ReadAllText(mapPath);
+                    using var mapDoc = JsonDocument.Parse(mapJson);
+                    foreach (var prop in mapDoc.RootElement.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.Array)
+                        {
+                            // Legacy format: { "id": ["path1", ...] }
+                            var arr = prop.Value.EnumerateArray()
+                                .Select(e => e.GetString() ?? string.Empty)
+                                .Where(s => !string.IsNullOrWhiteSpace(s))
+                                .ToArray();
+                            mapping[prop.Name] = arr;
+                        }
+                        else if (prop.Value.ValueKind == JsonValueKind.Object)
+                        {
+                            // New format: { "id": { "script_file": "path", ... } }
+                            var scriptFile = prop.Value.TryGetProperty("script_file", out var sf) ? sf.GetString() : null;
+                            if (!string.IsNullOrWhiteSpace(scriptFile))
+                                mapping[prop.Name] = new[] { scriptFile! };
+
+                            if (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck) && docCheck.ValueKind == JsonValueKind.True)
+                                documentationItems.Add(prop.Name);
+
+                            if (prop.Value.TryGetProperty("IsAdminCheck", out var adminCheck) && adminCheck.ValueKind == JsonValueKind.True)
+                                adminItems.Add(prop.Name);
+                        }
+                    }
+                }
+                // Normalize any legacy SQL/scripts/checks references to Backend/checklist/scripts/sql
                 var keys = mapping.Keys.ToArray();
                 foreach (var k in keys)
                 {
@@ -614,9 +652,37 @@ namespace SQLAuditor.Lib
                 }
             }
 
+            bool IsDocumentationCheck(ChecklistItem item)
+            {
+                return documentationItems.Contains(item.Id);
+            }
+
+            bool IsAdminCheck(ChecklistItem item)
+            {
+                return adminItems.Contains(item.Id);
+            }
+
+            // Both documentation and admin checks go to AI-Manual. A documentation check has no script
+            // at all; an admin check keeps its script but the operator executes it, not the tool.
             bool IsScriptMapped(ChecklistItem item)
             {
+                if (IsDocumentationCheck(item) || IsAdminCheck(item)) return false;
                 return mapping.TryGetValue(item.Id, out var files) && files != null && files.Length > 0;
+            }
+
+            string? ReadMappedScript(ChecklistItem item)
+            {
+                if (!mapping.TryGetValue(item.Id, out var files) || files == null) return null;
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var full = Path.IsPathRooted(f) ? f : Path.Combine(repoRoot, f.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(full)) return File.ReadAllText(full);
+                    }
+                    catch { }
+                }
+                return null;
             }
 
             var scriptItems = selectedItems.Where(IsScriptMapped).ToList();
@@ -624,7 +690,9 @@ namespace SQLAuditor.Lib
 
             async Task<ChecklistResult?> EvaluateScriptAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                var evidenceSb = new System.Text.StringBuilder();
+                var allRows = new System.Collections.Generic.List<SqlScriptRow>();
+                var textLog = new System.Text.StringBuilder();
+                string? execError = null;
                 var files = mapping[it.Id];
                 foreach (var f in files)
                 {
@@ -635,17 +703,16 @@ namespace SQLAuditor.Lib
                         if (File.Exists(full))
                         {
                             var txt = await File.ReadAllTextAsync(full);
-                            string outt;
                             if (pipelineConn != null)
                             {
-                                outt = await ExecuteSqlTextAsync(pipelineConn, txt);
+                                var (log, rows) = await ExecuteSqlCaptureAsync(pipelineConn, txt);
+                                allRows.AddRange(rows);
+                                if (!string.IsNullOrWhiteSpace(log)) textLog.AppendLine(log);
                             }
                             else
                             {
-                                outt = await RunScriptFileAsync(full);
+                                textLog.AppendLine(await RunScriptFileAsync(full));
                             }
-                            evidenceSb.AppendLine($"--- Script: {f} ---");
-                            evidenceSb.AppendLine(outt);
                         }
                         else
                         {
@@ -653,26 +720,67 @@ namespace SQLAuditor.Lib
                             var match = Directory.Exists(checks) ? Directory.GetFiles(checks, it.Id + "_*", SearchOption.TopDirectoryOnly).FirstOrDefault() : null;
                             if (match != null)
                             {
-                                var outt = await RunScriptFileAsync(match);
-                                evidenceSb.AppendLine($"--- Script: {Path.GetRelativePath(repoRoot, match)} ---");
-                                evidenceSb.AppendLine(outt);
+                                textLog.AppendLine(await RunScriptFileAsync(match));
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-                        evidenceSb.AppendLine("Script error: " + ex.Message);
+                        execError = ex.Message;
+                        textLog.AppendLine("Script error: " + ex.Message);
                     }
                 }
 
-                var evidence = evidenceSb.ToString();
-                var outcome = EvaluationDecisionService.EvaluateEvidenceOutcome(evidence);
-                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, evidence, string.Join(';', files), "Script");
+                // The script's final SELECT (Result/Score/DatabaseQueried/Finding) is the
+                // factual source. Preserve the verdict and score it returned; only fall back
+                // to scraping the console text when the script exposed no structured result.
+                var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
+                var outcome = scriptOutcome.Result
+                    ?? EvaluationDecisionService.EvaluateEvidenceOutcome(textLog.ToString());
+                var score = scriptOutcome.Score;
+
+                // Turn the structured SQL result into audit-report wording (Finding, Evidence,
+                // RiskImpact, Recommendation, Severity) using only the values the script
+                // returned. When the provider is unavailable the enricher returns null: we then
+                // keep the script's own finding and leave the AI-authored fields null rather
+                // than emitting generic filler (Severity is still derived from the rubric by
+                // ChecklistResultEnricher during the post-pipeline back-fill).
+                ScriptResultAiEnricher.ScriptEnrichment? ai = null;
+                if (_scriptEnricher != null && scriptOutcome.HasStructuredResult)
+                {
+                    try
+                    {
+                        ai = await _scriptEnricher.EnrichAsync(it, outcome, score, scriptOutcome, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        ai = null;
+                    }
+                }
+
+                var finding = !string.IsNullOrWhiteSpace(ai?.Finding)
+                    ? ai!.Finding!
+                    : (scriptOutcome.Finding ?? string.Empty);
+
+                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, ai?.Evidence, string.Join(';', files), "Script")
+                {
+                    Score = score,
+                    Finding = finding,
+                    Severity = string.IsNullOrWhiteSpace(ai?.Severity) ? string.Empty : ai!.Severity!,
+                    RiskImpact = ai?.RiskImpact,
+                    Recommendation = ai?.Recommendation,
+                    DatabasesVerified = scriptOutcome.DatabasesVerified,
+                    ScriptOutcome = scriptOutcome,
+                };
             }
 
             async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
-                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString))
+                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it))
                 {
                     try
                     {
@@ -700,8 +808,11 @@ namespace SQLAuditor.Lib
                 var manualStartingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, it.ScriptFile, "AI-Manual");
                 progress?.Report(manualStartingProgress);
 
+                // An admin check keeps its generated script so the operator can run it themselves.
+                var auditScript = IsAdminCheck(it) && !IsDocumentationCheck(it) ? ReadMappedScript(it) : null;
+
                 // Only reached once MCP has declined or failed, so the guidance is never wasted work.
-                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, cancellationToken);
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, cancellationToken);
 
                 if (requestUserInput != null && nonBlockingManualFallback)
                 {
@@ -734,41 +845,41 @@ namespace SQLAuditor.Lib
                         if (!string.IsNullOrWhiteSpace(userEvidence))
                         {
                             if (string.Equals(userEvidence, "PASS", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
                             if (string.Equals(userEvidence, "FAIL", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
 
                             var outcome = EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
                             if (string.Equals(outcome, "Fail", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual")
-                                {
-                                    RawOutput = manualPlan.RawOutput,
-                                    SlmTokensUsed = manualPlan.TotalTokens
-                                };
+                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                                // {
+                                //     RawOutput = manualPlan.RawOutput,
+                                //     SlmTokensUsed = manualPlan.TotalTokens
+                                // };
 
-                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual")
-                            {
-                                RawOutput = manualPlan.RawOutput,
-                                SlmTokensUsed = manualPlan.TotalTokens
-                            };
+                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                            // {
+                            //     RawOutput = manualPlan.RawOutput,
+                            //     SlmTokensUsed = manualPlan.TotalTokens
+                            // };
                         }
                     }
                     catch { }
                 }
 
-                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual")
-                {
-                    RawOutput = manualPlan.RawOutput,
-                    SlmTokensUsed = manualPlan.TotalTokens
-                };
+                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual");
+                // {
+                //     RawOutput = manualPlan.RawOutput,
+                //     SlmTokensUsed = manualPlan.TotalTokens
+                // };
             }
 
             async Task RunPipelineAsync(System.Collections.Generic.List<ChecklistItem> items, bool isScriptPipeline)
@@ -800,14 +911,14 @@ namespace SQLAuditor.Lib
                         }
 
                         var startingScriptFile = string.Empty;
-                        if (mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
+                        if (!IsDocumentationCheck(it) && mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
                         {
                             startingScriptFile = string.Join(';', mappedFiles);
                         }
-                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString);
-                        var startingTechnique = string.IsNullOrWhiteSpace(startingScriptFile)
-                            ? (canTryMcp ? "AI-MCP" : "AI-Manual")
-                            : "Script";
+                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it);
+                        var startingTechnique = isScriptPipeline
+                            ? "Script"
+                            : (canTryMcp ? "AI-MCP" : "AI-Manual");
                         var startingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, startingScriptFile, startingTechnique);
                         progress?.Report(startingProgress);
 
@@ -845,7 +956,11 @@ namespace SQLAuditor.Lib
                 RunPipelineAsync(aiItems, false));
 
             // Back-fill report-oriented fields so the persisted JSON is always
-            // schema-compatible with the Summary Report generator.
+            // schema-compatible with the Summary Report generator. Script items were
+            // already given their audit wording by the AI enricher inside the pipeline
+            // (WPF flow). In the CLI/IDE flows no provider is configured, so they keep the
+            // script-supplied Finding and leave Evidence/RiskImpact/Recommendation null for
+            // GitHub Copilot to author and write back via ApplyEnrichment.
             var enrichedResults = results.Select(ChecklistResultEnricher.Enrich).ToArray();
 
             var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
@@ -875,6 +990,27 @@ namespace SQLAuditor.Lib
             catch (Exception ex)
             {
                 try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
+            }
+
+            // Automatically produce the comprehensive Excel workbook (audit_report.xlsx)
+            // using the exact same scoring pipeline as the Markdown report. Isolated in
+            // its own try/catch so a workbook failure never breaks the audit run.
+            try
+            {
+                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    excelPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = enrichedResults.Length,
+                    });
+            }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Excel report generation error: {ex.Message}\r\n"); } catch { }
             }
 
             return enrichedResults;
@@ -949,8 +1085,135 @@ namespace SQLAuditor.Lib
             }
             catch { }
 
+            // Regenerate the Excel workbook from the updated results using the same
+            // scoring pipeline. Isolated so a workbook failure never fails the resolve.
+            try
+            {
+                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    excelPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
             newOutcome = outcome;
             return true;
+        }
+
+        // Records AI-authored wording for an already-evaluated item. Used by the CLI
+        // 'enrich_result' command and the IDE 'enrich_result' tool so GitHub Copilot can
+        // supply Finding/Evidence/RiskImpact/Recommendation in the flows where this engine
+        // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
+        // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
+        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return false;
+            if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
+                && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
+
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath)) return false;
+
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                return false;
+
+            System.Text.Json.Nodes.JsonObject? target = null;
+            foreach (var el in arr)
+            {
+                if (el is System.Text.Json.Nodes.JsonObject obj &&
+                    string.Equals(obj["Id"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = obj;
+                    break;
+                }
+            }
+            if (target == null) return false;
+
+            if (!string.IsNullOrWhiteSpace(finding)) target["Finding"] = finding;
+            if (!string.IsNullOrWhiteSpace(evidence)) target["Evidence"] = evidence;
+            if (!string.IsNullOrWhiteSpace(riskImpact)) target["RiskImpact"] = riskImpact;
+            if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
+
+            try
+            {
+                File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { return false; }
+
+            try
+            {
+                var reportPath = Path.Combine(resultsDir, "final_report.md");
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
+            return true;
+        }
+
+        // Builds the block that asks GitHub Copilot to author the audit wording for
+        // script-evaluated items, for the CLI (--copilot) and IDE flows where this engine
+        // makes no LLM calls. Mirrors the field policy of the WPF flow's script enrichment
+        // prompt so the JSON reads the same whichever host produced it. <paramref
+        // name="commandFor"/> renders the host-specific write-back call for an item id.
+        public static string BuildScriptEnrichmentRequest(
+            System.Collections.Generic.IEnumerable<ChecklistResult> results,
+            Func<string, string> commandFor)
+        {
+            var pending = results
+                .Where(r => string.Equals(r.Technique, "Script", StringComparison.OrdinalIgnoreCase)
+                         && (string.IsNullOrWhiteSpace(r.Evidence)
+                             || string.IsNullOrWhiteSpace(r.RiskImpact)
+                             || string.IsNullOrWhiteSpace(r.Recommendation)))
+                .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("=== COPILOT ENRICHMENT REQUIRED ===");
+            if (pending.Count == 0)
+            {
+                sb.AppendLine("No script-evaluated items need audit wording.");
+                sb.AppendLine("=== END COPILOT ENRICHMENT REQUIRED ===");
+                return sb.ToString();
+            }
+
+            sb.AppendLine($"{pending.Count} script-evaluated item(s) have a verdict but no audit wording yet.");
+            sb.AppendLine("This tool performs NO AI/LLM calls — YOU (GitHub Copilot) write the wording. For EACH item below:");
+            sb.AppendLine("  1. Use ONLY the facts under 'Finding' and 'Script result'. Never invent objects, counts, databases or settings.");
+            sb.AppendLine("  2. Never change Outcome, Score, Severity or Databases Verified — the script already decided them.");
+            sb.AppendLine("  3. Produce these four values:");
+            sb.AppendLine("       finding        - 1-2 sentences on the ACTUAL state the script found (object/database names, counts). Do not restate the checklist description.");
+            sb.AppendLine("       evidence       - how that finding justifies the outcome, quoting the values returned. Under 120 words.");
+            sb.AppendLine("       riskImpact     - the specific business/security/operational consequence of THIS finding. Under 50 words, no generic phrases.");
+            sb.AppendLine("       recommendation - remediation targeted at this gap, consistent with the score. Leave empty when Score is 3 and the outcome is Pass.");
+            sb.AppendLine("  4. Record them with the command shown under the item, then move to the next. Do not write a final summary until every item is enriched.");
+
+            foreach (var r in pending)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"--- {r.Id}: {r.Description} ---");
+                sb.AppendLine($"Outcome: {r.Outcome} | Score: {r.Score?.ToString() ?? "unknown"} | Severity: {(string.IsNullOrWhiteSpace(r.Severity) ? "unset" : r.Severity)} | Databases Verified: {r.DatabasesVerified ?? "not reported"}");
+                sb.AppendLine($"Finding returned by the script: {r.ScriptOutcome?.Finding ?? r.Finding}");
+                sb.AppendLine("Script result (column=value per row):");
+                sb.AppendLine(r.ScriptOutcome?.ToFactSheet() ?? "(no structured result was captured)");
+                sb.AppendLine($"Record with: {commandFor(r.Id)}");
+            }
+            sb.AppendLine("=== END COPILOT ENRICHMENT REQUIRED ===");
+            return sb.ToString();
         }
 
         public async Task<bool> TestConnectionAsync()
@@ -1039,17 +1302,17 @@ namespace SQLAuditor.Lib
 
         public async Task<string> GenerateManualInstructionsAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
         {
-            var result = await GenerateManualInstructionsWithMetadataAsync(item, cancellationToken);
+            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, cancellationToken);
             return result.Instructions;
         }
 
-        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
+        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)
         {
             try
             {
                 if (_manualStepsGenerator != null)
                 {
-                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, cancellationToken);
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
                         return slm;
@@ -1064,6 +1327,10 @@ namespace SQLAuditor.Lib
             }
 
             var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item);
+            if (!string.IsNullOrWhiteSpace(auditScript))
+            {
+                fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
+            }
             return new ManualStepsGenerationResult(fallback, fallback, 0);
         }
 
@@ -1078,9 +1345,57 @@ namespace SQLAuditor.Lib
             catch { }
         }
 
-        private async Task<string> ExecuteSqlTextAsync(SqlConnection conn, string txt)
+        // Executes a (possibly multi-batch) SQL script and captures every returned row
+        // keyed by its column name, so the audit verdict can be read from the script's
+        // final SELECT (Result/Score/DatabaseQueried/Finding) rather than scraped from
+        // console text. Only error text is returned as the log; row data is structured.
+        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteSqlCaptureAsync(SqlConnection conn, string txt)
         {
+            var rows = new System.Collections.Generic.List<SqlScriptRow>();
+            var sb = new System.Text.StringBuilder();
             try
+            {
+                var batches = Regex.Split(txt, @"^GO\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                foreach (var batch in batches)
+                {
+                    var script = batch.Trim();
+                    if (string.IsNullOrWhiteSpace(script)) continue;
+                    try
+                    {
+                        using var cmd = new SqlCommand(script, conn) { CommandTimeout = 120 };
+                        using var rdr = await cmd.ExecuteReaderAsync();
+                        do
+                        {
+                            if (rdr.FieldCount == 0) continue;
+                            var names = new System.Collections.Generic.List<string>(rdr.FieldCount);
+                            for (int i = 0; i < rdr.FieldCount; i++) names.Add(rdr.GetName(i));
+                            while (await rdr.ReadAsync())
+                            {
+                                var vals = new System.Collections.Generic.List<string>(rdr.FieldCount);
+                                for (int i = 0; i < rdr.FieldCount; i++)
+                                {
+                                    try { vals.Add(rdr.IsDBNull(i) ? "NULL" : rdr.GetValue(i)?.ToString() ?? string.Empty); }
+                                    catch { vals.Add("<err>"); }
+                                }
+                                rows.Add(new SqlScriptRow(names, vals));
+                            }
+                        } while (await rdr.NextResultAsync());
+                    }
+                    catch (Exception ex)
+                    {
+                        sb.AppendLine("SQL ERROR: " + ex.Message);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("SQL EXEC ERROR: " + ex.Message);
+            }
+            return (sb.ToString(), rows);
+        }
+
+        private async Task<string> ExecuteSqlTextAsync(SqlConnection conn, string txt)
+        {            try
             {
                 var sb = new System.Text.StringBuilder();
                 var batches = Regex.Split(txt, @"^GO\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);

@@ -1,51 +1,75 @@
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @MaxTxDuration INT = 0;
-DECLARE @BlockingCount INT = 0;
-DECLARE @RemoteQueryTimeout INT = 600;
-DECLARE @CostThreshold INT = 5;
+-- Checklist: Long transactions avoided; batch large operations
+-- Scope: SERVER
+-- Scoring: 0=Fail (long-running >300s), 1=Partial (moderate 60-300s), 2=Mostly Pass (short <60s), 3=Pass (no open transactions)
 
--- Check active transaction durations (On-prem / MI)
-IF EXISTS (SELECT 1 FROM sys.dm_tran_active_transactions)
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
+DECLARE @LongCount INT = 0;
+DECLARE @ModerateCount INT = 0;
+DECLARE @ShortCount INT = 0;
+DECLARE @LongDetails NVARCHAR(MAX) = '';
+DECLARE @ModerateDetails NVARCHAR(MAX) = '';
+
+-- Count active user transactions by duration
+SELECT 
+    @LongCount = COUNT(CASE WHEN DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) > 300 THEN 1 END),
+    @ModerateCount = COUNT(CASE WHEN DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) BETWEEN 60 AND 300 THEN 1 END),
+    @ShortCount = COUNT(CASE WHEN DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) < 60 THEN 1 END)
+FROM sys.dm_tran_active_transactions t
+JOIN sys.dm_tran_session_transactions st ON t.transaction_id = st.transaction_id
+JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
+WHERE s.is_user_process = 1;
+
+-- Gather evidence for long-running transactions
+IF @LongCount > 0
 BEGIN
-    SELECT @MaxTxDuration = MAX(DATEDIFF(SECOND, last_start_time, GETDATE()))
-    FROM sys.dm_tran_active_transactions
-    WHERE transaction_type = 1 AND last_start_time IS NOT NULL;
+    SELECT @LongDetails = STRING_AGG(
+        CAST(DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) AS NVARCHAR) + 's in ' + ISNULL(DB_NAME(s.database_id), 'N/A'), 
+        ', '
+    )
+    FROM sys.dm_tran_active_transactions t
+    JOIN sys.dm_tran_session_transactions st ON t.transaction_id = st.transaction_id
+    JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
+    WHERE DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) > 300;
 END
-ELSE
+
+-- Gather evidence for moderate duration transactions
+IF @ModerateCount > 0
 BEGIN
-    -- Fallback for Azure SQL DB
-    SELECT @MaxTxDuration = MAX(DATEDIFF(SECOND, start_time, GETDATE()))
-    FROM sys.dm_exec_requests
-    WHERE open_transaction_count > 0;
+    SELECT @ModerateDetails = STRING_AGG(
+        CAST(DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) AS NVARCHAR) + 's in ' + ISNULL(DB_NAME(s.database_id), 'N/A'), 
+        ', '
+    )
+    FROM sys.dm_tran_active_transactions t
+    JOIN sys.dm_tran_session_transactions st ON t.transaction_id = st.transaction_id
+    JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
+    WHERE DATEDIFF(SECOND, t.transaction_begin_time, GETDATE()) BETWEEN 60 AND 300;
 END
 
--- Check blocking chains (exclude system blockers 0 and -2)
-SELECT @BlockingCount = COUNT(*)
-FROM sys.dm_os_waiting_tasks
-WHERE blocking_session_id > 0;
+-- Determine score based on thresholds
+SET @Score = CASE 
+    WHEN @LongCount > 0 THEN 0
+    WHEN @ModerateCount > 0 THEN 1
+    WHEN @ShortCount > 0 THEN 2
+    ELSE 3
+END;
 
--- Check server configurations (On-prem / MI)
-IF EXISTS (SELECT 1 FROM master.sys.configurations WHERE name = 'cost threshold for parallelism')
-BEGIN
-    SELECT @RemoteQueryTimeout = TRY_CAST(value AS INT)
-    FROM master.sys.configurations
-    WHERE name = 'remote query timeout (s)';
+-- Construct finding with actual evidence
+SET @Finding = CASE 
+    WHEN @LongCount > 0 THEN 'Long-running transactions detected (>300s): ' + ISNULL(@LongDetails, 'N/A')
+    WHEN @ModerateCount > 0 THEN 'Moderate duration transactions detected (60-300s): ' + ISNULL(@ModerateDetails, 'N/A')
+    WHEN @ShortCount > 0 THEN 'Short open transactions detected (<60s): ' + CAST(@ShortCount AS NVARCHAR) + ' active'
+    ELSE 'No open user transactions detected'
+END;
 
-    SELECT @CostThreshold = TRY_CAST(value AS INT)
-    FROM master.sys.configurations
-    WHERE name = 'cost threshold for parallelism';
-END
-
--- Scoring logic
-IF @MaxTxDuration > 300 OR @BlockingCount > 3
-    SET @Score = 0;
-ELSE IF @MaxTxDuration > 60 OR (@RemoteQueryTimeout = 600 AND @CostThreshold = 5)
-    SET @Score = 1;
-ELSE IF @MaxTxDuration <= 60 AND (@RemoteQueryTimeout <> 600 OR @CostThreshold <> 5)
-    SET @Score = 2;
-ELSE IF @MaxTxDuration = 0 AND @BlockingCount = 0 AND @RemoteQueryTimeout <> 600 AND @CostThreshold <> 5
-    SET @Score = 3;
-
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

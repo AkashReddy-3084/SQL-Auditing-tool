@@ -1,48 +1,76 @@
 -- Checklist: Firewall / network rules restrict access to known sources
 -- Scope: SERVER
--- Scoring: 0=No evidence/empty connections, 1=Weak proxy (many IPs/broad rules), 2=Strong proxy (limited IPs), 3=Fully verified (Azure explicit rules)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @IsAzure BIT = 0;
-DECLARE @DistinctIPs INT = 0;
-DECLARE @FirewallRulesCount INT = 0;
-DECLARE @HasBroadRule BIT = 0;
+-- Scoring: 0=No rules/open access; 1=Endpoints bound to 0.0.0.0 or unexpected connections; 2=Rules exist but broad ranges (Azure) or specific endpoint bindings but OS firewall unverified (On-prem); 3=Explicit rules restrict access to known sources without broad ranges.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
--- Detect Azure SQL DB / MI
-IF OBJECT_ID('sys.database_service_objectives') IS NOT NULL OR OBJECT_ID('sys.firewall_rules') IS NOT NULL
-    SET @IsAzure = 1;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 
-IF @IsAzure = 1
+IF @EngineEdition IN (5, 8) -- Azure SQL Database or Azure SQL Managed Instance
 BEGIN
-    -- Azure SQL DB / MI firewall check
-    IF OBJECT_ID('sys.firewall_rules') IS NOT NULL
+    DECLARE @RuleCount INT = (SELECT COUNT(*) FROM sys.firewall_rules);
+    DECLARE @BroadRules INT = (
+        SELECT COUNT(*) FROM sys.firewall_rules 
+        WHERE start_ip_address IN ('0.0.0.0', '::') 
+           OR end_ip_address IN ('255.255.255.255', 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
+    );
+
+    IF @RuleCount = 0
     BEGIN
-        SELECT @FirewallRulesCount = COUNT(*), @HasBroadRule = MAX(CASE WHEN start_ip_address = '0.0.0.0' THEN 1 ELSE 0 END)
-        FROM sys.firewall_rules;
+        SET @Score = 0;
+        SET @Finding = 'No firewall rules configured. Instance is open to all sources.';
     END
-
-    -- Scoring per checklist: 0=No evidence, 1=Weak (broad rules), 3=Fully verified (explicit rules)
-    IF @FirewallRulesCount = 0 SET @Score = 0;
-    ELSE IF @HasBroadRule = 1 SET @Score = 1;
-    ELSE SET @Score = 3;
+    ELSE IF @BroadRules > 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = CAST(@RuleCount AS NVARCHAR) + ' firewall rules found. ' + CAST(@BroadRules AS NVARCHAR) + ' rule(s) allow overly broad access (e.g., 0.0.0.0).';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = CAST(@RuleCount AS NVARCHAR) + ' firewall rules configured. No overly broad ranges detected.';
+    END
 END
-ELSE
+ELSE -- On-premises SQL Server
 BEGIN
-    -- On-prem proxy: check active connection sources
-    BEGIN TRY
-        SELECT @DistinctIPs = COUNT(DISTINCT client_net_address)
-        FROM sys.dm_exec_connections
-        WHERE client_net_address IS NOT NULL;
-    END TRY
-    BEGIN CATCH
-        SET @DistinctIPs = 0;
-    END CATCH
+    -- Proxy evidence: endpoint bindings and active connections
+    DECLARE @OpenEndpoints INT = (
+        SELECT COUNT(*) FROM sys.endpoints 
+        WHERE type = 4 AND state = 0 AND address = '0.0.0.0'
+    );
+    DECLARE @BoundEndpoints INT = (
+        SELECT COUNT(*) FROM sys.endpoints 
+        WHERE type = 4 AND state = 0 AND address <> '0.0.0.0'
+    );
+    DECLARE @ActiveConnectionIPs INT = (
+        SELECT COUNT(DISTINCT client_net_address) FROM sys.dm_exec_connections 
+        WHERE client_net_address IS NOT NULL
+    );
 
-    -- Scoring per checklist: 0=No evidence/empty, 1=Weak (many IPs), 2=Strong (limited IPs)
-    IF @DistinctIPs = 0 SET @Score = 0;
-    ELSE IF @DistinctIPs BETWEEN 1 AND 5 SET @Score = 2;
-    ELSE SET @Score = 1; -- Covers 6+ IPs (weak/many)
+    IF @OpenEndpoints > 0
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = 'SQL Server endpoints bound to 0.0.0.0 (all interfaces). OS firewall rules cannot be verified via T-SQL. ' + CAST(@ActiveConnectionIPs AS NVARCHAR) + ' unique active connection IPs detected.';
+    END
+    ELSE IF @BoundEndpoints > 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = 'SQL Server endpoints bound to specific IPs. OS firewall rules cannot be verified via T-SQL. ' + CAST(@ActiveConnectionIPs AS NVARCHAR) + ' unique active connection IPs detected.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = 'No active T-SQL endpoints found. Network access status unknown.';
+    END
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,28 +1,49 @@
 -- Checklist: ETL/job run history captured and retained
 -- Scope: SERVER
--- Scoring: 0=Retention disabled or no history; 1=Low retention (<1000 rows) or stale history (>30 days); 2=Adequate retention (>=1000 rows) with history; 3=Optimal retention (>=10000 rows) with recent history (<7 days)
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @MaxRows INT = 0;
-DECLARE @HistCount INT = 0;
-DECLARE @MaxRunDate INT = 0;
-DECLARE @Threshold30Days INT = CONVERT(INT, CONVERT(VARCHAR(8), DATEADD(DAY, -30, GETDATE()), 112));
-DECLARE @Threshold7Days INT = CONVERT(INT, CONVERT(VARCHAR(8), DATEADD(DAY, -7, GETDATE()), 112));
+-- Scoring: 3=History captured & retained, 2=History captured but no jobs, 1=Jobs exist but no history, 0=No jobs/history or platform unsupported
 
--- Check retention configuration
-SELECT @MaxRows = ISNULL(value_in_use, 0) FROM sys.configurations WHERE name = 'job history max rows';
+SET NOCOUNT ON;
 
--- Check actual history records
-SELECT @HistCount = COUNT(*), @MaxRunDate = ISNULL(MAX(run_date), 0) FROM msdb.dbo.sysjobhistory;
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @JobCount INT = 0;
+DECLARE @HistoryCount INT = 0;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Assign score based on retention config and history freshness
--- Using CASE to prevent IF/ELSE IF ordering issues and ensure correct priority evaluation
-SET @Score = CASE
-    WHEN @MaxRows = 0 OR @HistCount = 0 THEN 0
-    WHEN @MaxRows >= 10000 AND @MaxRunDate >= @Threshold7Days THEN 3
-    WHEN @MaxRows >= 1000 AND @MaxRunDate >= @Threshold30Days THEN 2
-    ELSE 1
-END;
+IF @EngineEdition = 5
+BEGIN
+    SET @Score = 0;
+    SET @Finding = 'SQL Agent not available in Azure SQL Database. History capture/retention not applicable.';
+END
+ELSE
+BEGIN
+    IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+        SELECT @JobCount = COUNT(*) FROM msdb.dbo.sysjobs;
+        
+    IF OBJECT_ID('msdb.dbo.sysjobhistory') IS NOT NULL
+        SELECT @HistoryCount = COUNT(*) 
+        FROM msdb.dbo.sysjobhistory 
+        WHERE run_date >= CAST(CONVERT(VARCHAR(8), DATEADD(DAY, -30, GETDATE()), 112) AS INT);
 
+    IF @HistoryCount > 0 AND @JobCount > 0
+        SET @Score = 3;
+    ELSE IF @HistoryCount > 0 AND @JobCount = 0
+        SET @Score = 2;
+    ELSE IF @HistoryCount = 0 AND @JobCount > 0
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+
+    SET @Finding = 'Jobs configured: ' + CAST(@JobCount AS NVARCHAR(10)) + ', History records (last 30 days): ' + CAST(@HistoryCount AS NVARCHAR(10));
+END
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

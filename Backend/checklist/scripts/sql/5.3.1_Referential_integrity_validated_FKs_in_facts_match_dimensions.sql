@@ -1,63 +1,82 @@
 -- Checklist: Referential integrity validated (FKs in facts match dimensions)
 -- Scope: DATABASE
--- Scoring: 0=No facts or 0% compliance; 1=1-49% facts have enabled FKs to dims; 2=50-99% compliance; 3=100% compliance.
+-- Scoring: 0=No FKs or facts lack FKs to dims; 1=FKs exist but none link facts to dims; 2=Some facts have FKs to dims; 3=All facts have FKs to dims
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @FactCount INT = 0;
-        DECLARE @FactWithDimFKCount INT = 0;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @TotalFKs INT = 0;
+    DECLARE @FactCount INT = 0;
+    DECLARE @FactWithFKCount INT = 0;
 
-        SELECT @FactCount = COUNT(*) FROM sys.tables t
-        WHERE t.name LIKE ''fact%'' OR SCHEMA_NAME(t.schema_id) IN (''fact'', ''Fact'');
+    SELECT @TotalFKs = COUNT(*) FROM sys.foreign_keys;
 
-        IF @FactCount > 0
-        BEGIN
-            SELECT @FactWithDimFKCount = COUNT(DISTINCT fk.parent_object_id)
-            FROM sys.foreign_keys fk
-            JOIN sys.tables t_parent ON fk.parent_object_id = t_parent.object_id
-            JOIN sys.tables t_ref ON fk.referenced_object_id = t_ref.object_id
-            WHERE (t_parent.name LIKE ''fact%'' OR SCHEMA_NAME(t_parent.schema_id) IN (''fact'', ''Fact''))
-              AND (t_ref.name LIKE ''dim%'' OR SCHEMA_NAME(t_ref.schema_id) IN (''dim'', ''Dim''))
-              AND fk.is_disabled = 0;
-        END
+    SELECT @FactCount = COUNT(*)
+    FROM sys.tables t
+    WHERE t.is_ms_shipped = 0
+      AND (t.name LIKE ''Fact%'' OR t.name LIKE ''F_%'');
 
-        DECLARE @DbScore INT = 0;
-        IF @FactCount = 0 SET @DbScore = 0;
-        ELSE
-        BEGIN
-            DECLARE @Pct FLOAT = CAST(@FactWithDimFKCount AS FLOAT) / @FactCount * 100;
-            IF @Pct = 100 SET @DbScore = 3;
-            ELSE IF @Pct >= 50 SET @DbScore = 2;
-            ELSE IF @Pct > 0 SET @DbScore = 1;
-            ELSE SET @DbScore = 0;
-        END
+    SELECT @FactWithFKCount = COUNT(DISTINCT fk.parent_object_id)
+    FROM sys.foreign_keys fk
+    JOIN sys.tables t ON fk.parent_object_id = t.object_id
+    JOIN sys.tables ref_t ON fk.referenced_object_id = ref_t.object_id
+    WHERE t.is_ms_shipped = 0
+      AND (t.name LIKE ''Fact%'' OR t.name LIKE ''F_%'')
+      AND (ref_t.name LIKE ''Dim%'' OR ref_t.name LIKE ''D_%'');
 
-        INSERT INTO #DbResults VALUES (''' + @DbName + ''', @DbScore);';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    DECLARE @DbScore INT;
+    DECLARE @DbFinding NVARCHAR(MAX);
+
+    IF @TotalFKs = 0
+    BEGIN
+        SET @DbScore = 0;
+        SET @DbFinding = ''No foreign keys defined in the database.'';
+    END
+    ELSE IF @FactCount = 0
+    BEGIN
+        SET @DbScore = 1;
+        SET @DbFinding = ''No fact tables identified (naming: Fact% or F_%), but '' + CAST(@TotalFKs AS NVARCHAR) + '' FK(s) exist.'';
+    END
+    ELSE IF @FactWithFKCount = 0
+    BEGIN
+        SET @DbScore = 1;
+        SET @DbFinding = '''' + CAST(@FactCount AS NVARCHAR) + '' fact table(s) found, but none have FKs referencing dimension tables.'';
+    END
+    ELSE IF @FactWithFKCount < @FactCount
+    BEGIN
+        SET @DbScore = 2;
+        SET @DbFinding = '''' + CAST(@FactWithFKCount AS NVARCHAR) + '' of '' + CAST(@FactCount AS NVARCHAR) + '' fact tables have FKs referencing dimension tables.'';
+    END
+    ELSE
+    BEGIN
+        SET @DbScore = 3;
+        SET @DbFinding = ''All '' + CAST(@FactCount AS NVARCHAR) + '' fact tables have FKs referencing dimension tables.'';
+    END
+
+    SELECT @DbScore AS DbScore, @DbFinding AS Finding;
+    ';
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM

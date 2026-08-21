@@ -4,13 +4,16 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute> -->
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.0" />
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="..\agents\**\*.cs" />
+    <Compile Include="..\agents\**\*.cs" Exclude="..\agents\ScriptGeneratingAgent\**" />
   </ItemGroup>
   <!-- Program.cs is the console entry point owned by the Exe project only. -->
   <ItemGroup>

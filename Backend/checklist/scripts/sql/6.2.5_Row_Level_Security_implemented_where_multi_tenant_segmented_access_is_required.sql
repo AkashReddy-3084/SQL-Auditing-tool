@@ -1,50 +1,104 @@
 -- Checklist: Row-Level Security implemented where multi-tenant/segmented access is required
 -- Scope: DATABASE
--- Scoring: 0 = No RLS predicates found. 1 = RLS found on 1-2 tables. 2 = RLS found on 3+ tables. 3 = Capped at 2 due to proxy evidence requiring human validation.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
+-- Scoring: 0: No RLS predicates found. 1: 1-2 tables with RLS. 2: 3+ tables with RLS. (Capped at 2 as business requirements require human validation)
+
 DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @Count INT = 0;
-        IF OBJECT_ID(''sys.security_predicates'') IS NOT NULL
-            SELECT @Count = COUNT(DISTINCT object_id) FROM sys.security_predicates;
-        SELECT @Count;';
-        
-        DECLARE @Count INT;
-        EXEC sp_executesql @Sql, N'@Count INT OUTPUT', @Count OUTPUT;
-        
-        DECLARE @DbScore INT = CASE 
-            WHEN @Count = 0 THEN 0
-            WHEN @Count BETWEEN 1 AND 2 THEN 1
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    SELECT 
+        DbName = ''' + REPLACE(@DbName, '''', '''''') + ''',
+        DbScore = CASE 
+            WHEN COUNT(DISTINCT o.object_id) = 0 THEN 0
+            WHEN COUNT(DISTINCT o.object_id) <= 2 THEN 1
             ELSE 2
-        END;
-        
-        INSERT INTO #DbResults VALUES (@DbName, @DbScore);
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        END,
+        Finding = CASE 
+            WHEN COUNT(DISTINCT o.object_id) = 0 THEN ''No RLS predicates found''
+            ELSE STRING_AGG(DISTINCT s.name + ''.'' + o.name, '', '') WITHIN GROUP (ORDER BY s.name, o.name)
+        END
+    FROM sys.security_predicates sp
+    JOIN sys.objects o ON sp.major_id = o.object_id
+    JOIN sys.schemas s ON o.schema_id = s.schema_id
+    WHERE o.type = ''U'';';
+    
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
 
--- Aggregate: worst-case score across all databases
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            SELECT 
+                DbName = ''' + REPLACE(@DbName, '''', '''''') + ''',
+                DbScore = CASE 
+                    WHEN COUNT(DISTINCT o.object_id) = 0 THEN 0
+                    WHEN COUNT(DISTINCT o.object_id) <= 2 THEN 1
+                    ELSE 2
+                END,
+                Finding = CASE 
+                    WHEN COUNT(DISTINCT o.object_id) = 0 THEN ''No RLS predicates found''
+                    ELSE STRING_AGG(DISTINCT s.name + ''.'' + o.name, '', '') WITHIN GROUP (ORDER BY s.name, o.name)
+                END
+            FROM sys.security_predicates sp
+            JOIN sys.objects o ON sp.major_id = o.object_id
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type = ''U'';';
+            
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'No user databases found');
+
 SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+
+SET @Finding = ISNULL(
+    (SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults WHERE Finding IS NOT NULL AND Finding <> ''),
+    'No non-compliant findings found'
+);
+
+SET @Finding = @Finding + CHAR(13) + CHAR(10) + '-- NOTE: This script provides automated evidence. Full compliance requires human review.';
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

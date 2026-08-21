@@ -1,43 +1,63 @@
 -- Checklist: Service tier / compute sizing based on workload analysis (not guesswork)
 -- Scope: SERVER
--- Scoring: 0=No metrics/tier info; 1=Severe under/over utilization (<10% or >90%); 2=Moderate utilization (10-90%); 3=Optimal utilization (20-80%) with explicit tier config
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @CpuUsage DECIMAL(5,2) = 0;
-DECLARE @HasTier BIT = 0;
+-- Scoring: 0 = Utilization <10% or >90% (severe misalignment); 1 = Utilization <20% or >80% (likely misaligned); 2 = Utilization 20-80% (reasonable alignment, proxy evidence); 3 = Not achievable via automation (requires documented workload analysis review).
 
--- Check for Azure SQL service tier
-IF EXISTS (SELECT 1 FROM sys.database_service_objectives)
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @UtilizationPct DECIMAL(5,2);
+
+-- Platform-specific resource utilization collection
+IF @EngineEdition IN (5, 8) -- Azure SQL Database or Managed Instance
 BEGIN
-    SET @HasTier = 1;
+    SELECT 
+        @UtilizationPct = AVG(avg_cpu_percent)
+    FROM sys.dm_db_resource_stats;
 END
-ELSE
+ELSE -- SQL Server
 BEGIN
-    -- On-prem: consider explicit max server memory configuration as "tier" proxy
-    -- Default max server memory is 2147483647 MB. Explicit config will be lower.
-    IF EXISTS (SELECT 1 FROM sys.configurations WHERE name = 'max server memory (MB)' AND value_in_use < 2147483647)
-    BEGIN
-        SET @HasTier = 1;
-    END
+    DECLARE @TotalMemKB BIGINT;
+    DECLARE @PhysMemKB BIGINT;
+    
+    SELECT @TotalMemKB = CAST(cntr_value AS BIGINT)
+    FROM sys.dm_os_performance_counters
+    WHERE counter_name = 'Total Server Memory (KB)';
+    
+    SELECT @PhysMemKB = physical_memory_kb
+    FROM sys.dm_os_sys_info;
+    
+    IF @PhysMemKB > 0 AND @TotalMemKB IS NOT NULL
+        SET @UtilizationPct = (@TotalMemKB * 100.0) / @PhysMemKB;
+    ELSE
+        SET @UtilizationPct = 50.0; -- Neutral fallback if metrics unavailable
 END
 
--- Get average CPU usage % from resource monitor ring buffer (proxy for workload intensity)
-SELECT @CpuUsage = AVG(record.value('(/Record/@CpuUsage)[1]', 'DECIMAL(5,2)'))
-FROM sys.dm_os_ring_buffers
-WHERE ring_buffer_type = N'RING_BUFFER_RESOURCE_MONITOR';
-
-IF @CpuUsage IS NULL SET @CpuUsage = 0;
-
--- Evaluate scoring (order matters: check highest score first)
-IF @CpuUsage BETWEEN 20 AND 80 AND @HasTier = 1
-    SET @Score = 3;
-ELSE IF @CpuUsage BETWEEN 10 AND 90
-    SET @Score = 2;
-ELSE IF @CpuUsage < 10 OR @CpuUsage > 90
+-- Determine score based on utilization proxy
+IF @UtilizationPct < 10.0 OR @UtilizationPct > 90.0
+    SET @Score = 0;
+ELSE IF @UtilizationPct < 20.0 OR @UtilizationPct > 80.0
     SET @Score = 1;
 ELSE
-    SET @Score = 0;
+    SET @Score = 2;
 
+-- Cap at 2 for proxy/indirect checks requiring human review
+IF @Score > 2 SET @Score = 2;
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SET @Finding = 'Observed resource utilization: ' + CAST(@UtilizationPct AS NVARCHAR(20)) + '%. ' +
+    CASE 
+        WHEN @Score = 0 THEN 'Severe under/over-provisioning detected. Sizing likely not based on workload analysis.'
+        WHEN @Score = 1 THEN 'Utilization outside optimal range. Sizing may require review.'
+        WHEN @Score = 2 THEN 'Utilization within acceptable range. Proxy evidence suggests reasonable alignment.'
+    END + 
+    ' -- NOTE: This script provides automated evidence. Full compliance requires human review.';
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

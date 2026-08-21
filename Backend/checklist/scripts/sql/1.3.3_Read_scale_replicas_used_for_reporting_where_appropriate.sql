@@ -1,39 +1,59 @@
 -- Checklist: Read-scale replicas used for reporting where appropriate
 -- Scope: SERVER
--- Scoring: 0=No AGs configured, 1=AGs exist but no read routing enabled, 2=Read routing configured, 3=Read routing configured + active ReadOnly connections detected
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AgCount INT = 0;
-DECLARE @ReadRoutingConfigured INT = 0;
-DECLARE @ReadOnlyConnections INT = 0;
+-- Scoring: 3=Replicas configured and routing fully verified; 2=Replicas/routing configured but workload assignment requires manual review; 1=Partial configuration or legacy mirroring only; 0=No replicas or read-only routing configured.
 
-IF OBJECT_ID('sys.availability_groups') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @ReplicaCount INT = 0;
+
+IF @EngineEdition = 5
 BEGIN
-    SELECT @AgCount = COUNT(*) FROM sys.availability_groups;
-
-    IF @AgCount > 0
+    -- Azure SQL Database
+    SET @DatabaseQueried = DB_NAME();
+    BEGIN TRY
+        SELECT @ReplicaCount = COUNT(*)
+        FROM sys.dm_database_copies
+        WHERE is_primary = 0;
+    END TRY
+    BEGIN CATCH
+        SET @ReplicaCount = 0;
+    END CATCH;
+    SET @Finding = CASE 
+        WHEN @ReplicaCount > 0 THEN CAST(@ReplicaCount AS NVARCHAR(10)) + ' read-scale replica(s) configured.'
+        ELSE 'No read-scale replicas configured.'
+    END;
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL Managed Instance
+    SET @DatabaseQueried = 'master';
+    IF OBJECT_ID('master.sys.availability_read_only_routing_groups') IS NOT NULL
     BEGIN
-        SELECT @ReadRoutingConfigured = COUNT(*)
-        FROM sys.availability_replicas ar
-        JOIN sys.dm_hadr_availability_replica_states rs ON ar.group_id = rs.group_id AND ar.replica_id = rs.replica_id
-        WHERE rs.role = 2 -- Secondary replica
-          AND (ar.read_only_routing_url IS NOT NULL OR rs.is_read_compatible = 1);
-
-        SELECT @ReadOnlyConnections = COUNT(*)
-        FROM sys.dm_exec_connections
-        WHERE application_intent = 'ReadOnly';
+        SELECT @ReplicaCount = COUNT(*)
+        FROM master.sys.availability_read_only_routing_groups arg
+        INNER JOIN master.sys.availability_replicas ar ON arg.group_id = ar.group_id
+        WHERE ar.role_desc = 'SECONDARY'
+          AND ar.read_only_routing_url IS NOT NULL;
     END
+    SET @Finding = CASE 
+        WHEN @ReplicaCount > 0 THEN CAST(@ReplicaCount AS NVARCHAR(10)) + ' read-only routing replica(s) configured.'
+        ELSE 'No read-only routing replicas configured.'
+    END;
 END
 
-IF @AgCount = 0
-    SET @Score = 0;
-ELSE IF @ReadRoutingConfigured = 0
-    SET @Score = 1;
-ELSE IF @ReadOnlyConnections > 0
-    SET @Score = 3;
-ELSE
-    SET @Score = 2;
+SET @Score = CASE 
+    WHEN @ReplicaCount > 0 THEN 2
+    ELSE 0
+END;
 
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review to confirm reporting workloads are appropriately routed.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

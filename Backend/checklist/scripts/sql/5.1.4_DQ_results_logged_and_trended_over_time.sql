@@ -1,53 +1,71 @@
-SET NOCOUNT ON;
+-- Checklist: DQ results logged and trended over time
+-- Scope: DATABASE
+-- Scoring: 0: No DQ logging tables found. 1: DQ tables found but missing temporal/trending columns. 2: DQ tables with temporal columns found. 3: DQ tables with temporal columns and multiple tables indicating a mature logging framework.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'SELECT ' + QUOTENAME(@DbName) + N' AS DbName,
-CASE
-    WHEN EXISTS (SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.tables t JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id WHERE t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'')
-    AND EXISTS (SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.columns c JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON c.object_id = t.object_id WHERE t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'' AND (c.name LIKE ''%date%'' OR c.name LIKE ''%timestamp%'' OR c.name LIKE ''%count%'' OR c.name LIKE ''%score%''))
-    AND (SELECT ISNULL(SUM(p.rows),0) FROM ' + QUOTENAME(@DbName) + N'.sys.partitions p JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON p.object_id = t.object_id WHERE (t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'') AND p.index_id < 2 AND p.partition_number = 1) > 100
-    THEN 3
-    WHEN EXISTS (SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.tables t JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id WHERE t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'')
-    AND EXISTS (SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.columns c JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON c.object_id = t.object_id WHERE t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'' AND (c.name LIKE ''%date%'' OR c.name LIKE ''%timestamp%'' OR c.name LIKE ''%count%'' OR c.name LIKE ''%score%''))
-    THEN 2
-    WHEN EXISTS (SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.tables t JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id WHERE t.name LIKE ''%dq%'' OR t.name LIKE ''%quality%'' OR t.name LIKE ''%audit%'' OR t.name LIKE ''%log%'')
-    THEN 1
-    ELSE 0
-END AS DbScore';
-        INSERT INTO #DbResults (DbName, DbScore) EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        -- Gracefully handle inaccessible databases by assigning a score of 0
-        INSERT INTO #DbResults (DbName, DbScore) VALUES (@DbName, 0);
-    END CATCH
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    -- Azure SQL Database: Evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+DECLARE @DqTables TABLE (FullName NVARCHAR(256), HasTemporal BIT);
+INSERT INTO @DqTables
+SELECT DISTINCT s.name + ''.'' + t.name, 
+    CASE WHEN EXISTS (
+        SELECT 1 FROM sys.columns c 
+        WHERE c.object_id = t.object_id 
+          AND (c.name LIKE ''%date%'' OR c.name LIKE ''%time%'' OR c.name LIKE ''%score%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%result%'')
+    ) THEN 1 ELSE 0 END
+FROM sys.tables t
+JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE t.name LIKE ''%DQ%'' OR t.name LIKE ''%Quality%'' OR t.name LIKE ''%Validation%'' OR t.name LIKE ''%Audit%'' OR t.name LIKE ''%Log%'';
+
+DECLARE @Count INT = (SELECT COUNT(*) FROM @DqTables);
+DECLARE @TemporalCount INT = (SELECT COUNT(*) FROM @DqTables WHERE HasTemporal = 1);
+DECLARE @DbScore INT;
+DECLARE @DbFinding NVARCHAR(MAX);
+
+IF @Count = 0
+BEGIN
+    SET @DbScore = 0;
+    SET @DbFinding = ''No DQ logging tables found'';
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE IF @TemporalCount = 0
+BEGIN
+    SET @DbScore = 1;
+    SET @DbFinding = ''DQ tables found but missing temporal/trending columns: '' + ISNULL((SELECT STRING_AGG(FullName, '', '') FROM @DqTables), ''None'');
+END
+ELSE IF @TemporalCount > 0 AND @Count <= 1
+BEGIN
+    SET @DbScore = 2;
+    SET @DbFinding = ''DQ tables with temporal columns found: '' + ISNULL((SELECT STRING_AGG(FullName, '', '') FROM @DqTables WHERE HasTemporal = 1), ''None'');
+END
+ELSE
+BEGIN
+    SET @DbScore = 3;
+    SET @DbFinding = ''DQ logging framework detected with temporal tracking: '' + ISNULL((SELECT STRING_AGG(FullName, '', '') FROM @DqTables WHERE HasTemporal = 1), ''None'');
+END
 
--- Aggregate results: worst-case (MIN) across all user databases
-SELECT @Score = ISNULL(MIN(DbScore), 0) FROM #DbResults;
+INSERT INTO #DbResults (DbName, DbScore, Finding)
+VALUES (''' + @DbName + ''', @DbScore, @DbFinding);';
 
--- Determine Pass/Fail based on scoring logic
-SET @Result = CASE WHEN @Score = 3 THEN 'Pass' ELSE 'Fail' END;
-
--- Cleanup temporary table
-DROP TABLE #DbResults;
-
--- Required output format
-SELECT @Result AS Result, @Score AS Score;
+    EXEC sp_executesql @Sql;
+END
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: Iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR

@@ -1,70 +1,65 @@
 -- Checklist: DTU/vCore utilization profiled (peak vs off-peak)
--- Scope: DATABASE
--- Scoring: 3=Query Store enabled (Read/Write) or Azure resource stats DMV has data; 2=Query Store enabled (Stale/RO) or Azure DMV exists but no data or on-prem perf counters available; 1=Basic DMVs exist but no profiling setup; 0=No relevant artifacts
--- NOTE: This script provides automated evidence. Full compliance requires human review of historical peak/off-peak trends.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
+-- Scope: SERVER
+-- Scoring: 0: No utilization data available. 1: Minimal/intermittent data. 2: Recent utilization metrics available (proxy evidence). 3: Full historical profiling (requires manual/external tools). Automated checks cap at 2.
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @MaxCpu DECIMAL(5,2);
+DECLARE @AvgCpu DECIMAL(5,2);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
+SET @DatabaseQueried = 'master';
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
+    -- Azure SQL Database
     BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @DbScore INT = 0;
-        DECLARE @QSScore INT = 0;
-        DECLARE @AzureScore INT = 0;
-        DECLARE @OnPremScore INT = 0;
-        
-        -- Check Query Store state
-        IF OBJECT_ID(''sys.database_query_store_options'') IS NOT NULL
-            SELECT @QSScore = CASE actual_state 
-                WHEN 2 THEN 3 
-                WHEN 1 THEN 2 
-                WHEN 3 THEN 2 
-                ELSE 0 
-            END FROM sys.database_query_store_options;
-        
-        -- Check Azure SQL DTU/vCore resource stats
-        IF OBJECT_ID(''sys.dm_db_resource_stats'') IS NOT NULL
-            SELECT @AzureScore = CASE 
-                WHEN EXISTS(SELECT 1 FROM sys.dm_db_resource_stats WHERE avg_cpu_percent > 0) THEN 3 
-                ELSE 2 
-            END;
-        
-        -- Fallback to on-prem performance counters
-        IF OBJECT_ID(''sys.dm_db_resource_stats'') IS NULL
-            SELECT @OnPremScore = CASE 
-                WHEN EXISTS(SELECT 1 FROM sys.dm_os_performance_counters WHERE counter_name LIKE ''CPU usage %'') THEN 2 
-                ELSE 1 
-            END;
-        
-        -- Retain the highest applicable score across all checks
-        SET @DbScore = CASE WHEN @QSScore > @DbScore THEN @QSScore ELSE @DbScore END;
-        SET @DbScore = CASE WHEN @AzureScore > @DbScore THEN @AzureScore ELSE @DbScore END;
-        SET @DbScore = CASE WHEN @OnPremScore > @DbScore THEN @OnPremScore ELSE @DbScore END;
-        
-        INSERT INTO #DbResults VALUES (@DbName, @DbScore);';
-        EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName;
+        SELECT @MaxCpu = MAX(max_cpu_percent), @AvgCpu = AVG(avg_cpu_percent)
+        FROM sys.dm_db_resource_stats;
     END TRY
     BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
+        SET @MaxCpu = NULL;
+        SET @AvgCpu = NULL;
     END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    
+    SET @Score = CASE 
+        WHEN @MaxCpu IS NULL THEN 0
+        WHEN @MaxCpu < 10 THEN 1
+        ELSE 2
+    END;
+    SET @Finding = 'Azure SQL DB utilization (last 1h): Avg CPU = ' + ISNULL(CAST(@AvgCpu AS NVARCHAR), 'N/A') + '%, Peak CPU = ' + ISNULL(CAST(@MaxCpu AS NVARCHAR), 'N/A') + '%. Automated proxy evidence provided.';
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI
+    BEGIN TRY
+        SELECT @MaxCpu = MAX(cntr_value), @AvgCpu = AVG(cntr_value)
+        FROM sys.dm_os_performance_counters
+        WHERE object_name LIKE '%Resource Pool Stats%'
+          AND counter_name = 'CPU usage %'
+          AND instance_name = 'default';
+    END TRY
+    BEGIN CATCH
+        SET @MaxCpu = NULL;
+        SET @AvgCpu = NULL;
+    END CATCH;
+    
+    SET @Score = CASE 
+        WHEN @MaxCpu IS NULL THEN 0
+        WHEN @MaxCpu < 10 THEN 1
+        ELSE 2
+    END;
+    SET @Finding = 'SQL Server/MI vCore utilization (current snapshot): Avg CPU = ' + ISNULL(CAST(@AvgCpu AS NVARCHAR), 'N/A') + '%, Peak CPU = ' + ISNULL(CAST(@MaxCpu AS NVARCHAR), 'N/A') + '%. Automated proxy evidence provided.';
+END
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

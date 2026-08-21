@@ -1,81 +1,119 @@
 -- Checklist: Linked servers / external data sources use least-privilege, non-personal credentials
 -- Scope: SERVER
--- Scoring: 0=Any uses personal/admin credentials or uses_self_credential; 1=Mixed compliance; 2=All use non-personal credentials; 3=All use explicit service accounts with uses_self_credential=0 and strict naming conventions.
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
-DECLARE @Total INT = 0;
-DECLARE @FailCount INT = 0;
+-- Scoring: 3=All use integrated security/managed identity/service accounts; 2=<20% non-compliant; 1=20-50% non-compliant; 0=>50% non-compliant or any use sa/admin.
+
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
 CREATE TABLE #Findings (
-    SourceType NVARCHAR(20),
+    SourceType NVARCHAR(50),
     SourceName NVARCHAR(256),
-    CredentialInfo NVARCHAR(256),
-    IsPersonal BIT,
-    UsesSelfCred BIT
+    DbName NVARCHAR(128),
+    AuthType NVARCHAR(50),
+    CredentialName NVARCHAR(256),
+    IsCompliant BIT
 );
 
 -- Check Linked Servers
-INSERT INTO #Findings
-SELECT 'LinkedServer', s.name, 
-       ISNULL(p.name, 'CurrentUser'),
-       CASE WHEN ll.local_principal_id IS NULL THEN 1
-            WHEN p.name LIKE '%admin%' OR p.name LIKE '%sa%' OR p.name LIKE '%user%' OR p.name LIKE '%dev%' OR p.name LIKE '%test%' OR p.name LIKE '%john%' OR p.name LIKE '%jane%' THEN 1
-            ELSE 0 END,
-       CASE WHEN ll.local_principal_id IS NULL THEN 1 ELSE ll.uses_self_credential END
-FROM sys.servers s
-LEFT JOIN sys.linked_logins ll ON s.server_id = ll.server_id
-LEFT JOIN sys.server_principals p ON ll.local_principal_id = p.principal_id
-WHERE s.is_linked = 1;
-
--- Check External Data Sources per database
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF OBJECT_ID('sys.linked_logins') IS NOT NULL
 BEGIN
-    SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
     INSERT INTO #Findings
-    SELECT ''ExternalDataSource'', eds.name, 
-           ISNULL(dc.name, ''CurrentUser''),
-           CASE WHEN dc.credential_id IS NULL THEN 1
-                WHEN dc.name LIKE ''%admin%'' OR dc.name LIKE ''%sa%'' OR dc.name LIKE ''%user%'' OR dc.name LIKE ''%dev%'' OR dc.name LIKE ''%test%'' OR dc.name LIKE ''%john%'' OR dc.name LIKE ''%jane%'' THEN 1
-                ELSE 0 END,
-           CASE WHEN dc.credential_id IS NULL THEN 1 ELSE 0 END
-    FROM sys.external_data_sources eds
-    LEFT JOIN sys.database_credentials dc ON eds.credential_id = dc.credential_id;';
-    BEGIN TRY
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        -- Ignore errors for inaccessible databases or missing catalog views
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SELECT 
+        'LinkedServer',
+        s.name,
+        'master',
+        CASE WHEN l.uses_self_credential = 1 THEN 'Integrated' ELSE 'Explicit' END,
+        l.rmt_user,
+        CASE 
+            WHEN l.uses_self_credential = 1 THEN 1
+            WHEN l.rmt_user LIKE 'svc[_]%' OR l.rmt_user LIKE 'app[_]%' OR l.rmt_user LIKE 'service[_]%' OR l.rmt_user LIKE 'managed[_]%' OR l.rmt_user LIKE 'azure[_]%' OR l.rmt_user LIKE 'aad[_]%' THEN 1
+            ELSE 0
+        END
+    FROM sys.servers s
+    LEFT JOIN sys.linked_logins l ON s.server_id = l.server_id
+    WHERE s.is_linked = 1;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
 
-SELECT @Total = COUNT(*), 
-       @FailCount = SUM(CASE WHEN IsPersonal = 1 OR UsesSelfCred = 1 THEN 1 ELSE 0 END) 
-FROM #Findings;
+-- Check External Data Sources across user databases
+IF OBJECT_ID('sys.external_data_sources') IS NOT NULL
+BEGIN
+    DECLARE @DbName NVARCHAR(128);
+    DECLARE @Sql NVARCHAR(MAX);
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+        INSERT INTO #Findings
+        SELECT 
+            ''ExternalDataSource'',
+            eds.name,
+            ''' + @DbName + N''',
+            CASE WHEN c.name IS NULL THEN ''ManagedIdentity/Integrated'' ELSE ''Credential'' END,
+            c.name,
+            CASE 
+                WHEN c.name IS NULL THEN 1
+                WHEN c.name LIKE ''svc[_]%'' OR c.name LIKE ''app[_]%'' OR c.name LIKE ''service[_]%'' OR c.name LIKE ''managed[_]%'' OR c.name LIKE ''azure[_]%'' OR c.name LIKE ''aad[_]%'' THEN 1
+                ELSE 0
+            END
+        FROM sys.external_data_sources eds
+        LEFT JOIN sys.database_credentials c ON eds.credential_id = c.credential_id;';
+        
+        BEGIN TRY
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #Findings (SourceType, SourceName, DbName, AuthType, CredentialName, IsCompliant)
+            VALUES ('ExternalDataSource', 'Error', @DbName, 'Unknown', 'Evaluation failed', 0);
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+-- Calculate scores
+DECLARE @Total INT = (SELECT COUNT(*) FROM #Findings);
+DECLARE @Compliant INT = (SELECT COUNT(*) FROM #Findings WHERE IsCompliant = 1);
+DECLARE @NonCompliant INT = @Total - @Compliant;
+DECLARE @HasHighPriv BIT = (SELECT MAX(CASE WHEN CredentialName LIKE '%sa%' OR CredentialName LIKE '%admin%' THEN 1 ELSE 0 END) FROM #Findings WHERE IsCompliant = 0);
 
 IF @Total = 0
+BEGIN
     SET @Score = 3;
-ELSE BEGIN
-    IF @FailCount > 0
-        SET @Score = 0;
-    ELSE BEGIN
-        SET @Score = 2;
-        -- Upgrade to 3 if all credentials use strict service account naming conventions
-        IF NOT EXISTS (SELECT 1 FROM #Findings WHERE CredentialInfo NOT LIKE 'svc_%')
-            SET @Score = 3;
-    END
+    SET @Finding = 'No linked servers or external data sources found.';
+END
+ELSE
+BEGIN
+    IF @HasHighPriv = 1 SET @Score = 0;
+    ELSE IF @NonCompliant = 0 SET @Score = 3;
+    ELSE IF CAST(@NonCompliant AS FLOAT) / @Total < 0.2 SET @Score = 2;
+    ELSE IF CAST(@NonCompliant AS FLOAT) / @Total < 0.5 SET @Score = 1;
+    ELSE SET @Score = 0;
+
+    DECLARE @NonCompliantList NVARCHAR(MAX) = (
+        SELECT STRING_AGG(SourceType + ': ' + SourceName + ' (' + DbName + ')', ', ')
+        FROM #Findings WHERE IsCompliant = 0
+    );
+    
+    IF @NonCompliantList IS NULL SET @NonCompliantList = 'None';
+    
+    SET @Finding = 'Total: ' + CAST(@Total AS NVARCHAR) + ', Compliant: ' + CAST(@Compliant AS NVARCHAR) + ', Non-compliant: ' + CAST(@NonCompliant AS NVARCHAR) + '. Non-compliant: ' + @NonCompliantList;
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-SELECT @Result AS Result, @Score AS Score;
 DROP TABLE #Findings;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

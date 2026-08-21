@@ -1,55 +1,77 @@
-USE master;
-SET NOCOUNT ON;
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Checklist: Resource utilization trended over time
+-- Scope: SERVER
+-- Scoring: 0: No evidence of collection mechanism. 1: Single basic collection job or session found. 2: Structured collection job with multiple steps or multiple collection mechanisms found. 3: Comprehensive, multi-metric collection with clear historical retention strategy.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 DECLARE @JobCount INT = 0;
+DECLARE @StepCount INT = 0;
+DECLARE @JobList NVARCHAR(MAX) = '';
 DECLARE @XeCount INT = 0;
+DECLARE @XeList NVARCHAR(MAX) = '';
 
--- Check for SQL Agent jobs related to resource/performance collection
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs)
+IF @EngineEdition <> 5
 BEGIN
-    SELECT @JobCount = COUNT(*) 
-    FROM msdb.dbo.sysjobs
-    WHERE name LIKE '%resource%' OR name LIKE '%performance%' OR name LIKE '%counter%'
-       OR name LIKE '%wait%' OR name LIKE '%dmv%' OR name LIKE '%collection%'
-       OR name LIKE '%health%' OR name LIKE '%monitor%';
-END
+    SET @DatabaseQueried = 'master';
+    
+    SELECT @JobCount = COUNT(DISTINCT j.name),
+           @StepCount = COUNT(*)
+    FROM msdb.dbo.sysjobs j
+    JOIN msdb.dbo.sysjobsteps s ON j.job_id = s.job_id
+    WHERE j.enabled = 1
+      AND (
+        j.name LIKE '%performance%' OR j.name LIKE '%counter%' OR j.name LIKE '%resource%' OR j.name LIKE '%utilization%' OR j.name LIKE '%monitor%' OR j.name LIKE '%trend%' OR j.name LIKE '%health%' OR j.name LIKE '%metrics%'
+        OR s.command LIKE '%dm_os%' OR s.command LIKE '%sp_whoisactive%' OR s.command LIKE '%query_store%' OR s.command LIKE '%performance_counter%' OR s.command LIKE '%sys.dm%'
+      );
 
--- Check for Extended Event sessions capturing resource metrics
-IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions)
-BEGIN
-    SELECT @XeCount = COUNT(DISTINCT s.name)
-    FROM sys.dm_xe_sessions s
-    JOIN sys.dm_xe_session_events se ON s.address = se.event_session_address
-    JOIN sys.dm_xe_objects eo ON se.event_name = eo.name AND eo.object_type = N'event'
-    WHERE eo.name IN (
-        'cpu_ring_buffer_recorded', 'memory_broker_ring_buffer_recorded',
-        'wait_info', 'wait_stats', 'page_life_expectancy',
-        'batch_completed', 'sql_statement_completed', 'sp_server_diagnostics_component_result'
-    );
+    SELECT @JobList = STRING_AGG(j.name, ', ')
+    FROM (SELECT DISTINCT name FROM msdb.dbo.sysjobs j
+          JOIN msdb.dbo.sysjobsteps s ON j.job_id = s.job_id
+          WHERE j.enabled = 1
+            AND (
+              j.name LIKE '%performance%' OR j.name LIKE '%counter%' OR j.name LIKE '%resource%' OR j.name LIKE '%utilization%' OR j.name LIKE '%monitor%' OR j.name LIKE '%trend%' OR j.name LIKE '%health%' OR j.name LIKE '%metrics%'
+              OR s.command LIKE '%dm_os%' OR s.command LIKE '%sp_whoisactive%' OR s.command LIKE '%query_store%' OR s.command LIKE '%performance_counter%' OR s.command LIKE '%sys.dm%'
+            )
+         ) AS J;
 END
-
--- Determine score based on evidence
-IF @JobCount > 0 AND @XeCount > 0
-    SET @Score = 2; -- Automated mechanisms detected. Score 3 requires manual verification of historical storage retention per checklist.
-ELSE IF @JobCount > 0 OR @XeCount > 0
-    SET @Score = 2;
 ELSE
 BEGIN
-    -- Check for ad-hoc procedures/functions that query DMVs (proxy for manual/ad-hoc)
-    -- Uses server-wide catalog views to cover all databases without iteration
-    IF EXISTS (
-        SELECT 1 FROM sys.all_objects p
-        CROSS APPLY sys.all_sql_modules m ON p.object_id = m.object_id
-        WHERE p.is_ms_shipped = 0
-        AND (m.definition LIKE '%sys.dm_os_performance_counters%'
-          OR m.definition LIKE '%sys.dm_os_wait_stats%'
-          OR m.definition LIKE '%sys.dm_os_sys_memory%')
-    )
-        SET @Score = 1;
-    ELSE
-        SET @Score = 0;
+    SET @DatabaseQueried = DB_NAME();
+    
+    SELECT @XeCount = COUNT(*)
+    FROM sys.dm_xe_sessions s
+    JOIN sys.dm_xe_session_targets t ON s.address = t.event_session_address
+    WHERE s.name LIKE '%resource%' OR s.name LIKE '%performance%' OR s.name LIKE '%monitor%' OR s.name LIKE '%health%' OR s.name LIKE '%metrics%'
+       OR t.target_name LIKE '%event_file%' OR t.target_name LIKE '%ring_buffer%';
+
+    SELECT @XeList = STRING_AGG(s.name, ', ')
+    FROM sys.dm_xe_sessions s
+    JOIN sys.dm_xe_session_targets t ON s.address = t.event_session_address
+    WHERE s.name LIKE '%resource%' OR s.name LIKE '%performance%' OR s.name LIKE '%monitor%' OR s.name LIKE '%health%' OR s.name LIKE '%metrics%'
+       OR t.target_name LIKE '%event_file%' OR t.target_name LIKE '%ring_buffer%';
 END
 
+SET @Score = CASE
+    WHEN @JobCount = 0 AND @XeCount = 0 THEN 0
+    WHEN (@JobCount = 1 AND @StepCount = 1) OR @XeCount = 1 THEN 1
+    WHEN (@JobCount >= 1 AND @StepCount >= 2) OR @XeCount >= 2 THEN 2
+    WHEN @JobCount >= 2 OR @XeCount >= 3 THEN 3
+    ELSE 0
+END;
+
+SET @Finding = CASE
+    WHEN @JobCount = 0 AND @XeCount = 0 THEN 'No evidence of resource utilization collection or trending mechanism found.'
+    WHEN @JobCount > 0 THEN 'Found ' + CAST(@JobCount AS NVARCHAR(10)) + ' SQL Agent job(s): ' + ISNULL(@JobList, 'None') + '. Steps: ' + CAST(@StepCount AS NVARCHAR(10)) + '.'
+    ELSE 'Found ' + CAST(@XeCount AS NVARCHAR(10)) + ' Extended Event session(s): ' + ISNULL(@XeList, 'None') + '.'
+END;
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

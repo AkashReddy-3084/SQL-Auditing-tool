@@ -1,46 +1,49 @@
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AzureADCount INT = 0;
-DECLARE @SQLCount INT = 0;
-DECLARE @AuthMode INT = NULL;
-DECLARE @IsSqlAuthEnabled BIT = NULL;
+-- Checklist: Microsoft Entra ID (Azure AD) authentication used where possible (over SQL auth)
+-- Scope: SERVER
+-- Scoring: 3: Zero SQL auth logins; 2: 1-2 SQL auth logins; 1: >2 SQL auth logins but Azure AD logins exist; 0: >2 SQL auth logins and no Azure AD logins.
 
--- Count active Azure AD (External) logins
-SELECT @AzureADCount = COUNT(*) FROM sys.server_principals WHERE type_desc = 'EXTERNAL_LOGIN' AND is_disabled = 0;
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Count active SQL authentication logins
-SELECT @SQLCount = COUNT(*) FROM sys.server_principals WHERE type_desc = 'SQL_LOGIN' AND is_disabled = 0;
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @SqlLoginCount INT = 0;
+DECLARE @AadLoginCount INT = 0;
+DECLARE @SqlLoginNames NVARCHAR(MAX) = '';
 
--- Check SQL Server authentication mode (On-prem / MI)
-IF EXISTS (SELECT 1 FROM sys.configurations WHERE name = 'SQL Server authentication mode')
+IF @EngineEdition = 5 -- Azure SQL Database
 BEGIN
-    SELECT @AuthMode = value_in_use FROM sys.configurations WHERE name = 'SQL Server authentication mode';
+    SELECT @SqlLoginCount = COUNT(*) FROM sys.database_principals WHERE type_desc = 'SQL_USER';
+    SELECT @AadLoginCount = COUNT(*) FROM sys.database_principals WHERE type_desc = 'EXTERNAL_USER';
+    SELECT @SqlLoginNames = STRING_AGG(name, ', ') FROM sys.database_principals WHERE type_desc = 'SQL_USER';
+END
+ELSE -- SQL Server / Azure SQL MI
+BEGIN
+    SELECT @SqlLoginCount = COUNT(*) FROM sys.server_principals WHERE type_desc = 'SQL_LOGIN';
+    SELECT @AadLoginCount = COUNT(*) FROM sys.server_principals WHERE type_desc = 'EXTERNAL_LOGIN';
+    SELECT @SqlLoginNames = STRING_AGG(name, ', ') FROM sys.server_principals WHERE type_desc = 'SQL_LOGIN';
 END
 
--- Check SQL auth enabled flag (Azure SQL DB)
-IF EXISTS (SELECT 1 FROM sys.sql_server_properties)
-BEGIN
-    SELECT @IsSqlAuthEnabled = is_sql_auth_enabled FROM sys.sql_server_properties;
-END
-
--- Determine score based on direct configuration or principal ratio
--- Score 3: SQL auth disabled at server level (Windows Auth only mode = 1, or Azure SQL flag = 0)
-IF @AuthMode = 1 OR @IsSqlAuthEnabled = 0
-BEGIN
+IF @SqlLoginCount = 0
     SET @Score = 3;
-END
-ELSE IF @AzureADCount > @SQLCount
-BEGIN
+ELSE IF @SqlLoginCount <= 2
     SET @Score = 2;
-END
-ELSE IF @AzureADCount > 0
-BEGIN
+ELSE IF @AadLoginCount > 0
     SET @Score = 1;
-END
 ELSE
-BEGIN
     SET @Score = 0;
-END
 
+SET @Finding = CASE 
+    WHEN @SqlLoginCount = 0 THEN 'No SQL authentication logins found.'
+    ELSE 'SQL authentication logins found: ' + @SqlLoginNames
+END;
+
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

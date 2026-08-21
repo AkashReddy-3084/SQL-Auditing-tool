@@ -1,47 +1,68 @@
 -- Checklist: SQL Audit (server/database) enabled for sensitive operations
 -- Scope: SERVER
--- Scoring: 0=No enabled audit, 1=Enabled but covers 0 sensitive ops, 2=Covers 1-2 sensitive ops, 3=Covers 3+ sensitive ops
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @CoveredCount INT = 0;
-DECLARE @IsEnabled BIT = 0;
+-- Scoring: 0=No audits configured; 1=Audits configured but disabled; 2=Audit enabled but specifications missing/partial; 3=Audit and specifications fully enabled.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
--- Check server audit if available (On-prem / MI)
-IF OBJECT_ID('sys.server_audit_specifications') IS NOT NULL
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+
+IF @EngineEdition = 5
 BEGIN
-    SELECT @IsEnabled = MAX(is_state_enabled) FROM sys.server_audit_specifications;
-    IF @IsEnabled = 1
-    BEGIN
-        SELECT @CoveredCount = COUNT(DISTINCT s.ActionName)
-        FROM (VALUES ('LOGIN_FAILURES'), ('SERVER_OPERATION'), ('SCHEMA_OBJECT_CHANGE_GROUP'), 
-              ('SERVER_PRINCIPAL_CHANGE_GROUP'), ('SERVER_ROLE_MEMBER_CHANGE_GROUP'), 
-              ('DATABASE_PRINCIPAL_CHANGE_GROUP'), ('DATABASE_ROLE_MEMBER_CHANGE_GROUP'), 
-              ('BACKUP_RESTORE_GROUP'), ('BULK_OPERATIONS_GROUP'), ('SERVER_STATE_CHANGE_GROUP')) AS s(ActionName)
-        INNER JOIN sys.server_audit_specification_details d ON s.ActionName = d.audit_action_id
-        INNER JOIN sys.server_audit_specifications a ON d.server_specification_id = a.server_specification_id
-        WHERE a.is_state_enabled = 1;
-    END
+    -- Azure SQL Database: Database-level audits only
+    DECLARE @DbAuditEnabled INT = 0;
+    SELECT @DbAuditEnabled = COUNT(*) FROM sys.database_audit_specifications WHERE is_state_enabled = 1;
+    
+    IF @DbAuditEnabled > 0
+        SET @Score = 3;
+    ELSE IF EXISTS (SELECT 1 FROM sys.database_audit_specifications)
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+        
+    SET @Finding = CASE 
+        WHEN @Score = 3 THEN 'Database audit enabled in current database.'
+        WHEN @Score = 1 THEN 'Database audit configured but disabled in current database.'
+        ELSE 'No database audit configured in current database.'
+    END;
+    SET @DatabaseQueried = DB_NAME();
 END
 ELSE
 BEGIN
-    -- Fallback to database audit for Azure SQL DB
-    SELECT @IsEnabled = MAX(is_state_enabled) FROM sys.database_audit_specifications;
-    IF @IsEnabled = 1
-    BEGIN
-        SELECT @CoveredCount = COUNT(DISTINCT s.ActionName)
-        FROM (VALUES ('LOGIN_FAILURES'), ('SCHEMA_OBJECT_CHANGE_GROUP'), 
-              ('DATABASE_PRINCIPAL_CHANGE_GROUP'), ('DATABASE_ROLE_MEMBER_CHANGE_GROUP'), 
-              ('BACKUP_RESTORE_GROUP'), ('BULK_OPERATIONS_GROUP')) AS s(ActionName)
-        INNER JOIN sys.database_audit_specification_details d ON s.ActionName = d.audit_action_id
-        INNER JOIN sys.database_audit_specifications a ON d.database_specification_id = a.database_specification_id
-        WHERE a.is_state_enabled = 1;
-    END
+    -- SQL Server / Azure SQL MI: Server-level audits
+    DECLARE @ServerAuditNames NVARCHAR(MAX) = '';
+    SELECT @ServerAuditNames = STRING_AGG(name, ', ') FROM sys.server_audits WHERE is_state_enabled = 1;
+    
+    DECLARE @ServerSpecEnabled INT = 0;
+    SELECT @ServerSpecEnabled = COUNT(*) FROM sys.server_audit_specifications WHERE is_state_enabled = 1;
+    
+    DECLARE @ServerAuditExists BIT = CASE WHEN EXISTS (SELECT 1 FROM sys.server_audits) THEN 1 ELSE 0 END;
+    DECLARE @ServerSpecExists BIT = CASE WHEN EXISTS (SELECT 1 FROM sys.server_audit_specifications) THEN 1 ELSE 0 END;
+    
+    IF @ServerAuditExists = 1 AND @ServerSpecEnabled > 0
+        SET @Score = 3;
+    ELSE IF @ServerAuditExists = 1 AND @ServerSpecEnabled = 0 AND @ServerSpecExists = 1
+        SET @Score = 2;
+    ELSE IF @ServerAuditExists = 1 AND @ServerSpecExists = 1
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+        
+    SET @Finding = CASE 
+        WHEN @Score = 3 THEN 'Server audit enabled: ' + ISNULL(@ServerAuditNames, 'None') + '. Specifications enabled.'
+        WHEN @Score = 2 THEN 'Server audit enabled: ' + ISNULL(@ServerAuditNames, 'None') + '. Specifications configured but disabled.'
+        WHEN @Score = 1 THEN 'Server audit and specifications configured but disabled.'
+        ELSE 'No server audits or specifications found.'
+    END;
+    SET @DatabaseQueried = 'master';
 END
 
-IF @CoveredCount >= 3 SET @Score = 3;
-ELSE IF @CoveredCount >= 1 SET @Score = 2;
-ELSE IF @IsEnabled = 1 SET @Score = 1;
-ELSE SET @Score = 0;
-
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,39 +1,108 @@
 -- Checklist: No manual production changes — all via pipeline
--- Scope: SERVER
--- Scoring: 0=No audit or CI/CD evidence; 1=Pipeline jobs found but no change tracking; 2=Audit/Extended Events enabled for change tracking (proxy evidence); 3=Not achievable for process verification
+-- Scope: DATABASE
+-- Scoring: 3=No recent changes; 2=Changes correlated with jobs (proxy); 1=Few changes, no job correlation; 0=Many changes, no job correlation
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @AuditEnabled BIT = 0;
-DECLARE @PipelineJobs BIT = 0;
+DECLARE @DbName NVARCHAR(256);
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @HasMsdb BIT = CASE WHEN @EngineEdition = 5 THEN 0 ELSE 1 END;
 
--- Check for enabled Server Audit
-IF EXISTS (SELECT 1 FROM sys.server_audits WHERE is_state_enabled = 1) SET @AuditEnabled = 1;
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
--- Check for enabled Database Audit
-IF @AuditEnabled = 0
+-- Get recent job runs if msdb is available (SQL Server / Azure SQL MI)
+DECLARE @JobRuns INT = 0;
+IF @HasMsdb = 1
 BEGIN
-    IF EXISTS (SELECT 1 FROM sys.database_audits WHERE is_state_enabled = 1) SET @AuditEnabled = 1;
+    SELECT @JobRuns = COUNT(*)
+    FROM msdb.dbo.sysjobhistory h
+    JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id
+    WHERE h.run_date >= CONVERT(INT, CONVERT(VARCHAR(8), GETDATE() - 7, 112))
+      AND h.step_id = 0;
 END
 
--- Check for Extended Events capturing changes (platform safe)
-IF @AuditEnabled = 0 AND OBJECT_ID('sys.dm_xe_sessions') IS NOT NULL
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state = 0;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DbName;
+
+WHILE @@FETCH_STATUS = 0
 BEGIN
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name LIKE '%ddl%' OR name LIKE '%object%' OR name LIKE '%change%') SET @AuditEnabled = 1;
+    BEGIN TRY
+        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+        DECLARE @ModCount INT;
+        DECLARE @ModObjects NVARCHAR(MAX);
+        SELECT @ModCount = COUNT(*),
+               @ModObjects = STRING_AGG(SCHEMA_NAME(schema_id) + ''.'' + name, '', '')
+        FROM sys.objects
+        WHERE type IN (''U'',''P'',''V'',''FN'',''IF'',''TF'',''TR'',''PC'')
+          AND is_ms_shipped = 0
+          AND modify_date > DATEADD(day, -7, GETDATE());
+
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        SELECT ''' + @DbName + ''',
+               CASE
+                   WHEN @ModCount = 0 THEN 3
+                   WHEN @ModCount > 0 AND ' + CAST(@JobRuns AS NVARCHAR) + ' > 0 THEN 2
+                   WHEN @ModCount <= 5 THEN 1
+                   ELSE 0
+               END,
+               CASE
+                   WHEN @ModCount = 0 THEN ''No recent object modifications found.''
+                   ELSE '''' + CAST(@ModCount AS NVARCHAR) + '' objects modified in last 7 days: '' + ISNULL(@ModObjects, ''None'')
+               END;
+        ';
+        EXEC sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (@DbName, 0, 'Database evaluation failed');
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @DbName;
 END
 
--- Check for CI/CD pipeline jobs in SQL Agent
-IF EXISTS (
-    SELECT 1 FROM msdb.dbo.sysjobs
-    WHERE enabled = 1
-      AND (name LIKE '%deploy%' OR name LIKE '%pipeline%' OR name LIKE '%release%' OR name LIKE '%azure-devops%' OR name LIKE '%github%' OR name LIKE '%gitlab%')
-) SET @PipelineJobs = 1;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
 
--- Calculate score based on proxy evidence
-IF @AuditEnabled = 1 SET @Score = 2;
-ELSE IF @PipelineJobs = 1 SET @Score = 1;
-ELSE SET @Score = 0;
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
--- NOTE: This script provides automated evidence. Full compliance requires human review.
-SELECT @Result AS Result, @Score AS Score;
+DROP TABLE #DbResults;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

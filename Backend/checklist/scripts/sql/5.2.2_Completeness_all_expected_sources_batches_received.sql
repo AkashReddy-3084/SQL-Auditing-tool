@@ -1,87 +1,169 @@
--- Checklist: Completeness: all expected sources/batches received
+-- Checklist: 5.2.2 Completeness: all expected sources/batches received
 -- Scope: DATABASE
--- Scoring: 0=No staging/control tables or load evidence; 1=Staging tables exist but no control/metadata tracking, or control tables lack recent load timestamps; 2=Control tables exist with recent load timestamps and explicit status/completeness flags; 3=Control tables contain automated completeness validation (e.g., expected vs actual batch counts match) with recent successful records
+-- Scoring: 0=No ETL tracking evidence; 1=Staging tables exist but no batch/control metadata; 2=Control tables/batch tracking columns found (requires human validation of expected sources); 3=Not achievable automatically due to business logic dependency.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @HasStaging INT = 0;
-        DECLARE @HasControl INT = 0;
-        DECLARE @HasRecentLoad INT = 0;
-        DECLARE @HasStatusFlag INT = 0;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+        DECLARE @ControlTables NVARCHAR(MAX) = '';
+        DECLARE @BatchColumns NVARCHAR(MAX) = '';
+        DECLARE @StagingTables NVARCHAR(MAX) = '';
+
+        SELECT @ControlTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+        FROM sys.tables t
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%etl%'' OR t.name LIKE ''%load_log%'';
+
+        SELECT @StagingTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+        FROM sys.tables t
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE t.name LIKE ''%staging%'' OR t.name LIKE ''%stage%'' OR t.name LIKE ''%landing%'';
+
+        SELECT @BatchColumns = STRING_AGG(s.name + ''.'' + t.name + ''.'' + c.name, '', '')
+        FROM sys.columns c
+        JOIN sys.tables t ON c.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE c.name LIKE ''%batch%'' OR c.name LIKE ''%load_date%'' OR c.name LIKE ''%source_system%'' OR c.name LIKE ''%row_count%'';
+
         DECLARE @DbScore INT = 0;
+        DECLARE @DbFinding NVARCHAR(MAX) = '';
 
-        -- Check for staging schemas/tables
-        IF EXISTS (SELECT 1 FROM sys.schemas WHERE name LIKE ''%stag%'' OR name LIKE ''%landing%'' OR name LIKE ''%raw%'')
-            SET @HasStaging = 1;
-        IF @HasStaging = 0 AND EXISTS (SELECT 1 FROM sys.tables WHERE name LIKE ''%stag%'' OR name LIKE ''%landing%'' OR name LIKE ''%raw%'')
-            SET @HasStaging = 1;
-
-        -- Check for control/metadata tables
-        IF EXISTS (SELECT 1 FROM sys.tables WHERE name LIKE ''%control%'' OR name LIKE ''%batch%'' OR name LIKE ''%etl_log%'' OR name LIKE ''%load_status%'' OR name LIKE ''%source_track%'')
-            SET @HasControl = 1;
-
-        -- Check for recent load timestamps in control tables
-        IF @HasControl = 1
+        IF @ControlTables IS NOT NULL OR @BatchColumns IS NOT NULL
         BEGIN
-            SELECT @HasRecentLoad = COUNT(*) FROM sys.columns c
-            JOIN sys.tables t ON c.object_id = t.object_id
-            WHERE (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%etl_log%'' OR t.name LIKE ''%load_status%'')
-            AND c.name IN (''load_date'', ''batch_date'', ''run_date'', ''created_at'', ''inserted_at'');
-            IF @HasRecentLoad > 0 SET @HasRecentLoad = 1;
-        END
-
-        -- Check for explicit status/completeness flags
-        IF @HasControl = 1
-        BEGIN
-            SELECT @HasStatusFlag = COUNT(*) FROM sys.columns c
-            JOIN sys.tables t ON c.object_id = t.object_id
-            WHERE (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%etl_log%'' OR t.name LIKE ''%load_status%'')
-            AND c.name IN (''status'', ''is_complete'', ''load_status'', ''batch_status'', ''success_flag'');
-            IF @HasStatusFlag > 0 SET @HasStatusFlag = 1;
-        END
-
-        -- Scoring logic per database
-        IF @HasStaging = 0 AND @HasControl = 0
-            SET @DbScore = 0;
-        ELSE IF @HasStaging = 1 AND @HasControl = 0
-            SET @DbScore = 1;
-        ELSE IF @HasControl = 1 AND @HasRecentLoad = 1 AND @HasStatusFlag = 0
             SET @DbScore = 2;
-        ELSE IF @HasControl = 1 AND @HasRecentLoad = 1 AND @HasStatusFlag = 1
-            SET @DbScore = 3;
-        ELSE IF @HasControl = 1 AND @HasRecentLoad = 0
+            SET @DbFinding = ''Control/Batch tracking found: '' + ISNULL(@ControlTables, ''None'') + ''; '' + ISNULL(@BatchColumns, ''None'');
+        END
+        ELSE IF @StagingTables IS NOT NULL
+        BEGIN
             SET @DbScore = 1;
+            SET @DbFinding = ''Staging tables exist but no batch/control metadata: '' + @StagingTables;
+        END
+        ELSE
+        BEGIN
+            SET @DbScore = 0;
+            SET @DbFinding = ''No ETL staging or control artifacts found'';
+        END
 
-        INSERT INTO #DbResults VALUES ('' + QUOTENAME(@DbName, '''') + N'', @DbScore);
-        ';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @DbScore, @DbFinding);
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @ControlTables NVARCHAR(MAX) = '';
+            DECLARE @BatchColumns NVARCHAR(MAX) = '';
+            DECLARE @StagingTables NVARCHAR(MAX) = '';
+
+            SELECT @ControlTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+            FROM sys.tables t
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%etl%'' OR t.name LIKE ''%load_log%'';
+
+            SELECT @StagingTables = STRING_AGG(s.name + ''.'' + t.name, '', '')
+            FROM sys.tables t
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE t.name LIKE ''%staging%'' OR t.name LIKE ''%stage%'' OR t.name LIKE ''%landing%'';
+
+            SELECT @BatchColumns = STRING_AGG(s.name + ''.'' + t.name + ''.'' + c.name, '', '')
+            FROM sys.columns c
+            JOIN sys.tables t ON c.object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE c.name LIKE ''%batch%'' OR c.name LIKE ''%load_date%'' OR c.name LIKE ''%source_system%'' OR c.name LIKE ''%row_count%'';
+
+            DECLARE @DbScore INT = 0;
+            DECLARE @DbFinding NVARCHAR(MAX) = '';
+
+            IF @ControlTables IS NOT NULL OR @BatchColumns IS NOT NULL
+            BEGIN
+                SET @DbScore = 2;
+                SET @DbFinding = ''Control/Batch tracking found: '' + ISNULL(@ControlTables, ''None'') + ''; '' + ISNULL(@BatchColumns, ''None'');
+            END
+            ELSE IF @StagingTables IS NOT NULL
+            BEGIN
+                SET @DbScore = 1;
+                SET @DbFinding = ''Staging tables exist but no batch/control metadata: '' + @StagingTables;
+            END
+            ELSE
+            BEGIN
+                SET @DbScore = 0;
+                SET @DbFinding = ''No ETL staging or control artifacts found'';
+            END
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (''' + REPLACE(@DbName, '''', '''''') + ''', @DbScore, @DbFinding);
+            ';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

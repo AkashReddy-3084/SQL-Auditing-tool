@@ -1,63 +1,101 @@
-```sql
 -- Checklist: Transparent Data Encryption (TDE) enabled for encryption at rest
 -- Scope: DATABASE
--- Scoring: 
--- 3 = All user databases have TDE enabled (Fully Compliant)
--- 1 = Some user databases have TDE enabled, but not all (Partial Evidence / Fail)
--- 0 = No user databases have TDE enabled (Non-Compliant)
--- NOTE: Score 2 is not used because TDE is direct evidence; partial compliance results in a Fail per worst-case aggregation rules.
+-- Scoring: 3=All DBs encrypted, 2=Majority encrypted, 1=Some encrypted, 0=None encrypted
 
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @DbName NVARCHAR(256);
-DECLARE @Sql NVARCHAR(MAX);
-DECLARE @TotalDbs INT = 0;
-DECLARE @EncryptedDbs INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), IsEncrypted BIT);
-
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        -- Check is_encrypted in sys.databases for the current database
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        SELECT is_encrypted FROM sys.databases WHERE name = ''' + REPLACE(@DbName, '''', '''''') + '''';
-
-        INSERT INTO #DbResults
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        -- If we cannot access the database or an error occurs, assume not encrypted (Fail)
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    -- Azure SQL Database: TDE is always enabled by platform design
+    SET @Score = 3;
+    SET @DatabaseQueried = DB_NAME();
+    SET @Finding = 'TDE is always enabled in Azure SQL Database.';
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
-
--- Aggregate results
-SELECT @TotalDbs = COUNT(*), @EncryptedDbs = SUM(IsEncrypted) FROM #DbResults;
-
--- Determine Score based on aggregation
-IF @TotalDbs = 0
-    SET @Score = 3; -- No user databases to check (Vacuously true)
-ELSE IF @EncryptedDbs = @TotalDbs
-    SET @Score = 3; -- All user databases are encrypted
-ELSE IF @EncryptedDbs > 0
-    SET @Score = 1; -- Partial encryption (Fail because not all are encrypted)
 ELSE
-    SET @Score = 0; -- No user databases are encrypted
+BEGIN
+    -- SQL Server / Azure SQL Managed Instance
+    DECLARE @DbName NVARCHAR(256);
+    DECLARE @Sql NVARCHAR(MAX);
+    DECLARE @EncryptedCount INT = 0;
+    DECLARE @TotalCount INT = 0;
 
--- Derive Result from Score
+    CREATE TABLE #DbResults (
+        DbName NVARCHAR(128),
+        DbScore INT,
+        Finding NVARCHAR(MAX)
+    );
+
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @TotalCount = @TotalCount + 1;
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @EncState INT;
+            SELECT @EncState = encryption_state FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID();
+            IF ISNULL(@EncState, 1) = 3
+            BEGIN
+                INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (@DbName, 3, ''TDE enabled'');
+            END
+            ELSE
+            BEGIN
+                INSERT INTO #DbResults (DbName, DbScore, Finding) VALUES (@DbName, 0, ''TDE not enabled'');
+            END';
+            EXEC sp_executesql @Sql;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    SET @DatabaseQueried = (SELECT STRING_AGG(DbName, ', ') FROM #DbResults);
+
+    SELECT @EncryptedCount = COUNT(*) FROM #DbResults WHERE DbScore = 3;
+
+    IF @TotalCount = 0
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = 'No user databases found.';
+    END
+    ELSE
+    BEGIN
+        DECLARE @Pct FLOAT = CAST(@EncryptedCount AS FLOAT) / @TotalCount * 100;
+        IF @Pct = 100 SET @Score = 3;
+        ELSE IF @Pct >= 50 SET @Score = 2;
+        ELSE IF @Pct > 0 SET @Score = 1;
+        ELSE SET @Score = 0;
+
+        SET @Finding = ISNULL(
+            (SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults WHERE Finding IS NOT NULL AND Finding <> ''),
+            'No non-compliant findings found'
+        );
+    END
+
+    DROP TABLE #DbResults;
+END
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
-```
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

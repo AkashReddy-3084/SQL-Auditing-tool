@@ -28,6 +28,23 @@ foreach ($p in $exeCandidates) {
     if (Test-Path $p) { $exePath = $p; break }
 }
 
+# Rebuild when the cached executable predates CLI or engine source changes.
+if ($exePath) {
+    $exeTimestamp = (Get-Item $exePath).LastWriteTimeUtc
+    $newerSource = Get-ChildItem (Join-Path $repoRoot 'Backend') -Recurse -File |
+        Where-Object {
+            $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and
+            ($_.Extension -eq '.cs' -or $_.Extension -eq '.csproj') -and
+            $_.LastWriteTimeUtc -gt $exeTimestamp
+        } |
+        Select-Object -First 1
+
+    if ($newerSource) {
+        Write-Host "SQLAuditor source is newer than the cached executable. Rebuilding..."
+        $exePath = $null
+    }
+}
+
 # If exe not found, try building the project
 if (-not $exePath) {
     $proj = Join-Path $repoRoot "Backend\core\SQLAuditor.csproj"

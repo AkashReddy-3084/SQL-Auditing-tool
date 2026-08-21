@@ -1,65 +1,114 @@
 -- Checklist: DQ rules codified (config-driven or reusable procedures), not ad-hoc manual checks
 -- Scope: DATABASE
--- Scoring: 0=No DQ objects found, 1=Minimal/ad-hoc DQ objects, 2=Multiple DQ procs/tables with config/reusable patterns, 3=Fully automated verification (not achievable via proxy, capped at 2)
+-- Scoring: 0: No DQ-related objects found. 1: 1-2 objects found. 2: 3-5 objects found. 3: 6+ objects found.
 -- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
--- Create temp table to collect per-database results
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        -- Safely escape single quotes in database name for string literal insertion
-        DECLARE @SafeDbName NVARCHAR(256) = REPLACE(@DbName, '''', '''''');
-        
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        SET NOCOUNT ON;
-        DECLARE @ProcCount INT = 0;
-        DECLARE @TableCount INT = 0;
-        DECLARE @ConfigRefCount INT = 0;
+    DECLARE @ObjCount INT;
+    DECLARE @ObjList NVARCHAR(MAX);
+    SELECT @ObjCount = COUNT(*),
+           @ObjList = STRING_AGG(SCHEMA_NAME(schema_id) + '.' + name, ', ') WITHIN GROUP (ORDER BY name)
+    FROM sys.objects
+    WHERE type IN ('U', 'P')
+      AND is_ms_shipped = 0
+      AND (name LIKE '%DQ%' OR name LIKE '%DataQuality%' OR name LIKE '%Validation%' OR name LIKE '%Rule%');
 
-        SELECT @ProcCount = COUNT(*) FROM sys.procedures p
-        WHERE p.name LIKE ''DQ_%'' OR p.name LIKE ''Quality_%'' OR p.name LIKE ''Validate_%'' OR p.name LIKE ''Check_%'';
-
-        SELECT @TableCount = COUNT(*) FROM sys.tables t
-        WHERE t.name LIKE ''%Rule%'' OR t.name LIKE ''%Config%'' OR t.name LIKE ''%DQ%'' OR t.name LIKE ''%Quality%'';
-
-        SELECT @ConfigRefCount = COUNT(*) FROM sys.sql_modules m
-        JOIN sys.procedures p ON m.object_id = p.object_id
-        WHERE m.definition LIKE ''%Rule%'' COLLATE Latin1_General_CI_AS 
-           OR m.definition LIKE ''%Config%'' COLLATE Latin1_General_CI_AS 
-           OR m.definition LIKE ''%DQ%'' COLLATE Latin1_General_CI_AS;
-
-        DECLARE @DbScore INT = 0;
-        IF @ProcCount = 0 AND @TableCount = 0 SET @DbScore = 0;
-        ELSE IF @ProcCount <= 2 AND @TableCount <= 1 SET @DbScore = 1;
-        ELSE IF @ProcCount >= 3 OR @ConfigRefCount >= 2 SET @DbScore = 2;
-        ELSE SET @DbScore = 1;
-
-        INSERT INTO #DbResults VALUES (''' + @SafeDbName + ''', @DbScore);
-        ';
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (DB_NAME(),
+            CASE WHEN @ObjCount = 0 THEN 0
+                 WHEN @ObjCount <= 2 THEN 1
+                 WHEN @ObjCount <= 5 THEN 2
+                 ELSE 3 END,
+            ISNULL(@ObjList, 'No DQ-related objects found'));
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
--- Aggregate: worst-case score across all databases
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @ObjCount INT;
+            DECLARE @ObjList NVARCHAR(MAX);
+            SELECT @ObjCount = COUNT(*),
+                   @ObjList = STRING_AGG(SCHEMA_NAME(schema_id) + ''.'' + name, '', '') WITHIN GROUP (ORDER BY name)
+            FROM sys.objects
+            WHERE type IN (''U'', ''P'')
+              AND is_ms_shipped = 0
+              AND (name LIKE ''%DQ%'' OR name LIKE ''%DataQuality%'' OR name LIKE ''%Validation%'' OR name LIKE ''%Rule%'');
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@pDbName,
+                    CASE WHEN @ObjCount = 0 THEN 0
+                         WHEN @ObjCount <= 2 THEN 1
+                         WHEN @ObjCount <= 5 THEN 2
+                         ELSE 3 END,
+                    ISNULL(@ObjList, ''No DQ-related objects found''));
+            ';
+            EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

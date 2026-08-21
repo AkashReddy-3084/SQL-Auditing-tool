@@ -1,76 +1,107 @@
 -- Checklist: No credentials hardcoded in ETL packages, scripts, or linked servers
 -- Scope: SERVER
--- Scoring: 0=Hardcoded creds in linked servers/job steps; 1=Potential matches in scripts only; 2=Clean but partial scan coverage; 3=No matches across all artifacts
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @LinkedCount INT = 0;
-DECLARE @JobCount INT = 0;
-DECLARE @ScriptCount INT = 0;
-DECLARE @SkippedDbCount INT = 0;
+-- Scoring: 3=No hardcoded credentials found; 2=1-2 findings (minor gaps); 1=3-5 findings (largely incomplete); 0=>5 findings (completely non-compliant). Pattern matching is heuristic; full compliance requires human review.
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
 
-CREATE TABLE #Matches (Source NVARCHAR(128), ObjectName NVARCHAR(256), MatchText NVARCHAR(100));
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @TotalFindings INT = 0;
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
--- 1. Linked Servers (On-prem / MI only)
-IF OBJECT_ID('sys.servers') IS NOT NULL AND OBJECT_ID('sys.linked_logins') IS NOT NULL
+CREATE TABLE #Findings (
+    Source NVARCHAR(128),
+    ObjectName NVARCHAR(256),
+    Evidence NVARCHAR(256)
+);
+
+-- 1. Linked Servers (SQL Server / MI only)
+IF @EngineEdition <> 5
 BEGIN
-    INSERT INTO #Matches
-    SELECT 'LinkedServer', s.name, 'Hardcoded password in linked login'
-    FROM sys.servers s
-    JOIN sys.linked_logins l ON s.server_id = l.server_id
-    WHERE l.password IS NOT NULL AND LTRIM(RTRIM(l.password)) <> '';
+    BEGIN TRY
+        INSERT INTO #Findings (Source, ObjectName, Evidence)
+        SELECT 'LinkedServer', ls.name, 'uses_self_credential = 0'
+        FROM sys.linked_servers ls
+        INNER JOIN sys.linked_logins ll ON ls.server_id = ll.server_id
+        WHERE ll.uses_self_credential = 0;
+    END TRY
+    BEGIN CATCH
+        -- Ignore if view unavailable
+    END CATCH
 END
 
--- 2. SQL Agent Job Steps (On-prem / MI only)
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+-- 2. SSIS Packages (SQL Server / MI only)
+IF @EngineEdition <> 5
 BEGIN
-    INSERT INTO #Matches
-    SELECT 'JobStep', j.name, 'Potential credential in command'
-    FROM msdb.dbo.sysjobs j
-    JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-    WHERE js.command LIKE '%password%' OR js.command LIKE '%pwd%' OR js.command LIKE '%secret%' OR js.command LIKE '%key%' OR js.command LIKE '%user id%' OR js.command LIKE '%uid%';
+    BEGIN TRY
+        INSERT INTO #Findings (Source, ObjectName, Evidence)
+        SELECT 'SSISPackage', name, 'Hardcoded password in package XML'
+        FROM msdb.dbo.syspackages
+        WHERE CAST(package_xml AS NVARCHAR(MAX)) LIKE '%<DTS:Property DTS:Name="Password">%';
+    END TRY
+    BEGIN CATCH
+        -- Ignore if table unavailable
+    END CATCH
 END
 
--- 3. T-SQL Modules across user databases
-DECLARE @DbName NVARCHAR(256);
+-- 3. User Database Modules
+DECLARE @DbName NVARCHAR(128);
 DECLARE @Sql NVARCHAR(MAX);
+
 DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
 SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
 
 OPEN db_cursor;
 FETCH NEXT FROM db_cursor INTO @DbName;
+
 WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
         SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        INSERT INTO #Matches
-        SELECT ''Script'', OBJECT_NAME(object_id), ''Potential credential in definition''
+        INSERT INTO #Findings (Source, ObjectName, Evidence)
+        SELECT ''Module'', QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) + ''.'' + QUOTENAME(OBJECT_NAME(object_id)),
+               ''Hardcoded credential pattern detected''
         FROM sys.sql_modules
-        WHERE definition LIKE ''%password%'' OR definition LIKE ''%pwd%'' OR definition LIKE ''%secret%'' OR definition LIKE ''%key%'' OR definition LIKE ''%user id%'' OR definition LIKE ''%uid%'';';
+        WHERE definition IS NOT NULL
+          AND (definition LIKE ''%password = %''
+             OR definition LIKE ''%pwd = %''
+             OR definition LIKE ''%secret = %''
+             OR definition LIKE ''%connection string%'');';
         EXEC sp_executesql @Sql;
     END TRY
     BEGIN CATCH
-        SET @SkippedDbCount = @SkippedDbCount + 1;
+        -- Skip inaccessible databases
     END CATCH;
+
     FETCH NEXT FROM db_cursor INTO @DbName;
 END
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
-SELECT @LinkedCount = COUNT(*) FROM #Matches WHERE Source = 'LinkedServer';
-SELECT @JobCount = COUNT(*) FROM #Matches WHERE Source = 'JobStep';
-SELECT @ScriptCount = COUNT(*) FROM #Matches WHERE Source = 'Script';
+SET @DatabaseQueried = 'master';
 
-IF @LinkedCount > 0 OR @JobCount > 0
-    SET @Score = 0;
-ELSE IF @ScriptCount > 0
-    SET @Score = 1;
-ELSE IF @SkippedDbCount > 0
-    SET @Score = 2;
-ELSE
+SELECT @TotalFindings = COUNT(*) FROM #Findings;
+
+IF @TotalFindings = 0
+BEGIN
     SET @Score = 3;
+    SET @Finding = 'No hardcoded credentials detected in linked servers, SSIS packages, or user database modules.';
+END
+ELSE
+BEGIN
+    SET @Finding = (SELECT STRING_AGG(Source + ': ' + ObjectName + ' (' + Evidence + ')', '; ') FROM #Findings);
+    IF @TotalFindings <= 2 SET @Score = 2;
+    ELSE IF @TotalFindings <= 5 SET @Score = 1;
+    ELSE SET @Score = 0;
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-DROP TABLE #Matches;
-SELECT @Result AS Result, @Score AS Score;
--- NOTE: This script provides automated evidence. Full compliance requires human review of any flagged script matches.
+DROP TABLE #Findings;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

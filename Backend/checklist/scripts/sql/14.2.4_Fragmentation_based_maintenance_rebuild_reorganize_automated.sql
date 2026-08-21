@@ -1,88 +1,123 @@
 -- Checklist: Fragmentation-based maintenance (rebuild/reorganize) automated
 -- Scope: SERVER
--- Scoring: 0=No automation found; 1=Jobs exist but disabled/unscheduled or moderate fragmentation; 2=Enabled scheduled jobs found or low fragmentation; 3=Fully automated with rebuild/reorganize logic and active schedules
-DECLARE @Score INT = 0;
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @JobCount INT = 0;
+-- Scoring: 
+-- 0: No SQL Agent jobs or maintenance plans found for index maintenance.
+-- 1: Jobs/plans exist but are disabled or lack an active schedule.
+-- 2: Enabled and scheduled jobs/plans found, but fragmentation thresholds require manual verification.
+-- 3: Enabled and scheduled jobs/plans found with explicit fragmentation threshold checks (e.g., avg_fragmentation_in_percent, sys.dm_db_index_physical_stats).
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @Result NVARCHAR(10);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
+
 DECLARE @EnabledJobCount INT = 0;
-DECLARE @ScheduledJobCount INT = 0;
-DECLARE @AvgFrag FLOAT = 100.0;
+DECLARE @DisabledJobCount INT = 0;
+DECLARE @ThresholdJobCount INT = 0;
+DECLARE @JobNames NVARCHAR(MAX) = '';
+DECLARE @ThresholdJobNames NVARCHAR(MAX) = '';
 
--- Check for SQL Agent jobs (On-Prem / MI)
-IF OBJECT_ID('msdb.dbo.sysjobs') IS NOT NULL
+-- 1. Check for enabled and scheduled jobs containing index maintenance commands
+SELECT @EnabledJobCount = COUNT(*)
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE j.enabled = 1
+  AND j.has_schedule = 1
+  AND (
+    js.command LIKE '%ALTER INDEX%'
+    OR js.command LIKE '%REBUILD%'
+    OR js.command LIKE '%REORGANIZE%'
+    OR js.command LIKE '%IndexOptimize%'
+    OR js.command LIKE '%sp_index_optimize%'
+  );
+
+SELECT @JobNames = STRING_AGG(DISTINCT j.name, ', ')
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE j.enabled = 1
+  AND j.has_schedule = 1
+  AND (
+    js.command LIKE '%ALTER INDEX%'
+    OR js.command LIKE '%REBUILD%'
+    OR js.command LIKE '%REORGANIZE%'
+    OR js.command LIKE '%IndexOptimize%'
+    OR js.command LIKE '%sp_index_optimize%'
+  );
+
+-- 2. Check if any of those jobs explicitly reference fragmentation thresholds
+SELECT @ThresholdJobCount = COUNT(*)
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE j.enabled = 1
+  AND j.has_schedule = 1
+  AND (
+    js.command LIKE '%ALTER INDEX%'
+    OR js.command LIKE '%REBUILD%'
+    OR js.command LIKE '%REORGANIZE%'
+    OR js.command LIKE '%IndexOptimize%'
+    OR js.command LIKE '%sp_index_optimize%'
+  )
+  AND (
+    js.command LIKE '%avg_fragmentation_in_percent%'
+    OR js.command LIKE '%sys.dm_db_index_physical_stats%'
+    OR js.command LIKE '%fragmentation%'
+  );
+
+SELECT @ThresholdJobNames = STRING_AGG(DISTINCT j.name, ', ')
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE j.enabled = 1
+  AND j.has_schedule = 1
+  AND (
+    js.command LIKE '%ALTER INDEX%'
+    OR js.command LIKE '%REBUILD%'
+    OR js.command LIKE '%REORGANIZE%'
+    OR js.command LIKE '%IndexOptimize%'
+    OR js.command LIKE '%sp_index_optimize%'
+  )
+  AND (
+    js.command LIKE '%avg_fragmentation_in_percent%'
+    OR js.command LIKE '%sys.dm_db_index_physical_stats%'
+    OR js.command LIKE '%fragmentation%'
+  );
+
+-- 3. Check for disabled or unscheduled jobs
+SELECT @DisabledJobCount = COUNT(*)
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+WHERE (j.enabled = 0 OR j.has_schedule = 0)
+  AND (
+    js.command LIKE '%ALTER INDEX%'
+    OR js.command LIKE '%REBUILD%'
+    OR js.command LIKE '%REORGANIZE%'
+    OR js.command LIKE '%IndexOptimize%'
+    OR js.command LIKE '%sp_index_optimize%'
+  );
+
+-- Assign Score based on evidence hierarchy
+IF @ThresholdJobCount > 0
 BEGIN
-    -- Count ALL jobs (enabled or disabled) containing index maintenance commands
-    SELECT @JobCount = COUNT(DISTINCT j.job_id)
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-    WHERE (js.command LIKE '%ALTER INDEX%' OR js.command LIKE '%REBUILD%' OR js.command LIKE '%REORGANIZE%' OR js.command LIKE '%sp_indexoption%' OR js.command LIKE '%IndexOptimize%');
-
-    -- Count only ENABLED jobs containing index maintenance commands
-    SELECT @EnabledJobCount = COUNT(DISTINCT j.job_id)
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-    WHERE j.enabled = 1
-      AND (js.command LIKE '%ALTER INDEX%' OR js.command LIKE '%REBUILD%' OR js.command LIKE '%REORGANIZE%' OR js.command LIKE '%sp_indexoption%' OR js.command LIKE '%IndexOptimize%');
-
-    -- Count ENABLED jobs with active schedules containing index maintenance commands
-    SELECT @ScheduledJobCount = COUNT(DISTINCT j.job_id)
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
-    INNER JOIN msdb.dbo.sysjobschedules jsch ON j.job_id = jsch.job_id
-    WHERE j.enabled = 1
-      AND (js.command LIKE '%ALTER INDEX%' OR js.command LIKE '%REBUILD%' OR js.command LIKE '%REORGANIZE%' OR js.command LIKE '%sp_indexoption%' OR js.command LIKE '%IndexOptimize%');
-END
-
--- Fallback: Check fragmentation levels across user databases (Azure SQL / No Jobs)
-IF @JobCount = 0
-BEGIN
-    DECLARE @DbName NVARCHAR(256);
-    DECLARE @Sql NVARCHAR(MAX);
-    CREATE TABLE #FragStats (DbName NVARCHAR(256), AvgFrag FLOAT);
-
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-            INSERT INTO #FragStats
-            SELECT ''' + @DbName + ''', AVG(avg_fragmentation_in_percent)
-            FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, ''LIMITED'')
-            WHERE index_id > 0;';
-            EXEC sp_executesql @Sql;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #FragStats VALUES (@DbName, 100.0);
-        END CATCH;
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-
-    -- Use ISNULL to handle cases where no user databases exist
-    SELECT @AvgFrag = ISNULL(AVG(AvgFrag), 100.0) FROM #FragStats;
-    DROP TABLE #FragStats;
-END
-
--- Determine Score
-IF @ScheduledJobCount > 0
     SET @Score = 3;
+    SET @Finding = 'Found ' + CAST(@ThresholdJobCount AS NVARCHAR(10)) + ' enabled/scheduled job(s) with explicit fragmentation threshold checks: ' + ISNULL(@ThresholdJobNames, 'None');
+END
 ELSE IF @EnabledJobCount > 0
+BEGIN
     SET @Score = 2;
-ELSE IF @JobCount > 0
+    SET @Finding = 'Found ' + CAST(@EnabledJobCount AS NVARCHAR(10)) + ' enabled/scheduled job(s) for index maintenance, but fragmentation thresholds require manual verification: ' + ISNULL(@JobNames, 'None');
+END
+ELSE IF @DisabledJobCount > 0
+BEGIN
     SET @Score = 1;
+    SET @Finding = 'Found ' + CAST(@DisabledJobCount AS NVARCHAR(10)) + ' job(s) for index maintenance, but they are disabled or lack a schedule.';
+END
 ELSE
 BEGIN
-    -- Fallback to fragmentation levels
-    IF @AvgFrag < 10.0 SET @Score = 3;
-    ELSE IF @AvgFrag < 20.0 SET @Score = 2;
-    ELSE IF @AvgFrag < 30.0 SET @Score = 1;
-    ELSE SET @Score = 0;
+    SET @Score = 0;
+    SET @Finding = 'No automated SQL Agent jobs or maintenance plans found for index fragmentation maintenance.';
 END
 
+SET @DatabaseQueried = 'master';
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

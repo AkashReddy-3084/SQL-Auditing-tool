@@ -1,58 +1,112 @@
 -- Checklist: Failed loads are restartable from point of failure (not full re-run)
 -- Scope: DATABASE
--- Scoring: 0=No ETL procs, 1=ETL procs but no checkpoint/control evidence, 2=Checkpoint keywords or control tables found, 3=Strong proxy evidence (capped at 2 for indirect scanning)
+-- Scoring: 0: No evidence of restartability logic. 1: Partial evidence (restart keywords in code or control tables/columns exist in isolation). 2: Good evidence (control tables with batch/status columns exist, but explicit restart procedures are missing). 3: Strong evidence (control tables with batch/status columns AND procedures explicitly reference them for filtering/restarting failed loads).
+-- NOTE: This script provides automated evidence. Full compliance requires human review.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @IsAzureSQLDB BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @IsAzureSQLDB = 1
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @ETLCount INT = 0;
-        DECLARE @CheckpointCount INT = 0;
-        DECLARE @ControlTableCount INT = 0;
-        DECLARE @DbScore INT = 0;
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+        DECLARE @ControlTables INT = 0;
+        DECLARE @RestartCols INT = 0;
+        DECLARE @RestartProcs INT = 0;
+        DECLARE @Evidence NVARCHAR(MAX) = '''';
 
-        SELECT @ETLCount = COUNT(*) FROM sys.procedures
-        WHERE name LIKE ''usp_Load%'' OR name LIKE ''proc_ETL%'' OR name LIKE ''sp_Ingest%'' OR name LIKE ''%Load%'';
+        SELECT @ControlTables = COUNT(*)
+        FROM sys.tables t
+        WHERE t.is_ms_shipped = 0
+          AND (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%load%'' OR t.name LIKE ''%staging%'');
 
-        SELECT @CheckpointCount = COUNT(*) FROM sys.procedures p
-        CROSS APPLY (SELECT 1 FROM sys.sql_modules m WHERE m.object_id = p.object_id
-                     AND (m.definition LIKE ''%@BatchID%'' OR m.definition LIKE ''%@RunID%'' OR m.definition LIKE ''%@LastRun%''
-                          OR m.definition LIKE ''%LoadStatus%'' OR m.definition LIKE ''%Checkpoint%''
-                          OR m.definition LIKE ''%Incremental%'' OR m.definition LIKE ''%ModifiedDate%''
-                          OR m.definition LIKE ''%MERGE%'' OR m.definition LIKE ''%TRY%'' OR m.definition LIKE ''%CATCH%'')) AS ca;
+        SELECT @RestartCols = COUNT(*)
+        FROM sys.columns c
+        JOIN sys.tables t ON c.object_id = t.object_id
+        WHERE t.is_ms_shipped = 0
+          AND (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%load%'')
+          AND (c.name LIKE ''%batch%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%checkpoint%'' OR c.name LIKE ''%load%'');
 
-        SELECT @ControlTableCount = COUNT(*) FROM sys.tables
-        WHERE name LIKE ''%Control%'' OR name LIKE ''%Metadata%'' OR name LIKE ''%LoadLog%'' OR name LIKE ''%Batch%'';
+        SELECT @RestartProcs = COUNT(*)
+        FROM sys.procedures p
+        JOIN sys.sql_modules m ON p.object_id = m.object_id
+        WHERE p.is_ms_shipped = 0
+          AND (m.definition LIKE ''%batch%'' OR m.definition LIKE ''%restart%'' OR m.definition LIKE ''%resume%'' OR m.definition LIKE ''%failed%'' OR m.definition LIKE ''%checkpoint%'');
 
-        IF @ETLCount = 0 SET @DbScore = 0;
-        ELSE IF @CheckpointCount = 0 AND @ControlTableCount = 0 SET @DbScore = 1;
-        ELSE IF @CheckpointCount > 0 OR @ControlTableCount > 0 SET @DbScore = 2;
-        ELSE IF @CheckpointCount > 0 AND @ControlTableCount > 0 SET @DbScore = 2;
+        IF @ControlTables > 0 AND @RestartCols > 0 AND @RestartProcs > 0
+            SET @Evidence = ''Strong restartability evidence: '' + CAST(@ControlTables AS NVARCHAR) + '' control/batch tables, '' + CAST(@RestartCols AS NVARCHAR) + '' restart columns, '' + CAST(@RestartProcs AS NVARCHAR) + '' procedures with restart logic.'';
+        ELSE IF @ControlTables > 0 AND @RestartCols > 0
+            SET @Evidence = ''Partial evidence: '' + CAST(@ControlTables AS NVARCHAR) + '' control tables with '' + CAST(@RestartCols AS NVARCHAR) + '' restart columns, but no explicit restart procedures found.'';
+        ELSE IF @RestartProcs > 0
+            SET @Evidence = ''Partial evidence: '' + CAST(@RestartProcs AS NVARCHAR) + '' procedures contain restart keywords, but no control tables/columns found.'';
+        ELSE
+            SET @Evidence = ''No evidence of restartability logic found.'';
 
-        INSERT INTO #DbResults VALUES (@DbName, @DbScore);';
-        EXEC sp_executesql @Sql, N'@DbName NVARCHAR(256)', @DbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+        INSERT INTO #DbResults (DbName, DbScore, Finding)
+        SELECT ''' + @DbName + ''',
+               CASE
+                   WHEN @ControlTables > 0 AND @RestartCols > 0 AND @RestartProcs > 0 THEN 3
+                   WHEN @ControlTables > 0 AND @RestartCols > 0 THEN 2
+                   WHEN @RestartProcs > 0 THEN 1
+                   ELSE 0
+               END,
+               @Evidence;
+    ';
+    EXEC sp_executesql @Sql;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @ControlTables INT = 0;
+            DECLARE @RestartCols INT = 0;
+            DECLARE @RestartProcs INT = 0;
+            DECLARE @Evidence NVARCHAR(MAX) = '''';
+
+            SELECT @ControlTables = COUNT(*)
+            FROM sys.tables t
+            WHERE t.is_ms_shipped = 0
+              AND (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%load%'' OR t.name LIKE ''%staging%'');
+
+            SELECT @RestartCols = COUNT(*)
+            FROM sys.columns c
+            JOIN sys.tables t ON c.object_id = t.object_id
+            WHERE t.is_ms_shipped = 0
+              AND (t.name LIKE ''%control%'' OR t.name LIKE ''%batch%'' OR t.name LIKE ''%load%'')
+              AND (c.name LIKE ''%batch%'' OR c.name LIKE ''%status%'' OR c.name LIKE ''%checkpoint%'' OR c.name LIKE ''%load%'');
+
+            SELECT @RestartProcs = COUNT(*)
+            FROM sys.procedures p
+            JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE p.is_ms_shipped = 0
+              AND (m.definition LIKE ''%batch%'' OR m.definition LIKE ''%restart%'' OR m.definition LIKE ''%resume%'' OR m.definition LIKE ''%failed%'' OR m.definition LIKE ''%checkpoint%'');
+
+            IF @ControlTables > 0 AND @RestartCols > 0 AND @RestartProcs > 0
+                SET @Evidence = ''Strong restartability evidence: '' + CAST(@ControlTables AS NVARCHAR) + '' control/batch tables, '' + CAST(@RestartCols AS NVARCHAR) + '' restart columns, '' + CAST(@RestartProcs AS NVARCHAR) + '' procedures with restart logic.'';
+            ELSE IF @ControlTables > 0 AND @RestartCols > 0
+                SET @Evidence = ''Partial evidence: '' + CAST(@ControlTables AS NVARCHAR) + '' control tables with '' + CAST(@RestartCols AS NVARCHAR) + '' restart columns, but no explicit restart procedures found.'';
+            ELSE IF @RestartProcs > 0
+                SET @Evidence = ''Partial evidence: '' + CAST(@RestartProcs AS NVARCHAR) + '' procedures contain

@@ -1,52 +1,120 @@
 -- Checklist: Lock escalation understood and mitigated where problematic
 -- Scope: DATABASE
--- Scoring: 3=Disabled at DB level; 2=Enabled but zero current lock waits; 1=Enabled with 1-5 current lock waits; 0=Enabled with >5 current lock waits
+-- Scoring: 0: No tables have lock escalation explicitly disabled or partitioned. 1: 1-5 tables configured. 2: 6-20 tables configured. 3: >20 tables configured.
+
+DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
 DECLARE @Score INT = 0;
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @DbName NVARCHAR(256);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX);
 
-CREATE TABLE #DbResults (DbName NVARCHAR(256), DbScore INT);
+CREATE TABLE #DbResults (
+    DbName NVARCHAR(128),
+    DbScore INT,
+    Finding NVARCHAR(MAX)
+);
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-SELECT name FROM sys.databases
-WHERE database_id > 4 AND state = 0;
-
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @DbName;
-WHILE @@FETCH_STATUS = 0
+IF @EngineEdition = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
-        DECLARE @IsEscEnabled INT;
-        DECLARE @CurrentLockWaits INT;
-        DECLARE @DbScore INT = 3;
+    -- Azure SQL Database: evaluate current database only
+    SET @DbName = DB_NAME();
+    SET @Sql = N'
+    DECLARE @Count INT;
+    DECLARE @Names NVARCHAR(MAX);
+    SELECT @Count = COUNT(*), @Names = STRING_AGG(name, ' ', '')
+    FROM sys.tables
+    WHERE lock_escalation_option <> 0;
 
-        SELECT @IsEscEnabled = is_lock_escalation_enabled FROM sys.databases WHERE database_id = DB_ID();
-        SELECT @CurrentLockWaits = COUNT(*) FROM sys.dm_exec_requests WHERE wait_type LIKE ''LCK_M%'' AND database_id = DB_ID() AND session_id <> @@SPID;
-
-        IF @IsEscEnabled = 1
-        BEGIN
-            IF @CurrentLockWaits > 5 SET @DbScore = 0;
-            ELSE IF @CurrentLockWaits > 0 SET @DbScore = 1;
-            ELSE SET @DbScore = 2;
-        END
-
-        SELECT DB_NAME() AS DbName, @DbScore AS DbScore;';
-
-        INSERT INTO #DbResults (DbName, DbScore)
-        EXEC sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #DbResults VALUES (@DbName, 0);
-    END CATCH;
-
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        @pDbName,
+        CASE 
+            WHEN @Count = 0 THEN 0
+            WHEN @Count BETWEEN 1 AND 5 THEN 1
+            WHEN @Count BETWEEN 6 AND 20 THEN 2
+            ELSE 3
+        END,
+        ISNULL(@Names, ''''No tables with lock escalation mitigation found'''')
+    );
+    ';
+    EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
 END
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
+ELSE
+BEGIN
+    -- SQL Server / Azure SQL MI: iterate user databases
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name
+    FROM sys.databases
+    WHERE database_id > 4
+      AND state = 0;
 
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'USE ' + QUOTENAME(@DbName) + N';
+            DECLARE @Count INT;
+            DECLARE @Names NVARCHAR(MAX);
+            SELECT @Count = COUNT(*), @Names = STRING_AGG(name, ' ', '')
+            FROM sys.tables
+            WHERE lock_escalation_option <> 0;
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (
+                @pDbName,
+                CASE 
+                    WHEN @Count = 0 THEN 0
+                    WHEN @Count BETWEEN 1 AND 5 THEN 1
+                    WHEN @Count BETWEEN 6 AND 20 THEN 2
+                    ELSE 3
+                END,
+                ISNULL(@Names, ''''No tables with lock escalation mitigation found'''')
+            );
+            ';
+            EXEC sp_executesql @Sql, N'@pDbName NVARCHAR(128)', @pDbName = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, 'Database evaluation failed');
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END
+
+SET @DatabaseQueried = (
+    SELECT STRING_AGG(DbName, ', ')
+    FROM #DbResults
+);
+
+SET @Score = ISNULL(
+    (SELECT MIN(DbScore) FROM #DbResults),
+    0
+);
+
+SET @Finding = ISNULL(
+    (
+        SELECT STRING_AGG(DbName + ': ' + Finding, '; ')
+        FROM #DbResults
+        WHERE Finding IS NOT NULL
+          AND Finding <> ''
+    ),
+    'No non-compliant findings found'
+);
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
 DROP TABLE #DbResults;
-SELECT @Result AS Result, @Score AS Score;
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;
