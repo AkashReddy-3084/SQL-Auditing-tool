@@ -1,10 +1,4 @@
 {
-  "6.1.4": {
-    "script_file": null,
-    "IsAdminCheck": true,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
-  },
   "1.1.1": {
     "script_file": null,
     "IsAdminCheck": false,
@@ -1966,5 +1960,11 @@
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
+  },
+  "6.1.4": {
+    "script_file": "Backend/checklist/scripts/sql/6.1.4.sql",
+    "IsAdminCheck": false,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": false
   }
 }
