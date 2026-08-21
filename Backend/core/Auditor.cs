@@ -107,6 +107,7 @@ namespace SQLAuditor.Lib
         private SqlServerMcpEvaluator? _mcpEvaluator;
         private ManualStepsGenerator? _manualStepsGenerator;
         private ScriptResultAiEnricher? _scriptEnricher;
+        private ManualResultAiEnricher? _manualResultEnricher;
 
         public Auditor(string connectionString)
         {
@@ -126,6 +127,7 @@ namespace SQLAuditor.Lib
             try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
             try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
             try { _scriptEnricher ??= ScriptResultAiEnricher.CreateFromEnvironment(); } catch { }
+            try { _manualResultEnricher ??= ManualResultAiEnricher.CreateFromEnvironment(); } catch { }
         }
 
         // When set, the auditor never creates LLM evaluators (even if .env or env vars
@@ -1054,6 +1056,33 @@ namespace SQLAuditor.Lib
             if (target == null) return false;
 
             target["Outcome"] = outcome;
+
+            // Score and severity follow the outcome, exactly as the desktop flow derives them
+            // through ChecklistResultEnricher; leaving them frozen would score a resolved Pass
+            // as the 1 it carried while it was NeedsReview.
+            var isNotApplicable = target["NotApplicable"]?.GetValue<bool>() == true;
+            if (!isNotApplicable)
+            {
+                int? previousScore = target["Score"] is System.Text.Json.Nodes.JsonValue scoreValue
+                    && scoreValue.TryGetValue<int>(out var parsedScore)
+                        ? parsedScore
+                        : null;
+
+                var newScore = ChecklistResultEnricher.DeriveScore(outcome);
+                target["Score"] = newScore;
+                target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, newScore, false);
+
+                // Only wording the enricher itself generated is refreshed, so anything
+                // Copilot authored through ApplyEnrichment survives untouched.
+                var description = target["Description"]?.GetValue<string>() ?? string.Empty;
+                if (Matches(target["Finding"], ChecklistResultEnricher.DefaultFinding(previousScore, description, false)))
+                    target["Finding"] = ChecklistResultEnricher.DefaultFinding(newScore, description, false);
+                if (Matches(target["RiskImpact"], ChecklistResultEnricher.DefaultRiskImpact(previousScore)))
+                    target["RiskImpact"] = ChecklistResultEnricher.DefaultRiskImpact(newScore);
+                if (Matches(target["Recommendation"], ChecklistResultEnricher.DefaultRecommendation(previousScore, description)))
+                    target["Recommendation"] = ChecklistResultEnricher.DefaultRecommendation(newScore, description);
+            }
+
             if (!string.IsNullOrWhiteSpace(notes))
             {
                 var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
@@ -1104,6 +1133,14 @@ namespace SQLAuditor.Lib
 
             newOutcome = outcome;
             return true;
+        }
+
+        private static bool Matches(System.Text.Json.Nodes.JsonNode? node, string? expected)
+        {
+            if (expected is null) return node is null;
+            return node is System.Text.Json.Nodes.JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && string.Equals(text, expected, StringComparison.Ordinal);
         }
 
         // Records AI-authored wording for an already-evaluated item. Used by the CLI
@@ -1304,6 +1341,75 @@ namespace SQLAuditor.Lib
         {
             var result = await GenerateManualInstructionsWithMetadataAsync(item, null, cancellationToken);
             return result.Instructions;
+        }
+
+        // Builds the persisted result for a manual item the reviewer has decided, turning
+        // their Input/Evidence text into audit wording. The reviewer's outcome is
+        // authoritative: the AI only authors Finding/Evidence/RiskImpact/Recommendation/
+        // Severity, and ChecklistResultEnricher back-fills whatever it did not supply.
+        public async Task<ChecklistResult> BuildManualResultAsync(
+            ChecklistItem item,
+            string outcome,
+            string manualSteps,
+            string reviewerInput,
+            System.Threading.CancellationToken cancellationToken = default)
+        {
+            var normalizedOutcome = outcome?.Trim().ToLowerInvariant() switch
+            {
+                "pass" => "Pass",
+                "fail" => "Fail",
+                _ => "NeedsReview",
+            };
+            var score = ChecklistResultEnricher.DeriveScore(normalizedOutcome);
+
+            ManualResultAiEnricher.ManualEnrichment? ai = null;
+            if (_manualResultEnricher != null)
+            {
+                try
+                {
+                    ai = await _manualResultEnricher.EnrichAsync(
+                        item, normalizedOutcome, score, manualSteps ?? string.Empty, reviewerInput ?? string.Empty, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    ai = null;
+                }
+            }
+
+            var result = new ChecklistResult(
+                item.Id,
+                item.Description,
+                item.Verification,
+                normalizedOutcome,
+                BuildManualEvidence(ai?.Evidence, manualSteps, reviewerInput, normalizedOutcome),
+                item.ScriptFile,
+                "AI-Manual")
+            {
+                Finding = ai?.Finding ?? string.Empty,
+                Severity = ai?.Severity ?? string.Empty,
+                RiskImpact = ai?.RiskImpact,
+                Recommendation = ai?.Recommendation,
+            };
+
+            return ChecklistResultEnricher.Enrich(result);
+        }
+
+        // The reviewer's own words are always kept verbatim so the finding stays auditable,
+        // whether or not the AI summary was produced.
+        private static string BuildManualEvidence(string? aiEvidence, string? manualSteps, string? reviewerInput, string outcome)
+        {
+            var remarks = string.IsNullOrWhiteSpace(reviewerInput) ? "(none provided)" : reviewerInput.Trim();
+
+            if (!string.IsNullOrWhiteSpace(aiEvidence))
+            {
+                return $"{aiEvidence.Trim()}\n\nReviewer Input / Evidence (verbatim):\n{remarks}\n\nSelected Outcome:\n{outcome}";
+            }
+
+            return $"Manual Steps:\n{manualSteps ?? string.Empty}\n\nOperator Remarks:\n{remarks}\n\nSelected Outcome:\n{outcome}";
         }
 
         private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)

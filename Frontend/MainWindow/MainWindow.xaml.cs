@@ -37,6 +37,11 @@ namespace SQLAuditor.Wpf
             public string Remarks { get; set; } = string.Empty;
             public string? SelectedOutcome { get; set; }
             public bool IsSubmitted { get; set; }
+
+            // The enriched result for the submitted outcome+remarks, so re-persisting after
+            // the engine's placeholder write never repeats the LLM call.
+            public SQLAuditor.Lib.ChecklistResult? EnrichedResult { get; set; }
+            public string? EnrichedKey { get; set; }
         }
 
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
@@ -61,6 +66,9 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>? _evalItemMap;
         private System.Collections.Generic.Dictionary<string, (string Status, string Technique)>? _evalStatusMap;
         private bool _isHydratingManualUi = false;
+        // Manual results are read-modify-written into one JSON file, so only one submission
+        // may enrich and persist at a time.
+        private readonly System.Threading.SemaphoreSlim _manualPersistLock = new(1, 1);
         // Selected checklist IDs are kept in-memory for the current session only
         private System.Collections.Generic.List<string>? _selectedIds;
 
@@ -528,7 +536,7 @@ namespace SQLAuditor.Wpf
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
-                ReapplySubmittedManualResults();
+                await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
@@ -600,7 +608,7 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void SubmitBtn_Click(object sender, RoutedEventArgs e)
+        private async void SubmitBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
             {
@@ -622,22 +630,17 @@ namespace SQLAuditor.Wpf
             SaveCurrentManualDraft(false);
             var state = EnsureManualState(item.Id);
 
-            var inferred = EvaluateManualOutcome(state.Remarks);
-            if (string.Equals(inferred, "Pass", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(inferred, "Fail", StringComparison.OrdinalIgnoreCase))
-            {
-                // On submit, prefer explicit outcome mentioned in remarks.
-                state.SelectedOutcome = inferred;
-            }
-            else if (!string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
+            // The Passed/Failed selection is the reviewer's decision; words such as "pass"
+            // or "fail" inside their observations must never change it.
+            if (!string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
             {
-                MessageBox.Show("Select Passed/Failed or include pass/fail in remarks before submitting.", "Manual Evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("Select Passed or Failed before submitting.", "Manual Evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             state.IsSubmitted = true;
-            PersistManualResult(item, state);
+            await PersistManualResultAsync(item, state);
 
             if (_evalStatusMap != null)
             {
@@ -649,7 +652,7 @@ namespace SQLAuditor.Wpf
             Log($"Submitted manual evaluation for {item.Id} as {state.SelectedOutcome}.");
         }
 
-        private void MarkPassedBtn_Click(object sender, RoutedEventArgs e)
+        private async void MarkPassedBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
             {
@@ -660,10 +663,10 @@ namespace SQLAuditor.Wpf
             }
 
             SaveCurrentManualDraft(false);
-            SetManualOutcomeForCurrentItem("Pass", persistImmediately: true);
+            await SetManualOutcomeForCurrentItemAsync("Pass", persistImmediately: true);
         }
 
-        private void MarkFailedBtn_Click(object sender, RoutedEventArgs e)
+        private async void MarkFailedBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
             {
@@ -674,7 +677,7 @@ namespace SQLAuditor.Wpf
             }
 
             SaveCurrentManualDraft(false);
-            SetManualOutcomeForCurrentItem("Fail", persistImmediately: true);
+            await SetManualOutcomeForCurrentItemAsync("Fail", persistImmediately: true);
         }
 
         private void PrevManualBtn_Click(object sender, RoutedEventArgs e)
@@ -996,7 +999,7 @@ namespace SQLAuditor.Wpf
             return "NeedsReview";
         }
 
-        private void ApplyDeferredManualDecision(string response)
+        private async Task ApplyDeferredManualDecisionAsync(string response)
         {
             try
             {
@@ -1019,7 +1022,7 @@ namespace SQLAuditor.Wpf
                     _evalStatusMap[item.Id] = (status, "AI-Manual");
                 }
                 RenderEvaluationTree();
-                PersistManualResult(item, state);
+                await PersistManualResultAsync(item, state);
                 UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
                 Log($"Stored deferred manual result for {item.Id}: {outcome}");
 
@@ -1092,7 +1095,7 @@ namespace SQLAuditor.Wpf
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
         }
 
-        private void SetManualOutcomeForCurrentItem(string outcome, bool persistImmediately = false)
+        private async Task SetManualOutcomeForCurrentItemAsync(string outcome, bool persistImmediately = false)
         {
             var item = GetCurrentManualItem();
             if (item == null)
@@ -1113,7 +1116,7 @@ namespace SQLAuditor.Wpf
                     _evalStatusMap[item.Id] = (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
                     RenderEvaluationTree();
                 }
-                PersistManualResult(item, state);
+                await PersistManualResultAsync(item, state);
                 UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
                 Log($"Marked {item.Id} as {outcome}.");
                 return;
@@ -1133,7 +1136,50 @@ namespace SQLAuditor.Wpf
             Log($"Selected {outcome} for {item.Id}. Click Submit to save.");
         }
 
-        private void PersistManualResult(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
+        private async Task PersistManualResultAsync(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
+        {
+            var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
+            var key = outcome + "\u0001" + state.Remarks;
+
+            await _manualPersistLock.WaitAsync();
+            try
+            {
+                SQLAuditor.Lib.ChecklistResult updated;
+                if (state.EnrichedResult != null && string.Equals(state.EnrichedKey, key, StringComparison.Ordinal))
+                {
+                    updated = state.EnrichedResult;
+                }
+                else
+                {
+                    if (_auditor != null)
+                    {
+                        Log($"Reviewing manual evidence for {item.Id}...");
+                        updated = await _auditor.BuildManualResultAsync(item, outcome, state.Instructions, state.Remarks);
+                    }
+                    else
+                    {
+                        var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
+                        updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(
+                            new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual"));
+                    }
+
+                    state.EnrichedResult = updated;
+                    state.EnrichedKey = key;
+                }
+
+                WriteManualResultToDisk(updated);
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to save manual result for {item.Id}: {ex.Message}");
+            }
+            finally
+            {
+                _manualPersistLock.Release();
+            }
+        }
+
+        private static void WriteManualResultToDisk(SQLAuditor.Lib.ChecklistResult updated)
         {
             var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
             var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
@@ -1142,19 +1188,7 @@ namespace SQLAuditor.Wpf
                 try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
             }
 
-            var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
-            var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
-            var updated = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual")
-            {
-                McpUsage = null,
-                McpExecutionTimeMs = null,
-                McpEvidence = null
-            };
-            // Back-fill the report fields (Score, Severity, Finding, Recommendation, ...)
-            // so manually evaluated items match the schema used by the report generator.
-            updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(updated);
-
-            var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+            var idx = list.FindIndex(x => string.Equals(x.Id, updated.Id, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0) list[idx] = updated;
             else list.Add(updated);
 
@@ -1165,7 +1199,7 @@ namespace SQLAuditor.Wpf
         // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.
         // The engine persists manual items as "Evaluating" placeholders at the end of a run,
         // which can clobber decisions made while evaluation was still in progress.
-        private void ReapplySubmittedManualResults()
+        private async Task ReapplySubmittedManualResultsAsync()
         {
             if (_manualQueue == null || _manualStateMap == null) return;
             foreach (var item in _manualQueue)
@@ -1175,7 +1209,7 @@ namespace SQLAuditor.Wpf
                     && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                      || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
                 {
-                    try { PersistManualResult(item, state); } catch { }
+                    await PersistManualResultAsync(item, state);
                 }
             }
         }
@@ -1191,8 +1225,9 @@ namespace SQLAuditor.Wpf
             catch { return null; }
         }
 
-        // Regenerates final_report.md from the current checklist_results.json so the report
-        // reflects re-applied manual decisions instead of the engine's placeholder write.
+        // Regenerates final_report.md and audit_report.xlsx from the current
+        // checklist_results.json so both reports reflect re-applied manual decisions
+        // instead of the engine's placeholder write.
         private void RegenerateReportFromPersisted()
         {
             try
@@ -1201,15 +1236,26 @@ namespace SQLAuditor.Wpf
                 var path = System.IO.Path.Combine(dir, "checklist_results.json");
                 if (!System.IO.File.Exists(path)) return;
                 var arr = JsonSerializer.Deserialize<ChecklistResult[]>(System.IO.File.ReadAllText(path)) ?? Array.Empty<ChecklistResult>();
+                var metadata = new SqlAuditor.Reporting.ReportMetadata
+                {
+                    ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                    Auditors = "SQL Auditor Tool (automated)",
+                    TotalChecklistItems = arr.Length,
+                };
+
                 new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
                     path,
                     System.IO.Path.Combine(dir, "final_report.md"),
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Length,
-                    });
+                    metadata);
+
+                try
+                {
+                    new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                        path,
+                        System.IO.Path.Combine(dir, "audit_report.xlsx"),
+                        metadata);
+                }
+                catch (Exception ex) { Log("Failed to refresh audit_report.xlsx: " + ex.Message); }
             }
             catch { }
         }
@@ -1999,19 +2045,8 @@ namespace SQLAuditor.Wpf
                 // the report produced automatically at the end of an assessment.
                 try
                 {
-                    var outDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
-                    System.IO.Directory.CreateDirectory(outDir);
-                    var outPath = System.IO.Path.Combine(outDir, "final_report.md");
-                    new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                        path,
-                        outPath,
-                        new SqlAuditor.Reporting.ReportMetadata
-                        {
-                            ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                            Auditors = "SQL Auditor Tool (automated)",
-                            TotalChecklistItems = arr.Length,
-                        });
-                    Log("Rendered report saved to results/final_report.md");
+                    RegenerateReportFromPersisted();
+                    Log("Rendered report saved to results/final_report.md and results/audit_report.xlsx");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
 

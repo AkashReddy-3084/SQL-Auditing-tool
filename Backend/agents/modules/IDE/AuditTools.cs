@@ -175,8 +175,13 @@ public static class AuditTools
             sb.AppendLine("       ## Recommended Actions (if failed)");
             sb.AppendLine("       - ...");
             sb.AppendLine("     Do NOT add extra sections or headings outside this format.");
-            sb.AppendLine("  2. Ask the user for their finding / evidence.");
-            sb.AppendLine("  3. Decide Pass or Fail together with the user, then call the 'resolve_review' tool.");
+            sb.AppendLine("  2. Ask the user for their finding / evidence, and WAIT for it. Their own words are the evidence of record.");
+            sb.AppendLine("     If the user replies only 'pass' or 'fail' with no observation, ask again for what they inspected and what they found");
+            sb.AppendLine("     (document names, settings, values, counts). 'resolve_review' rejects a decision that has no evidence.");
+            sb.AppendLine("  3. Decide Pass or Fail together with the user, then call the 'resolve_review' tool with their evidence in 'notes'.");
+            sb.AppendLine("  4. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
+            sb.AppendLine("     finding (the actual state they observed), evidence (why it supports the outcome), riskImpact (the specific");
+            sb.AppendLine("     consequence) and recommendation (targeted remediation). Use ONLY facts the user stated — invent nothing.");
             sb.AppendLine("Do NOT write a final summary until every item has been resolved.");
             foreach (var r in manualPending)
             {
@@ -192,7 +197,8 @@ public static class AuditTools
                     sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
                     sb.AppendLine(r.Evidence.Trim());
                 }
-                sb.AppendLine($"After the user decides, call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<user's rationale>\")");
+                sb.AppendLine($"After the user decides, call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
+                sb.AppendLine($"Then call: enrich_result(id=\"{r.Id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\") derived from that evidence.");
             }
         }
 
@@ -624,23 +630,42 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Updates results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Requires the reviewer's own observation/evidence text for pass and fail decisions. Updates results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Use after 'evaluate' surfaces manual-review items.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
         [Description("The decision: 'pass', 'fail', or 'needsreview'.")] string decision,
-        [Description("Optional reviewer notes, recorded as the finding/evidence.")] string? notes = null)
+        [Description("The reviewer's observation/evidence in their own words: what they inspected and what they found (document names, settings, values, counts). Required for 'pass' and 'fail'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null)
     {
         if (string.IsNullOrWhiteSpace(id))
             return Task.FromResult("Error: 'id' is required.");
         if (string.IsNullOrWhiteSpace(decision))
             return Task.FromResult("Error: 'decision' is required (pass, fail, or needsreview).");
 
+        // The reviewer's own words are the evidence of record, so a decision cannot be
+        // filed without them.
+        var isDecision = decision.Trim().ToLowerInvariant() is "pass" or "p" or "yes" or "y" or "fail" or "f" or "no" or "n";
+        if (isDecision && !IsUsableEvidence(notes))
+            return Task.FromResult(
+                $"Error: 'notes' must contain the reviewer's actual observation for [{id}] — what they checked and what they found. "
+                + "Ask the user for their finding/evidence and call resolve_review again with it.");
+
         var auditor = new Auditor(string.Empty);
         if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
-            return Task.FromResult($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+            return Task.FromResult(
+                $"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated. "
+                + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the reviewer's evidence above — finding, evidence, riskImpact and recommendation — using only facts the reviewer stated.");
 
         return Task.FromResult(
             $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+    }
+
+    // A restatement of the verdict carries no information about what was inspected.
+    private static bool IsUsableEvidence(string? notes)
+    {
+        if (string.IsNullOrWhiteSpace(notes)) return false;
+        var trimmed = notes.Trim().Trim('.', '!', ' ').ToLowerInvariant();
+        return trimmed is not ("pass" or "passed" or "fail" or "failed" or "p" or "f"
+            or "yes" or "no" or "y" or "n" or "ok" or "okay" or "good" or "bad" or "n/a");
     }
 
     [McpServerTool(Name = "enrich_result")]

@@ -131,6 +131,7 @@ public sealed class ExcelReportGenerator
     private static readonly XLColor SoftGreenFont = XLColor.FromHtml("#0F5132");
 
     private const double MaxColumnWidth = 60d;
+    private const double HeaderWidthPadding = 2d;
 
     /// <summary>
     /// Generates the workbook from a results JSON file.
@@ -220,9 +221,10 @@ public sealed class ExcelReportGenerator
 
         WriteKpiCard(ws, 4, 1, 3, "Overall Score", Pct(overall), NeutralStatus());
         WriteKpiCard(ws, 4, 4, 3, "Overall Risk Rating", overallRating.Label, StatusFor(overallRating.Label));
+        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}";
         WriteKpiCard(ws, 4, 7, 3, "Total Checks Evaluated",
             $"{evaluated}", NeutralStatus(),
-            subText: $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}");
+            subText: kpiSubText);
 
         // ---- Area Scorecard -------------------------------------------------
         var row = 8;
@@ -298,6 +300,7 @@ public sealed class ExcelReportGenerator
         ws.Range(covLast, 1, covLast, 6).Style.Font.Bold = true;
 
         Finalize(ws, freezeRows: 3, autoFilterRange: null);
+        EnsureMergedTextFits(ws, kpiSubText, firstCol: 7, lastCol: 9);
     }
 
     private string[] TechniqueRow(string label, List<ChecklistItemResult> techItems)
@@ -743,7 +746,8 @@ public sealed class ExcelReportGenerator
         ws.Columns().AdjustToContents();
         foreach (var col in ws.ColumnsUsed())
         {
-            if (col.Width > MaxColumnWidth) col.Width = MaxColumnWidth;
+            // Auto-fit under-measures bold header text, clipping labels such as "Failed".
+            col.Width = Math.Min(col.Width + HeaderWidthPadding, MaxColumnWidth);
         }
         ws.Rows().AdjustToContents();
 
@@ -752,6 +756,21 @@ public sealed class ExcelReportGenerator
 
         if (freezeRows > 0)
             ws.SheetView.FreezeRows(freezeRows);
+    }
+
+    // Auto-fit ignores merged content, so a merged caption has to be measured by hand.
+    private static void EnsureMergedTextFits(IXLWorksheet ws, string text, int firstCol, int lastCol)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        var available = 0d;
+        for (var c = firstCol; c <= lastCol; c++) available += ws.Column(c).Width;
+
+        var needed = text.Length + HeaderWidthPadding;
+        if (available >= needed) return;
+
+        var last = ws.Column(lastCol);
+        last.Width = Math.Min(last.Width + (needed - available), MaxColumnWidth);
     }
 
     // =========================================================================
