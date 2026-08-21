@@ -1,99 +1,191 @@
--- Checklist: No SELECT * in production code; explicit column lists
--- Scope: DATABASE
--- Scoring: 3 = no SELECT * found; 2 = < 5% of objects use SELECT *; 1 = 5-25% use SELECT *; 0 = > 25% use SELECT *
+SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+/* Checklist 3.1.2 - No SELECT * in production code; explicit column lists.
+   Read-only: writes only to temp tables. */
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+IF OBJECT_ID('tempdb..#ScannedDb') IS NOT NULL DROP TABLE #ScannedDb;
+IF OBJECT_ID('tempdb..#ModuleScan') IS NOT NULL DROP TABLE #ModuleScan;
 
-IF SERVERPROPERTY('EngineEdition') = 5
+CREATE TABLE #ScannedDb
+(
+    DatabaseName sysname       NOT NULL PRIMARY KEY,
+    Prefix       nvarchar(300) NOT NULL,
+    Scanned      bit           NOT NULL,
+    ErrorText    nvarchar(400) NULL
+);
+
+CREATE TABLE #ModuleScan
+(
+    DatabaseName  sysname      NOT NULL,
+    SchemaName    sysname      NOT NULL,
+    ObjectName    sysname      NOT NULL,
+    ObjectType    nvarchar(60) NULL,
+    HasSelectStar bit          NULL   -- NULL = definition not readable (no VIEW DEFINITION)
+);
+
+IF CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
 BEGIN
-    DECLARE @TotalAzure INT;
-    SELECT @TotalAzure = COUNT(*) 
-    FROM sys.sql_modules m 
-    JOIN sys.objects o ON m.object_id = o.object_id 
-    WHERE o.type IN ('P', 'V', 'FN', 'IF', 'TF');
-
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    SELECT 
-        DB_NAME(),
-        CASE 
-            WHEN COUNT(*) = 0 THEN 3 
-            WHEN CAST(COUNT(*) * 100.0 / NULLIF(@TotalAzure, 0) AS FLOAT) < 5 THEN 2
-            WHEN CAST(COUNT(*) * 100.0 / NULLIF(@TotalAzure, 0) AS FLOAT) < 25 THEN 1
-            ELSE 0 
-        END,
-        CASE 
-            WHEN COUNT(*) = 0 THEN 'No SELECT * found'
-            ELSE 'Objects using SELECT *: ' + STRING_AGG(QUOTENAME(s.name) + '.' + QUOTENAME(o.name), ', ')
-        END
-    FROM sys.sql_modules m
-    JOIN sys.objects o ON m.object_id = o.object_id
-    JOIN sys.schemas s ON o.schema_id = s.schema_id
-    WHERE m.definition LIKE '%SELECT %*%' 
-      AND o.type IN ('P', 'V', 'FN', 'IF', 'TF');
+    /* Azure SQL Database: cross-database queries are not possible, scan the current database only. */
+    INSERT INTO #ScannedDb (DatabaseName, Prefix, Scanned, ErrorText)
+    VALUES (DB_NAME(), N'', 0, NULL);
 END
 ELSE
 BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'
-            DECLARE @Total INT;
-            DECLARE @BadCount INT;
-            
-            SELECT @Total = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules m 
-            JOIN ' + QUOTENAME(@DbName) + N'.sys.objects o ON m.object_id = o.object_id 
-            WHERE o.type IN (''P'', ''V'', ''FN'', ''IF'', ''TF'');
-
-            SELECT 
-                @p_Db,
-                CASE 
-                    WHEN COUNT(*) = 0 THEN 3 
-                    WHEN CAST(COUNT(*) * 100.0 / NULLIF(@Total, 0) AS FLOAT) < 5 THEN 2
-                    WHEN CAST(COUNT(*) * 100.0 / NULLIF(@Total, 0) AS FLOAT) < 25 THEN 1
-                    ELSE 0 
-                END,
-                CASE 
-                    WHEN COUNT(*) = 0 THEN ''No SELECT * found''
-                    ELSE ''Objects using SELECT *: '' + STRING_AGG(QUOTENAME(s.name) + ''.'' + QUOTENAME(o.name), '', '') 
-                END
-            FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules m
-            JOIN ' + QUOTENAME(@DbName) + N'.sys.objects o ON m.object_id = o.object_id
-            JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON o.schema_id = s.schema_id
-            WHERE m.definition LIKE ''%SELECT %*%'' 
-              AND o.type IN (''P'', ''V'', ''FN'', ''IF'', ''TF'');';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
+    INSERT INTO #ScannedDb (DatabaseName, Prefix, Scanned, ErrorText)
+    SELECT d.name, QUOTENAME(d.name) + N'.', 0, NULL
+    FROM sys.databases AS d
+    WHERE d.database_id > 4
+      AND d.state_desc = N'ONLINE'
+      AND d.source_database_id IS NULL
+      AND d.name NOT IN (N'distribution', N'SSISDB', N'ReportServer', N'ReportServerTempDB')
+      AND HAS_DBACCESS(d.name) = 1;
 END
 
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
+DECLARE @db     sysname,
+        @prefix nvarchar(300),
+        @sql    nvarchar(max);
+
+DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
+    SELECT DatabaseName, Prefix FROM #ScannedDb ORDER BY DatabaseName;
+
+OPEN db_cur;
+FETCH NEXT FROM db_cur INTO @db, @prefix;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        SET @sql = N'
+        SELECT @p_db,
+               s.name,
+               o.name,
+               o.type_desc,
+               CASE
+                   WHEN m.definition IS NULL THEN NULL
+                   WHEN REPLACE(REPLACE(
+                            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                                m.definition,
+                                CHAR(13), N'' ''), CHAR(10), N'' ''), CHAR(9), N'' ''),
+                                N''  '', N'' ''), N''  '', N'' ''), N''  '', N'' '')),
+                            N''EXISTS (SELECT *'', N''''), N''EXISTS(SELECT *'', N'''')
+                        LIKE N''%SELECT *%''
+                        THEN 1
+                   ELSE 0
+               END
+        FROM ' + @prefix + N'sys.sql_modules AS m
+        INNER JOIN ' + @prefix + N'sys.objects AS o ON o.object_id = m.object_id
+        INNER JOIN ' + @prefix + N'sys.schemas AS s ON s.schema_id = o.schema_id
+        WHERE o.is_ms_shipped = 0
+          AND o.type IN (''P'', ''V'', ''FN'', ''IF'', ''TF'', ''TR'');';
+
+        INSERT INTO #ModuleScan (DatabaseName, SchemaName, ObjectName, ObjectType, HasSelectStar)
+        EXEC sp_executesql @sql, N'@p_db sysname', @p_db = @db;
+
+        UPDATE #ScannedDb SET Scanned = 1 WHERE DatabaseName = @db;
+    END TRY
+    BEGIN CATCH
+        UPDATE #ScannedDb
+        SET Scanned   = 0,
+            ErrorText = LEFT(ERROR_MESSAGE(), 400)
+        WHERE DatabaseName = @db;
+    END CATCH
+
+    FETCH NEXT FROM db_cur INTO @db, @prefix;
+END
+
+CLOSE db_cur;
+DEALLOCATE db_cur;
+
+DECLARE @TotalDbs      int = (SELECT COUNT(*) FROM #ScannedDb),
+        @ScannedDbs    int = (SELECT COUNT(*) FROM #ScannedDb WHERE Scanned = 1),
+        @TotalModules  int = (SELECT COUNT(*) FROM #ModuleScan),
+        @Readable      int = (SELECT COUNT(*) FROM #ModuleScan WHERE HasSelectStar IS NOT NULL),
+        @Violations    int = (SELECT COUNT(*) FROM #ModuleScan WHERE HasSelectStar = 1),
+        @ViolatingDbs  int = (SELECT COUNT(DISTINCT DatabaseName) FROM #ModuleScan WHERE HasSelectStar = 1);
+
+DECLARE @Pct decimal(9,2) =
+    CASE WHEN @Readable > 0
+         THEN CAST(@Violations AS decimal(18,4)) * 100.0 / CAST(@Readable AS decimal(18,4))
+         ELSE 0 END;
+
+DECLARE @DbList nvarchar(max) =
+    ISNULL(STUFF((SELECT N', ' + d.DatabaseName
+                  FROM #ScannedDb AS d
+                  ORDER BY d.DatabaseName
+                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'None');
+
+DECLARE @Examples nvarchar(max) =
+    ISNULL(STUFF((SELECT TOP (5) N', ' + t.DatabaseName + N'.' + t.SchemaName + N'.' + t.ObjectName
+                  FROM #ModuleScan AS t
+                  WHERE t.HasSelectStar = 1
+                  ORDER BY t.DatabaseName, t.SchemaName, t.ObjectName
+                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'');
+
+DECLARE @FailedDbs nvarchar(max) =
+    ISNULL(STUFF((SELECT N', ' + d.DatabaseName
+                  FROM #ScannedDb AS d
+                  WHERE d.Scanned = 0
+                  ORDER BY d.DatabaseName
+                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'');
+
+DECLARE @Result  nvarchar(30),
+        @Score   int,
+        @Finding nvarchar(max);
+
+IF @TotalDbs = 0
+BEGIN
+    SET @Score  = 0;
+    SET @Finding = N'No accessible online user database was found on this instance, so production T-SQL code could not be inspected for SELECT * usage. Verify database visibility and connection permissions, then re-run.';
+END
+ELSE IF @TotalModules > 0 AND @Readable = 0
+BEGIN
+    SET @Score  = 0;
+    SET @Finding = N'Found ' + CAST(@TotalModules AS nvarchar(20)) + N' programmable module(s) across ' + CAST(@ScannedDbs AS nvarchar(20))
+                 + N' database(s), but no module definition was readable (VIEW DEFINITION permission is missing), so SELECT * usage could not be determined.';
+END
+ELSE IF @TotalModules = 0
+BEGIN
+    SET @Score  = 3;
+    SET @Finding = N'No user-defined programmable modules (stored procedures, views, functions, triggers) exist in the ' + CAST(@ScannedDbs AS nvarchar(20))
+                 + N' scanned database(s), so no SELECT * usage is present in server-side production code.';
+END
+ELSE IF @Violations = 0
+BEGIN
+    SET @Score  = 3;
+    SET @Finding = N'All ' + CAST(@Readable AS nvarchar(20)) + N' readable programmable module(s) across ' + CAST(@ScannedDbs AS nvarchar(20))
+                 + N' database(s) use explicit column lists; 0 modules contain SELECT * (the EXISTS (SELECT *) idiom is excluded from the count).';
+END
+ELSE IF @Pct <= 5.0
+BEGIN
+    SET @Score  = 2;
+    SET @Finding = CAST(@Violations AS nvarchar(20)) + N' of ' + CAST(@Readable AS nvarchar(20)) + N' readable module(s) ('
+                 + CAST(@Pct AS nvarchar(20)) + N'%) across ' + CAST(@ViolatingDbs AS nvarchar(20)) + N' database(s) still use SELECT *. Examples: ' + @Examples + N'.';
+END
+ELSE IF @Pct <= 20.0
+BEGIN
+    SET @Score  = 1;
+    SET @Finding = CAST(@Violations AS nvarchar(20)) + N' of ' + CAST(@Readable AS nvarchar(20)) + N' readable module(s) ('
+                 + CAST(@Pct AS nvarchar(20)) + N'%) across ' + CAST(@ViolatingDbs AS nvarchar(20)) + N' database(s) still use SELECT *. Examples: ' + @Examples + N'.';
+END
+ELSE
+BEGIN
+    SET @Score  = 0;
+    SET @Finding = CAST(@Violations AS nvarchar(20)) + N' of ' + CAST(@Readable AS nvarchar(20)) + N' readable module(s) ('
+                 + CAST(@Pct AS nvarchar(20)) + N'%) across ' + CAST(@ViolatingDbs AS nvarchar(20)) + N' database(s) use SELECT * instead of explicit column lists. Examples: ' + @Examples + N'.';
+END
+
+IF @TotalModules > 0 AND @Readable > 0 AND @Readable < @TotalModules
+    SET @Finding = @Finding + N' Note: ' + CAST(@TotalModules - @Readable AS nvarchar(20)) + N' module definition(s) were not readable (VIEW DEFINITION permission missing) and are excluded from the ratio.';
+
+IF LEN(@FailedDbs) > 0
+    SET @Finding = @Finding + N' Database(s) that could not be scanned: ' + @FailedDbs + N'.';
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+SELECT
+    @Result                       AS Result,
+    @Score                        AS Score,
+    LEFT(@DbList, 4000)           AS DatabaseQueried,
+    LEFT(@Finding, 4000)          AS Finding;
+
+DROP TABLE #ModuleScan;
+DROP TABLE #ScannedDb;

@@ -1,77 +1,167 @@
--- Checklist: Backups restore-tested regularly (not just taken)
--- Scope: SERVER
--- Scoring: 3=Restores in last 30 days; 2=Restores in last 90 days or Azure SQL DB platform-managed; 1=Backups exist but no recent restores; 0=No backups or restores in 180 days.
+/*
+    Checklist Item : 9.1.3 - Backups restore-tested regularly (not just taken)
+    Scope          : SERVER
+    Purpose        : Determine whether backups have been proven recoverable by looking for
+                     actual RESTORE or RESTORE VERIFYONLY activity in msdb history, and
+                     whether that activity covers the user databases that are being backed up.
+    Read-only      : Yes. Only SELECT statements against msdb history and sys.databases.
+*/
 
-DECLARE @Result NVARCHAR(10);
-DECLARE @Score INT;
-DECLARE @DatabaseQueried NVARCHAR(MAX);
-DECLARE @Finding NVARCHAR(MAX);
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+SET NOCOUNT ON;
 
-SET @DatabaseQueried = 'master';
+DECLARE @EngineEdition   INT            = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @Result          NVARCHAR(50)   = N'Fail';
+DECLARE @Score           INT            = 0;
+DECLARE @DatabaseQueried NVARCHAR(256)  = N'msdb';
+DECLARE @Finding         NVARCHAR(4000) = N'';
 
 IF @EngineEdition = 5
 BEGIN
-    -- Azure SQL Database: Backup/restore is platform-managed
-    SET @Score = 2;
-    SET @Finding = 'Azure SQL Database: Backup and restore operations are fully platform-managed. Manual restore testing is not exposed via queryable artifacts.';
+    SET @Score = 0;
+    SET @DatabaseQueried = CAST(DB_NAME() AS NVARCHAR(256));
+    SET @Finding = N'Azure SQL Database does not expose msdb backup/restore history. Restore-test evidence '
+                 + N'for automated backups cannot be verified from this instance and must be demonstrated '
+                 + N'through documented point-in-time restore drills recorded outside SQL Server.';
 END
 ELSE
 BEGIN
-    -- SQL Server / Azure SQL MI
-    DECLARE @Restores30 INT = 0;
-    DECLARE @Restores90 INT = 0;
-    DECLARE @Restores180 INT = 0;
-    DECLARE @Backups90 INT = 0;
+    DECLARE @TotalRestoreEvents   INT      = 0;
+    DECLARE @RestoreEvents90      INT      = 0;
+    DECLARE @RestoreEvents365     INT      = 0;
+    DECLARE @VerifyOnlyEvents90   INT      = 0;
+    DECLARE @LastRestoreDate      DATETIME = NULL;
+    DECLARE @DaysSinceLastRestore INT      = NULL;
+    DECLARE @DbsWithBackups       INT      = 0;
+    DECLARE @DbsTested90          INT      = 0;
+    DECLARE @TestedList           NVARCHAR(2000) = NULL;
+    DECLARE @UntestedList         NVARCHAR(2000) = NULL;
 
-    IF OBJECT_ID('msdb.dbo.restorehistory') IS NOT NULL
+    /* User databases (excluding system databases) that have a full backup in the last 365 days. */
+    DECLARE @BackedUpDbs TABLE (database_name NVARCHAR(256) NOT NULL PRIMARY KEY);
+
+    INSERT INTO @BackedUpDbs (database_name)
+    SELECT DISTINCT bs.database_name
+    FROM msdb.dbo.backupset AS bs
+    INNER JOIN sys.databases AS d
+        ON d.name = bs.database_name
+    WHERE bs.type = 'D'
+      AND bs.backup_finish_date >= DATEADD(DAY, -365, GETDATE())
+      AND d.database_id > 4
+      AND d.source_database_id IS NULL;
+
+    SELECT @DbsWithBackups = COUNT(*) FROM @BackedUpDbs;
+
+    /* Source databases proven by a restore or VERIFYONLY event in the last 90 days. */
+    DECLARE @TestedDbs TABLE (database_name NVARCHAR(256) NOT NULL PRIMARY KEY);
+
+    INSERT INTO @TestedDbs (database_name)
+    SELECT DISTINCT bs.database_name
+    FROM msdb.dbo.restorehistory AS rh
+    INNER JOIN msdb.dbo.backupset AS bs
+        ON bs.backup_set_id = rh.backup_set_id
+    WHERE rh.restore_date >= DATEADD(DAY, -90, GETDATE())
+      AND bs.database_name IS NOT NULL;
+
+    SELECT @TotalRestoreEvents = COUNT(*)
+    FROM msdb.dbo.restorehistory;
+
+    SELECT @RestoreEvents90 = COUNT(*)
+    FROM msdb.dbo.restorehistory
+    WHERE restore_date >= DATEADD(DAY, -90, GETDATE());
+
+    SELECT @RestoreEvents365 = COUNT(*)
+    FROM msdb.dbo.restorehistory
+    WHERE restore_date >= DATEADD(DAY, -365, GETDATE());
+
+    SELECT @VerifyOnlyEvents90 = COUNT(*)
+    FROM msdb.dbo.restorehistory
+    WHERE restore_date >= DATEADD(DAY, -90, GETDATE())
+      AND restore_type = 'V';
+
+    SELECT @LastRestoreDate = MAX(restore_date)
+    FROM msdb.dbo.restorehistory;
+
+    IF @LastRestoreDate IS NOT NULL
+        SET @DaysSinceLastRestore = DATEDIFF(DAY, @LastRestoreDate, GETDATE());
+
+    SELECT @DbsTested90 = COUNT(*)
+    FROM @TestedDbs AS t
+    INNER JOIN @BackedUpDbs AS b
+        ON b.database_name = t.database_name;
+
+    SET @TestedList = STUFF((
+        SELECT TOP (20) N', ' + t.database_name
+        FROM @TestedDbs AS t
+        INNER JOIN @BackedUpDbs AS b
+            ON b.database_name = t.database_name
+        ORDER BY t.database_name
+        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(2000)'), 1, 2, N'');
+
+    SET @UntestedList = STUFF((
+        SELECT TOP (20) N', ' + b.database_name
+        FROM @BackedUpDbs AS b
+        WHERE NOT EXISTS (SELECT 1 FROM @TestedDbs AS t WHERE t.database_name = b.database_name)
+        ORDER BY b.database_name
+        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(2000)'), 1, 2, N'');
+
+    SET @TestedList   = ISNULL(@TestedList,   N'none');
+    SET @UntestedList = ISNULL(@UntestedList, N'none');
+
+    IF @DbsWithBackups = 0
     BEGIN
-        SELECT @Restores30 = COUNT(*) FROM msdb.dbo.restorehistory
-        WHERE restore_date >= DATEADD(day, -30, GETDATE())
-          AND destination_database_name NOT IN ('master', 'model', 'msdb', 'tempdb');
-
-        SELECT @Restores90 = COUNT(*) FROM msdb.dbo.restorehistory
-        WHERE restore_date >= DATEADD(day, -90, GETDATE())
-          AND destination_database_name NOT IN ('master', 'model', 'msdb', 'tempdb');
-
-        SELECT @Restores180 = COUNT(*) FROM msdb.dbo.restorehistory
-        WHERE restore_date >= DATEADD(day, -180, GETDATE())
-          AND destination_database_name NOT IN ('master', 'model', 'msdb', 'tempdb');
+        SET @Score = 0;
+        SET @Finding = N'No full backups were found in msdb.dbo.backupset for any user database in the last 365 days, '
+                     + N'so there is nothing to restore-test. Total restore/verify events ever recorded on this instance: '
+                     + CAST(@TotalRestoreEvents AS NVARCHAR(20)) + N'.';
     END
-
-    IF OBJECT_ID('msdb.dbo.backupset') IS NOT NULL
+    ELSE IF @TotalRestoreEvents = 0
     BEGIN
-        SELECT @Backups90 = COUNT(*) FROM msdb.dbo.backupset
-        WHERE backup_start_date >= DATEADD(day, -90, GETDATE())
-          AND type IN ('D', 'I', 'L');
+        SET @Score = 0;
+        SET @Finding = N'msdb.dbo.restorehistory contains no restore or RESTORE VERIFYONLY events at all, while '
+                     + CAST(@DbsWithBackups AS NVARCHAR(20)) + N' user database(s) have full backups in the last 365 days ('
+                     + @UntestedList + N'). Backups are being taken but have never been proven recoverable on this instance.';
     END
-
-    IF @Restores30 > 0
+    ELSE IF @RestoreEvents90 > 0 AND @DbsTested90 >= @DbsWithBackups
     BEGIN
         SET @Score = 3;
-        SET @Finding = 'Restore testing verified: ' + CAST(@Restores30 AS NVARCHAR(10)) + ' restore(s) performed in the last 30 days.';
+        SET @Finding = N'Restore testing is current and complete: ' + CAST(@RestoreEvents90 AS NVARCHAR(20))
+                     + N' restore/verify event(s) in the last 90 days (of which ' + CAST(@VerifyOnlyEvents90 AS NVARCHAR(20))
+                     + N' were RESTORE VERIFYONLY), covering all ' + CAST(@DbsWithBackups AS NVARCHAR(20))
+                     + N' backed-up user database(s): ' + @TestedList + N'. Most recent event '
+                     + CONVERT(NVARCHAR(20), @LastRestoreDate, 120) + N' ('
+                     + CAST(@DaysSinceLastRestore AS NVARCHAR(20)) + N' day(s) ago).';
     END
-    ELSE IF @Restores90 > 0
+    ELSE IF @RestoreEvents90 > 0
     BEGIN
         SET @Score = 2;
-        SET @Finding = 'Partial evidence: ' + CAST(@Restores90 AS NVARCHAR(10)) + ' restore(s) in last 90 days. Regular testing not confirmed.';
+        SET @Finding = N'Restore testing is recent but incomplete: ' + CAST(@RestoreEvents90 AS NVARCHAR(20))
+                     + N' restore/verify event(s) in the last 90 days covering only ' + CAST(@DbsTested90 AS NVARCHAR(20))
+                     + N' of ' + CAST(@DbsWithBackups AS NVARCHAR(20)) + N' backed-up user database(s). Tested: '
+                     + @TestedList + N'. Not restore-tested in the last 90 days: ' + @UntestedList
+                     + N'. Most recent event ' + CONVERT(NVARCHAR(20), @LastRestoreDate, 120) + N'.';
     END
-    ELSE IF @Backups90 > 0
+    ELSE IF @RestoreEvents365 > 0
     BEGIN
         SET @Score = 1;
-        SET @Finding = 'Backups are taken (' + CAST(@Backups90 AS NVARCHAR(10)) + ' in last 90 days), but no restore tests found in last 90 days.';
+        SET @Finding = N'Restore testing is stale: the last restore/verify event was '
+                     + CONVERT(NVARCHAR(20), @LastRestoreDate, 120) + N' ('
+                     + CAST(@DaysSinceLastRestore AS NVARCHAR(20)) + N' day(s) ago) with no activity in the last 90 days. '
+                     + CAST(@DbsWithBackups AS NVARCHAR(20)) + N' user database(s) are being backed up: ' + @UntestedList + N'.';
     END
     ELSE
     BEGIN
         SET @Score = 0;
-        SET @Finding = 'No recent backups or restore tests found in the last 180 days.';
+        SET @Finding = N'No restore or RESTORE VERIFYONLY activity in the last 365 days. Last recorded event: '
+                     + ISNULL(CONVERT(NVARCHAR(20), @LastRestoreDate, 120), N'never') + N'. '
+                     + CAST(@DbsWithBackups AS NVARCHAR(20)) + N' user database(s) have recent full backups that have '
+                     + N'never been verified by restore: ' + @UntestedList + N'.';
     END
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT
-    @Result AS Result,
-    @Score AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding AS Finding;
+    CAST(@Result AS NVARCHAR(50))           AS Result,
+    CAST(@Score AS INT)                     AS Score,
+    CAST(@DatabaseQueried AS NVARCHAR(256)) AS DatabaseQueried,
+    CAST(@Finding AS NVARCHAR(4000))        AS Finding;

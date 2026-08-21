@@ -1,124 +1,236 @@
--- Checklist: No deprecated syntax/features (e.g., old-style joins, TEXT/NTEXT)
--- Scope: DATABASE
--- Scoring: 3 = none; 2 = < 5% affected; 1 = 5-25% affected; 0 = > 25% affected
+SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+IF OBJECT_ID('tempdb..#Findings') IS NOT NULL DROP TABLE #Findings;
+IF OBJECT_ID('tempdb..#Dbs') IS NOT NULL DROP TABLE #Dbs;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+CREATE TABLE #Findings
+(
+    DatabaseName sysname        NOT NULL,
+    ObjectName   nvarchar(600)  NOT NULL,
+    IssueType    nvarchar(100)  NOT NULL,
+    Detail       nvarchar(400)  NULL
+);
 
-IF SERVERPROPERTY('EngineEdition') = 5
+CREATE TABLE #Dbs
+(
+    DatabaseName sysname NOT NULL,
+    Scanned      bit     NOT NULL
+);
+
+DECLARE @EngineEdition int = CAST(SERVERPROPERTY('EngineEdition') AS int);
+DECLARE @DbName sysname;
+DECLARE @Sql    nvarchar(max);
+
+DECLARE @Template nvarchar(max) = N'
+INSERT INTO #Findings (DatabaseName, ObjectName, IssueType, Detail)
+SELECT @db,
+       QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name) + N''.'' + QUOTENAME(c.name),
+       N''Deprecated column data type'',
+       t.name
+FROM {P}sys.columns AS c
+INNER JOIN {P}sys.objects AS o ON o.object_id = c.object_id
+INNER JOIN {P}sys.schemas AS s ON s.schema_id = o.schema_id
+INNER JOIN {P}sys.types   AS t ON t.user_type_id = c.system_type_id
+                              AND t.is_user_defined = 0
+WHERE o.is_ms_shipped = 0
+  AND o.type IN (N''U'', N''V'')
+  AND t.name IN (N''text'', N''ntext'', N''image'', N''timestamp'');
+
+INSERT INTO #Findings (DatabaseName, ObjectName, IssueType, Detail)
+SELECT @db,
+       QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name) + N'' (parameter '' + p.name + N'')'',
+       N''Deprecated parameter data type'',
+       t.name
+FROM {P}sys.parameters AS p
+INNER JOIN {P}sys.objects AS o ON o.object_id = p.object_id
+INNER JOIN {P}sys.schemas AS s ON s.schema_id = o.schema_id
+INNER JOIN {P}sys.types   AS t ON t.user_type_id = p.system_type_id
+                              AND t.is_user_defined = 0
+WHERE o.is_ms_shipped = 0
+  AND t.name IN (N''text'', N''ntext'', N''image'');
+
+INSERT INTO #Findings (DatabaseName, ObjectName, IssueType, Detail)
+SELECT @db,
+       QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name),
+       N''Old-style outer join operator'',
+       CASE WHEN m.definition LIKE N''%*=%'' AND m.definition LIKE N''%=*%'' THEN N''*= and =*''
+            WHEN m.definition LIKE N''%*=%'' THEN N''*=''
+            ELSE N''=*''
+       END
+FROM {P}sys.sql_modules AS m
+INNER JOIN {P}sys.objects AS o ON o.object_id = m.object_id
+INNER JOIN {P}sys.schemas AS s ON s.schema_id = o.schema_id
+WHERE o.is_ms_shipped = 0
+  AND m.definition IS NOT NULL
+  AND (m.definition LIKE N''%*=%'' OR m.definition LIKE N''%=*%'');
+
+INSERT INTO #Findings (DatabaseName, ObjectName, IssueType, Detail)
+SELECT @db,
+       QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name),
+       N''Deprecated construct'',
+       pat.Label
+FROM {P}sys.sql_modules AS m
+INNER JOIN {P}sys.objects AS o ON o.object_id = m.object_id
+INNER JOIN {P}sys.schemas AS s ON s.schema_id = o.schema_id
+CROSS APPLY (VALUES
+        (N''%SET ROWCOUNT%'', N''SET ROWCOUNT''),
+        (N''%FASTFIRSTROW%'', N''FASTFIRSTROW hint''),
+        (N''%sp_dboption%'',  N''sp_dboption''),
+        (N''%sp_attach_db%'', N''sp_attach_db''),
+        (N''%sp_addtype%'',   N''sp_addtype''),
+        (N''%READTEXT%'',     N''READTEXT''),
+        (N''%WRITETEXT%'',    N''WRITETEXT''),
+        (N''%UPDATETEXT%'',   N''UPDATETEXT''),
+        (N''%TEXTPTR%'',      N''TEXTPTR''),
+        (N''%sysobjects%'',   N''sysobjects compatibility view''),
+        (N''%syscolumns%'',   N''syscolumns compatibility view''),
+        (N''%sysindexes%'',   N''sysindexes compatibility view''),
+        (N''%sysusers%'',     N''sysusers compatibility view'')
+    ) AS pat(Pattern, Label)
+WHERE o.is_ms_shipped = 0
+  AND m.definition IS NOT NULL
+  AND m.definition COLLATE Latin1_General_CI_AS LIKE pat.Pattern;
+
+INSERT INTO #Findings (DatabaseName, ObjectName, IssueType, Detail)
+SELECT @db,
+       QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name),
+       N''Encrypted module - manual review'',
+       NULL
+FROM {P}sys.sql_modules AS m
+INNER JOIN {P}sys.objects AS o ON o.object_id = m.object_id
+INNER JOIN {P}sys.schemas AS s ON s.schema_id = o.schema_id
+WHERE o.is_ms_shipped = 0
+  AND m.definition IS NULL;
+';
+
+IF @EngineEdition IN (5, 6, 9, 11)
 BEGIN
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    SELECT 
-        DB_NAME(),
-        CASE WHEN DepCount = 0 THEN 3 
-             WHEN CAST(DepCount * 100.0 / NULLIF(TotalObjs, 0) AS FLOAT) < 5 THEN 2 
-             WHEN CAST(DepCount * 100.0 / NULLIF(TotalObjs, 0) AS FLOAT) < 25 THEN 1 
-             ELSE 0 END,
-        CASE WHEN DepCount = 0 THEN 'No deprecated syntax/types found'
-             ELSE 'Deprecated items found: ' + DepList END
-    FROM (
-        SELECT 
-            (SELECT COUNT(*) FROM sys.objects WHERE type IN ('U', 'P', 'V', 'FN')) as TotalObjs,
-            (SELECT COUNT(*) FROM (
-                SELECT 1 as Item FROM sys.columns c 
-                JOIN sys.tables t ON c.object_id = t.object_id 
-                JOIN sys.types ty ON c.user_type_id = ty.user_type_id
-                WHERE ty.name IN ('text', 'ntext', 'image')
-                UNION ALL
-                SELECT 1 FROM sys.sql_modules m 
-                JOIN sys.objects o ON m.object_id = o.object_id 
-                WHERE m.definition LIKE '% *= %' OR m.definition LIKE '% =* %'
-            ) AS t) as DepCount,
-            (SELECT STRING_AGG(CAST(Item AS NVARCHAR(MAX)), ', ') FROM (
-                SELECT 'Col: ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name) + '.' + QUOTENAME(c.name) AS Item
-                FROM sys.columns c 
-                JOIN sys.tables t ON c.object_id = t.object_id 
-                JOIN sys.schemas s ON t.schema_id = s.schema_id
-                JOIN sys.types ty ON c.user_type_id = ty.user_type_id
-                WHERE ty.name IN ('text', 'ntext', 'image')
-                UNION ALL
-                SELECT 'Module: ' + QUOTENAME(s.name) + '.' + QUOTENAME(o.name)
-                FROM sys.sql_modules m 
-                JOIN sys.objects o ON m.object_id = o.object_id 
-                JOIN sys.schemas s ON o.schema_id = s.schema_id
-                WHERE m.definition LIKE '% *= %' OR m.definition LIKE '% =* %'
-            ) AS t) as DepList
-    ) AS Summary;
+    SET @DbName = DB_NAME();
+    SET @Sql = REPLACE(@Template, N'{P}', N'');
+
+    BEGIN TRY
+        EXEC sp_executesql @Sql, N'@db sysname', @db = @DbName;
+        INSERT INTO #Dbs (DatabaseName, Scanned) VALUES (@DbName, 1);
+    END TRY
+    BEGIN CATCH
+        INSERT INTO #Dbs (DatabaseName, Scanned) VALUES (@DbName, 0);
+    END CATCH
 END
 ELSE
 BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+    DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT d.name
+        FROM sys.databases AS d
+        WHERE d.database_id > 4
+          AND d.state_desc = 'ONLINE'
+          AND d.source_database_id IS NULL
+          AND HAS_DBACCESS(d.name) = 1
+        ORDER BY d.name;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    OPEN db_cur;
+    FETCH NEXT FROM db_cur INTO @DbName;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        BEGIN TRY
-            SET @Sql = N'
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            SELECT 
-                @p_Db,
-                CASE WHEN DepCount = 0 THEN 3 
-                     WHEN CAST(DepCount * 100.0 / NULLIF(TotalObjs, 0) AS FLOAT) < 5 THEN 2 
-                     WHEN CAST(DepCount * 100.0 / NULLIF(TotalObjs, 0) AS FLOAT) < 25 THEN 1 
-                     ELSE 0 END,
-                CASE WHEN DepCount = 0 THEN ''No deprecated syntax/types found''
-                     ELSE ''Deprecated items found: '' + DepList END
-            FROM (
-                SELECT 
-                    (SELECT COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.objects WHERE type IN (''U'', ''P'', ''V'', ''FN'')) as TotalObjs,
-                    (SELECT COUNT(*) FROM (
-                        SELECT 1 as Item FROM ' + QUOTENAME(@DbName) + N'.sys.columns c 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON c.object_id = t.object_id 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.types ty ON c.user_type_id = ty.user_type_id
-                        WHERE ty.name IN (''text'', ''ntext'', ''image'')
-                        UNION ALL
-                        SELECT 1 FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules m 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.objects o ON m.object_id = o.object_id 
-                        WHERE m.definition LIKE ''% *= %'' OR m.definition LIKE ''% =* %''
-                    ) AS t) as DepCount,
-                    (SELECT STRING_AGG(CAST(Item AS NVARCHAR(MAX)), '', '') FROM (
-                        SELECT ''Col: '' + QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name) + ''.'' + QUOTENAME(c.name) AS Item
-                        FROM ' + QUOTENAME(@DbName) + N'.sys.columns c 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON c.object_id = t.object_id 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.types ty ON c.user_type_id = ty.user_type_id
-                        WHERE ty.name IN (''text'', ''ntext'', ''image'')
-                        UNION ALL
-                        SELECT ''Module: '' + QUOTENAME(s.name) + ''.'' + QUOTENAME(o.name)
-                        FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules m 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.objects o ON m.object_id = o.object_id 
-                        JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON o.schema_id = s.schema_id
-                        WHERE m.definition LIKE ''% *= %'' OR m.definition LIKE ''% =* %''
-                    ) AS t) as DepList
-            ) AS Summary;';
+        SET @Sql = REPLACE(@Template, N'{P}', QUOTENAME(@DbName) + N'.');
 
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
+        BEGIN TRY
+            EXEC sp_executesql @Sql, N'@db sysname', @db = @DbName;
+            INSERT INTO #Dbs (DatabaseName, Scanned) VALUES (@DbName, 1);
         END TRY
         BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
+            INSERT INTO #Dbs (DatabaseName, Scanned) VALUES (@DbName, 0);
+        END CATCH
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
+        FETCH NEXT FROM db_cur INTO @DbName;
     END
 
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
+    CLOSE db_cur;
+    DEALLOCATE db_cur;
 END
 
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
+DECLARE @Scanned      int = (SELECT COUNT(*) FROM #Dbs WHERE Scanned = 1);
+DECLARE @Skipped      int = (SELECT COUNT(*) FROM #Dbs WHERE Scanned = 0);
+DECLARE @Encrypted    int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = N'Encrypted module - manual review');
+DECLARE @Total        int = (SELECT COUNT(*) FROM #Findings WHERE IssueType <> N'Encrypted module - manual review');
+DECLARE @AffectedDbs  int = (SELECT COUNT(DISTINCT DatabaseName) FROM #Findings WHERE IssueType <> N'Encrypted module - manual review');
+
+DECLARE @DbList nvarchar(max) =
+    STUFF((SELECT N', ' + d.DatabaseName
+           FROM #Dbs AS d
+           WHERE d.Scanned = 1
+           ORDER BY d.DatabaseName
+           FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 2, N'');
+
+DECLARE @Sample nvarchar(max);
+
+;WITH Ranked AS
+(
+    SELECT TOP (5) f.DatabaseName, f.ObjectName, f.IssueType, f.Detail
+    FROM #Findings AS f
+    WHERE f.IssueType <> N'Encrypted module - manual review'
+    ORDER BY f.DatabaseName, f.IssueType, f.ObjectName
+)
+SELECT @Sample =
+    STUFF((SELECT N'; ' + r.DatabaseName + N'.' + r.ObjectName
+                  + N' (' + r.IssueType + N': ' + ISNULL(r.Detail, N'n/a') + N')'
+           FROM Ranked AS r
+           ORDER BY r.DatabaseName, r.IssueType, r.ObjectName
+           FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 2, N'');
+
+DECLARE @Result  nvarchar(20);
+DECLARE @Score   int;
+DECLARE @Finding nvarchar(max);
+
+DECLARE @CheckedText nvarchar(600) =
+    N'Checked: text/ntext/image/timestamp columns, text/ntext/image parameters, old-style outer joins (*=, =*), and deprecated constructs (SET ROWCOUNT, FASTFIRSTROW, sp_dboption, sp_attach_db, sp_addtype, READTEXT/WRITETEXT/UPDATETEXT/TEXTPTR, sysobjects/syscolumns/sysindexes/sysusers).';
+
+IF @Scanned = 0
+BEGIN
+    SET @Score = 0;
+    SET @Finding = N'No user database could be scanned for deprecated syntax or data types (user databases inaccessible, or none exist). Databases skipped due to access errors: '
+                   + CAST(@Skipped AS nvarchar(10)) + N'. Compliance could not be evidenced; manual review required.';
+END
+ELSE IF @Total = 0 AND @Encrypted > 0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'No deprecated syntax or data types were detected in ' + CAST(@Scanned AS nvarchar(10))
+                   + N' scanned user database(s), but ' + CAST(@Encrypted AS nvarchar(10))
+                   + N' encrypted module(s) could not be inspected, so coverage is incomplete. ' + @CheckedText;
+END
+ELSE IF @Total = 0
+BEGIN
+    SET @Score = 3;
+    SET @Finding = N'No deprecated syntax or data types detected across ' + CAST(@Scanned AS nvarchar(10))
+                   + N' scanned user database(s). ' + @CheckedText;
+END
+ELSE IF @Total <= 10
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'Found ' + CAST(@Total AS nvarchar(10)) + N' deprecated usage(s) in ' + CAST(@AffectedDbs AS nvarchar(10))
+                   + N' of ' + CAST(@Scanned AS nvarchar(10)) + N' scanned user database(s). Examples: ' + ISNULL(@Sample, N'n/a')
+                   + N'. Encrypted modules not inspectable: ' + CAST(@Encrypted AS nvarchar(10))
+                   + N'. Note: *= / =* matches can also be the compound assignment operator and need manual confirmation.';
+END
+ELSE
+BEGIN
+    SET @Score = 1;
+    SET @Finding = N'Found ' + CAST(@Total AS nvarchar(10)) + N' deprecated usage(s) in ' + CAST(@AffectedDbs AS nvarchar(10))
+                   + N' of ' + CAST(@Scanned AS nvarchar(10)) + N' scanned user database(s). Examples: ' + ISNULL(@Sample, N'n/a')
+                   + N'. Encrypted modules not inspectable: ' + CAST(@Encrypted AS nvarchar(10))
+                   + N'. Note: *= / =* matches can also be the compound assignment operator and need manual confirmation.';
+END
+
+IF @Skipped > 0 AND @Scanned > 0
+    SET @Finding = @Finding + N' ' + CAST(@Skipped AS nvarchar(10)) + N' database(s) were skipped due to access errors.';
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+SELECT
+    @Result                        AS Result,
+    @Score                         AS Score,
+    ISNULL(@DbList, N'None')       AS DatabaseQueried,
+    @Finding                       AS Finding;
+
+IF OBJECT_ID('tempdb..#Findings') IS NOT NULL DROP TABLE #Findings;
+IF OBJECT_ID('tempdb..#Dbs') IS NOT NULL DROP TABLE #Dbs;

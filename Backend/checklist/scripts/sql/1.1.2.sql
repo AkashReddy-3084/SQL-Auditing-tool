@@ -1,151 +1,162 @@
--- Checklist: Environment separation exists (Dev / Test / Prod) with isolated instances or databases
--- Scope: SERVER
--- Scoring: 3 = Dev, Test, and Prod database evidence; 2 = two environments;
---          1 = one environment indicator; 0 = no environment indicators.
--- NOTE: This script provides automated evidence. Full compliance requires human review.
+/*==============================================================================
+  Checklist Item : 1.1.2 - Environment separation exists (Dev / Test / Prod)
+                   with isolated instances or databases
+  Area           : Architecture & Design
+  Scope          : SERVER
+  Script Type    : T-SQL, strictly read-only (temp table only, no user-object DDL/DML)
+  Output         : Result, Score, DatabaseQueried, Finding
+  Method         : Classifies every user database on the instance into PROD /
+                   NONPROD / UNKNOWN from its name tokens and reports whether the
+                   instance is dedicated to a single environment tier.
+==============================================================================*/
+SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10);
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = N'master';
-DECLARE @Finding NVARCHAR(MAX);
-DECLARE @ServerName NVARCHAR(256) =
-    COALESCE(CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName')), N'unknown');
-DECLARE @NormalizedServer NVARCHAR(514) =
-    N' ' + LOWER(COALESCE(CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName')), N'')) + N' ';
-DECLARE @ServerEnvironment NVARCHAR(20);
-DECLARE @DistinctEnvironmentCount INT;
-DECLARE @EnvironmentList NVARCHAR(MAX);
-DECLARE @DatabaseEvidence NVARCHAR(MAX);
+DECLARE @Result           NVARCHAR(20);
+DECLARE @Score            INT;
+DECLARE @Finding          NVARCHAR(4000);
+DECLARE @DatabaseQueried  NVARCHAR(256) = COALESCE(CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName')), CONVERT(NVARCHAR(256), @@SERVERNAME));
+DECLARE @InstanceName     NVARCHAR(128) = CONVERT(NVARCHAR(128), SERVERPROPERTY('InstanceName'));
+DECLARE @EngineEdition    INT           = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @CurrentDb        NVARCHAR(128) = DB_NAME();
+DECLARE @PlatformNote     NVARCHAR(400) = N'';
+DECLARE @InstanceNote     NVARCHAR(400) = N'';
 
-SET @NormalizedServer = REPLACE(@NormalizedServer, N'\', N' ');
-SET @NormalizedServer = REPLACE(@NormalizedServer, N'/', N' ');
-SET @NormalizedServer = REPLACE(@NormalizedServer, N'-', N' ');
-SET @NormalizedServer = REPLACE(@NormalizedServer, N'_', N' ');
-SET @NormalizedServer = REPLACE(@NormalizedServer, N'.', N' ');
+/* Azure SQL Database (EngineEdition 5): sys.databases lists every database only
+   when the session is connected to master; from a user database the view is
+   limited to master plus the current database. */
+IF @EngineEdition = 5 AND ISNULL(@CurrentDb, N'') <> N'master'
+    SET @PlatformNote = N' NOTE: Azure SQL Database detected and the session is connected to ['
+                      + ISNULL(@CurrentDb, N'unknown')
+                      + N'] rather than [master], so sys.databases visibility is limited to the current database; re-run against master for a full logical-server view.';
+ELSE IF @EngineEdition = 5
+    SET @PlatformNote = N' NOTE: Azure SQL Database detected; separation is assessed across the databases of the logical server.';
 
-SET @ServerEnvironment =
-    CASE
-        WHEN @NormalizedServer LIKE N'% dev %'
-          OR @NormalizedServer LIKE N'% development %' THEN N'Dev'
-        WHEN @NormalizedServer LIKE N'% test %'
-          OR @NormalizedServer LIKE N'% testing %'
-          OR @NormalizedServer LIKE N'% qa %'
-          OR @NormalizedServer LIKE N'% uat %'
-          OR @NormalizedServer LIKE N'% stage %'
-          OR @NormalizedServer LIKE N'% staging %' THEN N'Test'
-        WHEN @NormalizedServer LIKE N'% prod %'
-          OR @NormalizedServer LIKE N'% production %' THEN N'Prod'
-    END;
+IF OBJECT_ID('tempdb..#EnvClassification') IS NOT NULL
+    DROP TABLE #EnvClassification;
 
-CREATE TABLE #EnvironmentEvidence
+CREATE TABLE #EnvClassification
 (
-    DatabaseName SYSNAME NOT NULL,
-    EnvironmentName NVARCHAR(20) NOT NULL
+    DatabaseName SYSNAME     NOT NULL,
+    EnvTag       VARCHAR(10) NOT NULL
 );
 
-INSERT INTO #EnvironmentEvidence (DatabaseName, EnvironmentName)
-SELECT
-    d.name,
-    CASE
-        WHEN n.NormalizedName LIKE N'% dev %'
-          OR n.NormalizedName LIKE N'% development %' THEN N'Dev'
-        WHEN n.NormalizedName LIKE N'% test %'
-          OR n.NormalizedName LIKE N'% testing %'
-          OR n.NormalizedName LIKE N'% qa %'
-          OR n.NormalizedName LIKE N'% uat %'
-          OR n.NormalizedName LIKE N'% stage %'
-          OR n.NormalizedName LIKE N'% staging %' THEN N'Test'
-        WHEN n.NormalizedName LIKE N'% prod %'
-          OR n.NormalizedName LIKE N'% production %' THEN N'Prod'
-    END
+INSERT INTO #EnvClassification (DatabaseName, EnvTag)
+SELECT d.name,
+       CASE
+           WHEN LOWER(d.name) LIKE '%prod%'
+             OR LOWER(d.name) LIKE '%[_ -]prd%'
+             OR LOWER(d.name) LIKE '%prd[_ -]%'
+             OR LOWER(d.name) LIKE '%live%'          THEN 'PROD'
+           WHEN LOWER(d.name) LIKE '%dev%'
+             OR LOWER(d.name) LIKE '%test%'
+             OR LOWER(d.name) LIKE '%[_ -]tst%'
+             OR LOWER(d.name) LIKE '%tst[_ -]%'
+             OR LOWER(d.name) LIKE '%[_ -]qa%'
+             OR LOWER(d.name) LIKE '%qa[_ -]%'
+             OR LOWER(d.name) LIKE '%uat%'
+             OR LOWER(d.name) LIKE '%stag%'
+             OR LOWER(d.name) LIKE '%[_ -]stg%'
+             OR LOWER(d.name) LIKE '%stg[_ -]%'
+             OR LOWER(d.name) LIKE '%sandbox%'
+             OR LOWER(d.name) LIKE '%demo%'
+             OR LOWER(d.name) LIKE '%train%'         THEN 'NONPROD'
+           ELSE 'UNKNOWN'
+       END
 FROM sys.databases AS d
-CROSS APPLY
-(
-    SELECT
-        N' ' + REPLACE(REPLACE(REPLACE(REPLACE(
-            LOWER(d.name),
-            N'-', N' '),
-            N'_', N' '),
-            N'.', N' '),
-            N'/', N' ') + N' ' AS NormalizedName
-) AS n
 WHERE d.database_id > 4
-  AND d.state = 0
-  AND
-  (
-       n.NormalizedName LIKE N'% dev %'
-    OR n.NormalizedName LIKE N'% development %'
-    OR n.NormalizedName LIKE N'% test %'
-    OR n.NormalizedName LIKE N'% testing %'
-    OR n.NormalizedName LIKE N'% qa %'
-    OR n.NormalizedName LIKE N'% uat %'
-    OR n.NormalizedName LIKE N'% stage %'
-    OR n.NormalizedName LIKE N'% staging %'
-    OR n.NormalizedName LIKE N'% prod %'
-    OR n.NormalizedName LIKE N'% production %'
-  );
+  AND d.name NOT IN (N'SSISDB', N'ReportServer', N'ReportServerTempDB', N'distribution');
 
-SELECT @DistinctEnvironmentCount = COUNT(DISTINCT EnvironmentName)
-FROM #EnvironmentEvidence;
+DECLARE @Total        INT;
+DECLARE @ProdCount    INT;
+DECLARE @NonProdCount INT;
+DECLARE @UnknownCount INT;
+DECLARE @ProdList     NVARCHAR(MAX);
+DECLARE @NonProdList  NVARCHAR(MAX);
 
-SELECT @EnvironmentList =
-    STRING_AGG(CONVERT(NVARCHAR(MAX), EnvironmentName), N', ')
-FROM
-(
-    SELECT DISTINCT EnvironmentName
-    FROM #EnvironmentEvidence
-) AS e;
+SELECT @Total        = COUNT(*),
+       @ProdCount    = SUM(CASE WHEN e.EnvTag = 'PROD'    THEN 1 ELSE 0 END),
+       @NonProdCount = SUM(CASE WHEN e.EnvTag = 'NONPROD' THEN 1 ELSE 0 END),
+       @UnknownCount = SUM(CASE WHEN e.EnvTag = 'UNKNOWN' THEN 1 ELSE 0 END)
+FROM #EnvClassification AS e;
 
-SELECT @DatabaseEvidence =
-    STRING_AGG(
-        CONVERT(NVARCHAR(MAX), QUOTENAME(DatabaseName) + N' (' + EnvironmentName + N')'),
-        N', '
-    )
-FROM #EnvironmentEvidence;
+SET @Total        = ISNULL(@Total, 0);
+SET @ProdCount    = ISNULL(@ProdCount, 0);
+SET @NonProdCount = ISNULL(@NonProdCount, 0);
+SET @UnknownCount = ISNULL(@UnknownCount, 0);
 
-IF EXISTS
-(
-    SELECT 1 FROM #EnvironmentEvidence WHERE EnvironmentName = N'Dev'
-)
-AND EXISTS
-(
-    SELECT 1 FROM #EnvironmentEvidence WHERE EnvironmentName = N'Test'
-)
-AND EXISTS
-(
-    SELECT 1 FROM #EnvironmentEvidence WHERE EnvironmentName = N'Prod'
-)
+SELECT @ProdList = STUFF((SELECT N', ' + CONVERT(NVARCHAR(128), e.DatabaseName)
+                          FROM #EnvClassification AS e
+                          WHERE e.EnvTag = 'PROD'
+                          ORDER BY e.DatabaseName
+                          FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
+
+SELECT @NonProdList = STUFF((SELECT N', ' + CONVERT(NVARCHAR(128), e.DatabaseName)
+                             FROM #EnvClassification AS e
+                             WHERE e.EnvTag = 'NONPROD'
+                             ORDER BY e.DatabaseName
+                             FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
+
+SET @ProdList    = LEFT(ISNULL(@ProdList, N'none'), 900);
+SET @NonProdList = LEFT(ISNULL(@NonProdList, N'none'), 900);
+
+IF @InstanceName IS NOT NULL
+    SET @InstanceNote = N' Named instance: [' + @InstanceName + N'].';
+
+IF @Total = 0
 BEGIN
-    SET @Score = 3;
+    SET @Score   = 1;
+    SET @Finding = N'No user databases were found on instance [' + @DatabaseQueried
+                 + N'], so environment separation cannot be demonstrated from instance metadata. Confirm that Dev, Test and Prod workloads run on isolated instances or isolated databases.'
+                 + @InstanceNote + @PlatformNote;
 END
-ELSE IF @DistinctEnvironmentCount >= 2
+ELSE IF @ProdCount > 0 AND @NonProdCount > 0
 BEGIN
-    SET @Score = 2;
+    SET @Score   = 0;
+    SET @Finding = N'Instance [' + @DatabaseQueried + N'] hosts ' + CONVERT(NVARCHAR(10), @Total)
+                 + N' user database(s) spanning MORE THAN ONE environment tier: '
+                 + CONVERT(NVARCHAR(10), @ProdCount) + N' production-named (' + @ProdList + N') and '
+                 + CONVERT(NVARCHAR(10), @NonProdCount) + N' non-production-named (' + @NonProdList
+                 + N'), plus ' + CONVERT(NVARCHAR(10), @UnknownCount)
+                 + N' unclassified. Production and non-production workloads are therefore NOT isolated at instance level.'
+                 + @InstanceNote + @PlatformNote;
 END
-ELSE IF @DistinctEnvironmentCount = 1 OR @ServerEnvironment IS NOT NULL
+ELSE IF (@ProdCount > 0 OR @NonProdCount > 0) AND (@UnknownCount * 2) <= @Total
 BEGIN
-    SET @Score = 1;
+    SET @Score   = 3;
+    SET @Finding = N'Instance [' + @DatabaseQueried + N'] hosts ' + CONVERT(NVARCHAR(10), @Total)
+                 + N' user database(s) that all resolve to a single environment tier ('
+                 + CASE WHEN @ProdCount > 0 THEN N'PRODUCTION: ' + @ProdList
+                        ELSE N'NON-PRODUCTION: ' + @NonProdList END
+                 + N'); ' + CONVERT(NVARCHAR(10), @UnknownCount)
+                 + N' database(s) carry no environment token. No mixing of production and non-production databases was detected, consistent with an instance dedicated to one environment.'
+                 + @InstanceNote + @PlatformNote;
+END
+ELSE IF (@ProdCount > 0 OR @NonProdCount > 0)
+BEGIN
+    SET @Score   = 2;
+    SET @Finding = N'Instance [' + @DatabaseQueried + N'] shows a single environment tier with no mixing ('
+                 + CASE WHEN @ProdCount > 0 THEN N'PRODUCTION: ' + @ProdList
+                        ELSE N'NON-PRODUCTION: ' + @NonProdList END
+                 + N'), but ' + CONVERT(NVARCHAR(10), @UnknownCount) + N' of ' + CONVERT(NVARCHAR(10), @Total)
+                 + N' user database(s) carry no environment token, so the naming convention is applied inconsistently and separation is only weakly evidenced.'
+                 + @InstanceNote + @PlatformNote;
 END
 ELSE
 BEGIN
-    SET @Score = 0;
-END;
+    SET @Score   = 1;
+    SET @Finding = N'None of the ' + CONVERT(NVARCHAR(10), @Total)
+                 + N' user database(s) on instance [' + @DatabaseQueried
+                 + N'] carries a recognisable Dev/Test/QA/UAT/Staging/Prod naming token, so no environment separation convention is demonstrable from instance metadata.'
+                 + @InstanceNote + @PlatformNote;
+END
 
-SET @Finding =
-    N'Instance ' + QUOTENAME(@ServerName)
-    + N' environment token: ' + COALESCE(@ServerEnvironment, N'none')
-    + N'; distinct database environments: '
-    + COALESCE(@EnvironmentList, N'none')
-    + N'; database evidence: '
-    + COALESCE(@DatabaseEvidence, N'none')
-    + N'. Naming evidence does not prove physical or logical isolation; confirm isolation manually.';
+SET @Result  = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = LEFT(@Finding, 4000);
 
-SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
+IF OBJECT_ID('tempdb..#EnvClassification') IS NOT NULL
+    DROP TABLE #EnvClassification;
 
-DROP TABLE #EnvironmentEvidence;
-
-SELECT
-    @Result AS Result,
-    @Score AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding AS Finding;
+SELECT @Result          AS Result,
+       @Score           AS Score,
+       @DatabaseQueried AS DatabaseQueried,
+       @Finding         AS Finding;

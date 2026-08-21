@@ -1,106 +1,177 @@
--- Checklist: Schema separation used to organize layers/domains (dedicated schemas, not all in dbo)
--- Scope: DATABASE
--- Scoring: 3 = 0% in dbo; 2 = 1-20% in dbo; 1 = 21-50% in dbo; 0 = >50% in dbo or only dbo exists
+/*
+    Checklist Item : 1.2.5 - Schema separation used to organize layers/domains
+                     (dedicated schemas, not all in dbo)
+    Scope          : SERVER (iterates all accessible user databases)
+    Type           : Read-only. No data or schema is modified.
+*/
+SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @IsAzureDb BIT = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 5 THEN 1 ELSE 0 END;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+IF OBJECT_ID('tempdb..#SchemaSeparation') IS NOT NULL
+    DROP TABLE #SchemaSeparation;
 
-IF SERVERPROPERTY('EngineEdition') = 5
+CREATE TABLE #SchemaSeparation
+(
+    DatabaseName    SYSNAME,
+    UserSchemaCount INT,
+    TotalObjects    INT,
+    DboObjects      INT,
+    NonDboObjects   INT
+);
+
+DECLARE @sql NVARCHAR(MAX);
+
+IF @IsAzureDb = 1
 BEGIN
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    SELECT 
-        DB_NAME(),
-        CASE 
-            WHEN TotalObjs = 0 THEN 0
-            WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) = 0 THEN 3
-            WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) <= 0.2 THEN 2
-            WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) <= 0.5 THEN 1
-            ELSE 0 
-        END,
-        'Total objects: ' + CAST(TotalObjs AS VARCHAR(10)) + ', dbo objects: ' + CAST(DboObjs AS VARCHAR(10)) + ' (' + ISNULL(CAST(CAST(CAST(DboObjs AS FLOAT)/NULLIF(TotalObjs,0)*100 AS DECIMAL(5,2)) AS VARCHAR(10)), '0') + '%)'
-    FROM (
-        SELECT 
-            COUNT(*) AS TotalObjs,
-            SUM(CASE WHEN s.name = 'dbo' THEN 1 ELSE 0 END) AS DboObjs
-        FROM sys.tables t
-        JOIN sys.schemas s ON t.schema_id = s.schema_id
-    ) AS Stats;
+    /* Azure SQL Database: cross-database queries are not permitted, evaluate the current database only. */
+    INSERT INTO #SchemaSeparation (DatabaseName, UserSchemaCount, TotalObjects, DboObjects, NonDboObjects)
+    SELECT DB_NAME(),
+           COUNT(DISTINCT CASE WHEN s.name <> 'dbo' THEN s.schema_id END),
+           COUNT(*),
+           SUM(CASE WHEN s.name = 'dbo' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN s.name <> 'dbo' THEN 1 ELSE 0 END)
+    FROM sys.objects AS o
+    INNER JOIN sys.schemas AS s
+        ON s.schema_id = o.schema_id
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF')
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest');
 END
 ELSE
 BEGIN
+    DECLARE @db SYSNAME;
+
     DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+        SELECT d.name
+        FROM sys.databases AS d
+        WHERE d.database_id > 4
+          AND d.state = 0
+          AND d.source_database_id IS NULL
+          AND d.is_read_only IN (0, 1)
+          AND HAS_DBACCESS(d.name) = 1
+        ORDER BY d.name;
 
     OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    FETCH NEXT FROM db_cursor INTO @db;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        BEGIN TRY
-            SET @Sql = N'SELECT @p_Db,
-                CASE 
-                    WHEN TotalObjs = 0 THEN 0
-                    WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) = 0 THEN 3
-                    WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) <= 0.2 THEN 2
-                    WHEN CAST(DboObjs AS FLOAT) / NULLIF(TotalObjs, 0) <= 0.5 THEN 1
-                    ELSE 0 
-                END,
-                ''Total objects: '' + CAST(TotalObjs AS VARCHAR(10)) + '', dbo objects: '' + CAST(DboObjs AS VARCHAR(10)) + '' ('' + ISNULL(CAST(CAST(CAST(DboObjs AS FLOAT)/NULLIF(TotalObjs,0)*100 AS DECIMAL(5,2)) AS VARCHAR(10)), ''0'') + ''%)''
-                FROM (
-                    SELECT 
-                        COUNT(*) AS TotalObjs,
-                        SUM(CASE WHEN s.name = ''dbo'' THEN 1 ELSE 0 END) AS DboObjs
-                    FROM ' + QUOTENAME(@DbName) + N'.sys.tables t
-                    JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id
-                ) AS Stats;';
+        SET @sql =
+            N'SELECT ' + QUOTENAME(@db, '''') + N' AS DatabaseName,
+                     COUNT(DISTINCT CASE WHEN s.name <> ''dbo'' THEN s.schema_id END) AS UserSchemaCount,
+                     COUNT(*) AS TotalObjects,
+                     SUM(CASE WHEN s.name = ''dbo'' THEN 1 ELSE 0 END) AS DboObjects,
+                     SUM(CASE WHEN s.name <> ''dbo'' THEN 1 ELSE 0 END) AS NonDboObjects
+              FROM ' + QUOTENAME(@db) + N'.sys.objects AS o
+              INNER JOIN ' + QUOTENAME(@db) + N'.sys.schemas AS s
+                  ON s.schema_id = o.schema_id
+              WHERE o.is_ms_shipped = 0
+                AND o.type IN (''U'', ''V'', ''P'', ''FN'', ''IF'', ''TF'')
+                AND s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'');';
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
+        BEGIN TRY
+            INSERT INTO #SchemaSeparation (DatabaseName, UserSchemaCount, TotalObjects, DboObjects, NonDboObjects)
+            EXEC sp_executesql @sql;
         END TRY
         BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
+            /* Database unavailable to this login - skipped, reported as not evaluated. */
+        END CATCH
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
+        FETCH NEXT FROM db_cursor INTO @db;
     END
 
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
 END
 
--- Use dynamic SQL for aggregation to support older SQL Server versions (C4)
-DECLARE @AggSql NVARCHAR(MAX) = N'
-    SELECT 
-        @p_DbQueried = (SELECT STRING_AGG(DbName, '', '') FROM #DbResults),
-        @p_Score = (SELECT MIN(DbScore) FROM #DbResults),
-        @p_Finding = (SELECT STRING_AGG(DbName + '': '' + Finding, ''; '') FROM #DbResults)
-';
+UPDATE #SchemaSeparation
+SET UserSchemaCount = ISNULL(UserSchemaCount, 0),
+    TotalObjects    = ISNULL(TotalObjects, 0),
+    DboObjects      = ISNULL(DboObjects, 0),
+    NonDboObjects   = ISNULL(NonDboObjects, 0);
 
--- Check for SQL Server 2017+ (STRING_AGG support)
-IF (SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)) >= 14
+DECLARE @TotalDbs        INT = 0,
+        @ScoredDbs       INT = 0,
+        @CompliantDbs    INT = 0,
+        @PartialDbs      INT = 0,
+        @NonCompliantDbs INT = 0;
+
+SELECT @TotalDbs = COUNT(*) FROM #SchemaSeparation;
+
+SELECT @ScoredDbs = COUNT(*) FROM #SchemaSeparation WHERE TotalObjects >= 10;
+
+SELECT @CompliantDbs = ISNULL(SUM(CASE
+                                      WHEN UserSchemaCount >= 2
+                                       AND (CAST(NonDboObjects AS DECIMAL(18, 4)) * 100.0
+                                            / NULLIF(CAST(TotalObjects AS DECIMAL(18, 4)), 0)) >= 50.0
+                                      THEN 1 ELSE 0
+                                  END), 0),
+       @PartialDbs = ISNULL(SUM(CASE
+                                    WHEN UserSchemaCount >= 1
+                                     AND NonDboObjects > 0
+                                     AND NOT (UserSchemaCount >= 2
+                                              AND (CAST(NonDboObjects AS DECIMAL(18, 4)) * 100.0
+                                                   / NULLIF(CAST(TotalObjects AS DECIMAL(18, 4)), 0)) >= 50.0)
+                                    THEN 1 ELSE 0
+                                END), 0),
+       @NonCompliantDbs = ISNULL(SUM(CASE WHEN UserSchemaCount = 0 OR NonDboObjects = 0 THEN 1 ELSE 0 END), 0)
+FROM #SchemaSeparation
+WHERE TotalObjects >= 10;
+
+DECLARE @DbList NVARCHAR(MAX) =
+    STUFF((SELECT N', ' + DatabaseName
+           FROM #SchemaSeparation
+           ORDER BY DatabaseName
+           FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
+
+DECLARE @Detail NVARCHAR(MAX) =
+    STUFF((SELECT N'; ' + DatabaseName
+                  + N' (non-dbo schemas=' + CAST(UserSchemaCount AS VARCHAR(10))
+                  + N', objects=' + CAST(TotalObjects AS VARCHAR(10))
+                  + N', dbo=' + CAST(DboObjects AS VARCHAR(10))
+                  + N', non-dbo=' + CAST(NonDboObjects AS VARCHAR(10)) + N')'
+           FROM #SchemaSeparation
+           ORDER BY DatabaseName
+           FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
+
+SET @DbList = ISNULL(@DbList, N'None');
+SET @Detail = ISNULL(@Detail, N'No user databases were accessible.');
+
+DECLARE @Score INT, @Result NVARCHAR(30), @Finding NVARCHAR(MAX);
+
+IF @ScoredDbs = 0
 BEGIN
-    EXEC sp_executesql @AggSql, N'@p_DbQueried NVARCHAR(MAX) OUTPUT, @p_Score INT OUTPUT, @p_Finding NVARCHAR(MAX) OUTPUT', 
-        @p_DbQueried = @DatabaseQueried OUTPUT, @p_Score = @Score OUTPUT, @p_Finding = @Finding OUTPUT;
+    SET @Score = 0;
+    SET @Result = N'Manual Review';
+    SET @Finding = N'No user database contained at least 10 user objects, so schema separation could not be assessed automatically. Databases inspected: '
+                   + CAST(@TotalDbs AS VARCHAR(10)) + N'. Detail: ' + @Detail;
 END
 ELSE
 BEGIN
-    -- Fallback for older versions using XML PATH
-    SELECT @DatabaseQueried = STUFF((SELECT ', ' + DbName FROM #DbResults FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
-    SELECT @Score = MIN(DbScore) FROM #DbResults;
-    SELECT @Finding = STUFF((SELECT '; ' + DbName + ': ' + Finding FROM #DbResults FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    IF @CompliantDbs = @ScoredDbs
+        SET @Score = 3;
+    ELSE IF @CompliantDbs * 2 >= @ScoredDbs
+        SET @Score = 2;
+    ELSE IF (@CompliantDbs + @PartialDbs) > 0
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+
+    SET @Result = CASE WHEN @Score = 3 THEN N'Pass' ELSE N'Fail' END;
+
+    SET @Finding = N'Databases assessed: ' + CAST(@ScoredDbs AS VARCHAR(10))
+                   + N' of ' + CAST(@TotalDbs AS VARCHAR(10)) + N' accessible user databases. '
+                   + N'Well separated (2+ dedicated schemas and 50%+ of objects outside dbo): ' + CAST(@CompliantDbs AS VARCHAR(10))
+                   + N'; partially separated: ' + CAST(@PartialDbs AS VARCHAR(10))
+                   + N'; all objects in dbo: ' + CAST(@NonCompliantDbs AS VARCHAR(10))
+                   + N'. Detail: ' + @Detail;
 END
 
-SET @DatabaseQueried = ISNULL(@DatabaseQueried, 'None');
-SET @Score = ISNULL(@Score, 0);
-SET @Finding = ISNULL(@Finding, 'No database found to be queried');
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SELECT @Result AS Result,
+       @Score  AS Score,
+       @DbList AS DatabaseQueried,
+       @Finding AS Finding;
 
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+IF OBJECT_ID('tempdb..#SchemaSeparation') IS NOT NULL
+    DROP TABLE #SchemaSeparation;

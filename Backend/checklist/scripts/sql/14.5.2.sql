@@ -1,87 +1,86 @@
--- Checklist: Auto-create statistics enabled where appropriate
--- Scope: DATABASE
--- Scoring: 3 = all user databases enabled; 2 = >80% enabled; 1 = >50% enabled; 0 = <=50% enabled
+SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(256) = N'SERVER: ' + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128));
+DECLARE @Result NVARCHAR(20);
+DECLARE @Score INT;
+DECLARE @Finding NVARCHAR(4000);
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE @DbStats TABLE (
+    DatabaseName        SYSNAME NOT NULL,
+    AutoCreateStats     BIT     NOT NULL,
+    AutoCreateStatsInc  BIT     NOT NULL,
+    AutoUpdateStats     BIT     NOT NULL
+);
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    SELECT DB_NAME(),
-           CASE WHEN is_auto_create_stats_on = 1 THEN 3 ELSE 0 END,
-           CASE WHEN is_auto_create_stats_on = 1 THEN 'Auto-create statistics = ON'
-                ELSE 'Auto-create statistics = OFF' END
-    FROM sys.databases
-    WHERE name = DB_NAME();
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+INSERT INTO @DbStats (DatabaseName, AutoCreateStats, AutoCreateStatsInc, AutoUpdateStats)
+SELECT d.name,
+       d.is_auto_create_stats_on,
+       d.is_auto_create_stats_incremental_on,
+       d.is_auto_update_stats_on
+FROM sys.databases AS d
+WHERE d.state_desc = N'ONLINE'
+  AND d.is_read_only = 0
+  AND d.name NOT IN (N'master', N'model', N'msdb', N'tempdb', N'distribution',
+                     N'SSISDB', N'ReportServer', N'ReportServerTempDB');
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+DECLARE @TotalDbs INT;
+DECLARE @EnabledDbs INT;
+DECLARE @IncrementalDbs INT;
+DECLARE @AutoUpdateOffDbs INT;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            -- We query sys.databases from the current context as it contains the setting for all DBs
-            -- but we iterate to maintain the DATABASE scope structure and handle permissions.
-            SET @Sql = N'SELECT @p_Db, 
-                CASE WHEN is_auto_create_stats_on = 1 THEN 3 ELSE 0 END, 
-                CASE WHEN is_auto_create_stats_on = 1 THEN ''Auto-create statistics = ON'' 
-                     ELSE ''Auto-create statistics = OFF'' END 
-                FROM sys.databases WHERE name = @p_Db';
+SELECT @TotalDbs          = COUNT(*),
+       @EnabledDbs        = SUM(CASE WHEN AutoCreateStats = 1 THEN 1 ELSE 0 END),
+       @IncrementalDbs    = SUM(CASE WHEN AutoCreateStatsInc = 1 THEN 1 ELSE 0 END),
+       @AutoUpdateOffDbs  = SUM(CASE WHEN AutoUpdateStats = 0 THEN 1 ELSE 0 END)
+FROM @DbStats;
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
+SET @TotalDbs         = ISNULL(@TotalDbs, 0);
+SET @EnabledDbs       = ISNULL(@EnabledDbs, 0);
+SET @IncrementalDbs   = ISNULL(@IncrementalDbs, 0);
+SET @AutoUpdateOffDbs = ISNULL(@AutoUpdateOffDbs, 0);
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
+DECLARE @DisabledList NVARCHAR(2000);
 
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
+SELECT @DisabledList = STUFF((
+        SELECT N', ' + s.DatabaseName
+        FROM @DbStats AS s
+        WHERE s.AutoCreateStats = 0
+        ORDER BY s.DatabaseName
+        FOR XML PATH(N''), TYPE).value(N'.', N'NVARCHAR(2000)'), 1, 2, N'');
 
--- Calculate aggregate score based on proportion of compliant databases
-DECLARE @TotalDB INT = 0;
-DECLARE @PassDB INT = 0;
+SET @DisabledList = ISNULL(@DisabledList, N'(none)');
 
-SELECT @TotalDB = COUNT(*) FROM #DbResults;
-SELECT @PassDB = COUNT(*) FROM #DbResults WHERE DbScore = 3;
+DECLARE @EnabledPct INT = CASE WHEN @TotalDbs = 0 THEN 0 ELSE (@EnabledDbs * 100) / @TotalDbs END;
 
-IF @TotalDB = 0
-BEGIN
-    SET @DatabaseQueried = 'None';
-    SET @Finding = 'No database found to be queried';
+IF @TotalDbs = 0
     SET @Score = 0;
-END
+ELSE IF @EnabledDbs = @TotalDbs
+    SET @Score = 3;
+ELSE IF @EnabledPct >= 90
+    SET @Score = 2;
+ELSE IF @EnabledPct >= 50
+    SET @Score = 1;
 ELSE
-BEGIN
-    SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
-    SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No findings');
-    
-    SET @Score = CASE 
-        WHEN CAST(@PassDB AS FLOAT) / NULLIF(@TotalDB, 0) = 1.0 THEN 3
-        WHEN CAST(@PassDB AS FLOAT) / NULLIF(@TotalDB, 0) > 0.8 THEN 2
-        WHEN CAST(@PassDB AS FLOAT) / NULLIF(@TotalDB, 0) > 0.5 THEN 1
-        ELSE 0 
-    END;
-END
+    SET @Score = 0;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+IF @TotalDbs = 0
+    SET @Finding = N'No ONLINE, writable, non-system databases were found on this instance, so AUTO_CREATE_STATISTICS could not be assessed for any user database.';
+ELSE IF @EnabledDbs = @TotalDbs
+    SET @Finding = N'AUTO_CREATE_STATISTICS is ENABLED on all ' + CAST(@TotalDbs AS NVARCHAR(10))
+                 + N' user database(s). Incremental auto-create statistics is on for '
+                 + CAST(@IncrementalDbs AS NVARCHAR(10)) + N' of them, and '
+                 + CAST(@AutoUpdateOffDbs AS NVARCHAR(10))
+                 + N' database(s) have AUTO_UPDATE_STATISTICS disabled.';
+ELSE
+    SET @Finding = N'AUTO_CREATE_STATISTICS is ENABLED on only ' + CAST(@EnabledDbs AS NVARCHAR(10))
+                 + N' of ' + CAST(@TotalDbs AS NVARCHAR(10)) + N' user database(s) ('
+                 + CAST(@EnabledPct AS NVARCHAR(10)) + N'%). Database(s) with AUTO_CREATE_STATISTICS OFF: '
+                 + @DisabledList + N'. Additionally ' + CAST(@AutoUpdateOffDbs AS NVARCHAR(10))
+                 + N' database(s) have AUTO_UPDATE_STATISTICS disabled.';
+
+SELECT @Result AS Result,
+       @Score AS Score,
+       @DatabaseQueried AS DatabaseQueried,
+       @Finding AS Finding;

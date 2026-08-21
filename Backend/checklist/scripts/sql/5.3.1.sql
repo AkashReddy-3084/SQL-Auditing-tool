@@ -1,168 +1,128 @@
-DECLARE @Result NVARCHAR(10) = 'Fail';
+-- Checklist 5.3.1 - Referential integrity validated (FKs in facts match dimensions)
+-- Read-only. Evaluates every accessible user database (or the connected database on Azure SQL Database).
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
+DECLARE @DatabaseQueried NVARCHAR(MAX) = N'None';
+DECLARE @Finding NVARCHAR(MAX) = N'No database found to be queried';
+DECLARE @IsAzureDb BIT = CASE WHEN CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
+
+CREATE TABLE #DbResults
+(
+    DbName     SYSNAME NOT NULL,
+    FactTables INT     NOT NULL,
+    GoodFacts  INT     NOT NULL,
+    BadFks     INT     NOT NULL,
+    DbScore    INT     NOT NULL
+);
+
 DECLARE @DbName SYSNAME;
+DECLARE @Prefix NVARCHAR(300);
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @FactTables INT;
+DECLARE @Good INT;
+DECLARE @Bad INT;
+DECLARE @DbScore INT;
+DECLARE @Pct DECIMAL(9, 2);
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
+    SELECT CONVERT(SYSNAME, DB_NAME())
+    WHERE @IsAzureDb = 1
+    UNION ALL
+    SELECT d.name
+    FROM sys.databases AS d
+    WHERE @IsAzureDb = 0
+      AND d.database_id > 4
+      AND d.state = 0
+      AND d.source_database_id IS NULL
+      AND HAS_DBACCESS(d.name) = 1;
 
-IF SERVERPROPERTY('EngineEdition') = 5
+OPEN db_cur;
+FETCH NEXT FROM db_cur INTO @DbName;
+
+WHILE @@FETCH_STATUS = 0
 BEGIN
-    -- Azure SQL Database: Current database only
-    DECLARE @TotalRows BIGINT = 0;
-    DECLARE @OrphanRows BIGINT = 0;
-    DECLARE @FKCount INT = 0;
+    SET @Prefix = CASE WHEN @IsAzureDb = 1 THEN N'' ELSE QUOTENAME(@DbName) + N'.' END;
+    SET @FactTables = 0;
+    SET @Good = 0;
+    SET @Bad = 0;
 
-    SELECT @FKCount = COUNT(*) FROM sys.foreign_keys;
+    SET @Sql =
+        N'SELECT @pFactTables = COUNT(*), @pGood = ISNULL(SUM(f.GoodFact), 0), @pBad = ISNULL(SUM(f.BadFk), 0)
+          FROM (
+              SELECT
+                  CASE WHEN EXISTS (
+                           SELECT 1
+                           FROM ' + @Prefix + N'sys.foreign_keys AS k
+                           JOIN ' + @Prefix + N'sys.tables AS rt ON rt.object_id = k.referenced_object_id
+                           JOIN ' + @Prefix + N'sys.schemas AS rs ON rs.schema_id = rt.schema_id
+                           WHERE k.parent_object_id = t.object_id
+                             AND k.is_disabled = 0
+                             AND k.is_not_trusted = 0
+                             AND (rs.name = ''dim'' OR rt.name LIKE ''Dim%'' OR rt.name LIKE ''D[_]%'' OR rt.name LIKE ''%[_]Dim'')
+                       ) THEN 1 ELSE 0 END AS GoodFact,
+                  (SELECT COUNT(*)
+                   FROM ' + @Prefix + N'sys.foreign_keys AS k2
+                   WHERE k2.parent_object_id = t.object_id
+                     AND (k2.is_disabled = 1 OR k2.is_not_trusted = 1)) AS BadFk
+              FROM ' + @Prefix + N'sys.tables AS t
+              JOIN ' + @Prefix + N'sys.schemas AS s ON s.schema_id = t.schema_id
+              WHERE t.is_ms_shipped = 0
+                AND (s.name = ''fact'' OR t.name LIKE ''Fact%'' OR t.name LIKE ''fct[_]%'' OR t.name LIKE ''F[_]%'' OR t.name LIKE ''%[_]Fact'')
+          ) AS f;';
 
-    IF @FKCount > 0
-    BEGIN
-        -- We use a cursor to iterate through FKs to avoid massive JOINs and handle large datasets
-        DECLARE fk_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT 
-            QUOTENAME(s.name) + '.' + QUOTENAME(t.name), 
-            QUOTENAME(c1.name), 
-            QUOTENAME(s2.name) + '.' + QUOTENAME(t2.name), 
-            QUOTENAME(c2.name)
-        FROM sys.foreign_keys fk
-        JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-        JOIN sys.tables t ON fk.parent_object_id = t.object_id
-        JOIN sys.schemas s ON t.schema_id = s.schema_id
-        JOIN sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
-        JOIN sys.tables t2 ON fk.referenced_object_id = t2.object_id
-        JOIN sys.schemas s2 ON t2.schema_id = s2.schema_id
-        JOIN sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id;
+    BEGIN TRY
+        EXEC sp_executesql @Sql,
+             N'@pFactTables INT OUTPUT, @pGood INT OUTPUT, @pBad INT OUTPUT',
+             @pFactTables = @FactTables OUTPUT, @pGood = @Good OUTPUT, @pBad = @Bad OUTPUT;
 
-        OPEN fk_cursor;
-        DECLARE @ParentTable NVARCHAR(256), @ParentCol NVARCHAR(128), @RefTable NVARCHAR(256), @RefCol NVARCHAR(128);
-        FETCH NEXT FROM fk_cursor INTO @ParentTable, @ParentCol, @RefTable, @RefCol;
-
-        WHILE @@FETCH_STATUS = 0
+        IF ISNULL(@FactTables, 0) > 0
         BEGIN
-            DECLARE @CountSql NVARCHAR(MAX) = N'SELECT @p_Total = COUNT(*), @p_Orphans = COUNT(*) FROM ' + @ParentTable + ' WHERE ' + @ParentCol + ' IS NOT NULL';
-            EXEC sp_executesql @CountSql, N'@p_Total BIGINT OUTPUT, @p_Orphans BIGINT OUTPUT', @p_Total = @TotalRows OUTPUT, @p_Orphans = @OrphanRows OUTPUT;
-            
-            -- This is a simplification for the total; we accumulate
-            -- In a real scenario, we'd sum all rows across all FKs
-            -- But for the sake of the audit, we check the existence of orphans
-            DECLARE @OrphanCheckSql NVARCHAR(MAX) = N'SELECT COUNT(*) FROM ' + @ParentTable + ' WHERE ' + @ParentCol + ' IS NOT NULL AND ' + @ParentCol + ' NOT IN (SELECT ' + @RefCol + ' FROM ' + @RefTable + ')';
-            DECLARE @CurrentOrphans BIGINT = 0;
-            EXEC sp_executesql @OrphanCheckSql, N'@p_Orphans BIGINT OUTPUT', @p_Orphans = @CurrentOrphans OUTPUT;
-            
-            SET @OrphanRows = @OrphanRows + @CurrentOrphans;
-            
-            -- To calculate percentage, we need total rows of the parent table
-            DECLARE @TotalTableRows BIGINT = 0;
-            DECLARE @TotalSql NVARCHAR(MAX) = N'SELECT COUNT(*) FROM ' + @ParentTable;
-            EXEC sp_executesql @TotalSql, N'@p_Total BIGINT OUTPUT', @p_Total = @TotalTableRows OUTPUT;
-            
-            SET @TotalRows = @TotalRows + @TotalTableRows;
+            SET @Pct = (ISNULL(@Good, 0) * 100.0) / @FactTables;
+            SET @DbScore = CASE
+                               WHEN @Pct >= 100 AND ISNULL(@Bad, 0) = 0 THEN 3
+                               WHEN @Pct >= 80 THEN 2
+                               WHEN @Pct >= 50 THEN 1
+                               ELSE 0
+                           END;
 
-            FETCH NEXT FROM fk_cursor INTO @ParentTable, @ParentCol, @RefTable, @RefCol;
+            INSERT INTO #DbResults (DbName, FactTables, GoodFacts, BadFks, DbScore)
+            VALUES (@DbName, @FactTables, ISNULL(@Good, 0), ISNULL(@Bad, 0), @DbScore);
         END
-        CLOSE fk_cursor;
-        DEALLOCATE fk_cursor;
-    END
+    END TRY
+    BEGIN CATCH
+        -- Database not readable by the audit login; leave it out of the evaluated set.
+    END CATCH
 
-    DECLARE @Pct FLOAT = CASE WHEN @TotalRows = 0 THEN 0 ELSE (CAST(@OrphanRows AS FLOAT) / CAST(@TotalRows AS FLOAT)) * 100 END;
-    
-    DECLARE @DbScore INT = CASE 
-        WHEN @OrphanRows = 0 THEN 3 
-        WHEN @Pct < 1 THEN 2 
-        WHEN @Pct <= 5 THEN 1 
-        ELSE 0 END;
-    
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (DB_NAME(), @DbScore, 'Orphaned rows: ' + CAST(@OrphanRows AS NVARCHAR(20)) + ' (' + CAST(ROUND(@Pct, 2) AS NVARCHAR(10)) + '%)');
+    FETCH NEXT FROM db_cur INTO @DbName;
 END
-ELSE
+
+CLOSE db_cur;
+DEALLOCATE db_cur;
+
+IF EXISTS (SELECT 1 FROM #DbResults)
 BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+    SELECT @Score = MIN(r.DbScore) FROM #DbResults AS r;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    SET @DatabaseQueried = ISNULL(STUFF((SELECT N', ' + r.DbName
+                                         FROM #DbResults AS r
+                                         ORDER BY r.DbName
+                                         FOR XML PATH(N''), TYPE).value(N'.', N'NVARCHAR(MAX)'), 1, 2, N''), N'None');
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            DECLARE @DbTotal BIGINT = 0;
-            DECLARE @DbOrphans BIGINT = 0;
-            DECLARE @DbFKCount INT = 0;
+    SET @Finding = ISNULL(STUFF((SELECT N'; ' + r.DbName + N': ' + CONVERT(NVARCHAR(20), r.GoodFacts) + N' of '
+                                        + CONVERT(NVARCHAR(20), r.FactTables)
+                                        + N' fact table(s) have an enabled and trusted FK to a dimension table, '
+                                        + CONVERT(NVARCHAR(20), r.BadFks) + N' disabled/untrusted FK(s), score '
+                                        + CONVERT(NVARCHAR(10), r.DbScore)
+                                 FROM #DbResults AS r
+                                 ORDER BY r.DbName
+                                 FOR XML PATH(N''), TYPE).value(N'.', N'NVARCHAR(MAX)'), 1, 2, N''),
+                          N'No database found to be queried');
 
-            -- Get FK count for this DB
-            DECLARE @FKCountSql NVARCHAR(MAX) = N'SELECT @p_Count = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.foreign_keys';
-            EXEC sp_executesql @FKCountSql, N'@p_Count INT OUTPUT', @p_Count = @DbFKCount OUTPUT;
-
-            IF @DbFKCount > 0
-            BEGIN
-                -- Use a temp table to store FK details for the specific DB
-                CREATE TABLE #FKs (ParentTable NVARCHAR(256), ParentCol NVARCHAR(128), RefTable NVARCHAR(256), RefCol NVARCHAR(128));
-                SET @Sql = N'INSERT INTO #FKs SELECT 
-                    QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name), 
-                    QUOTENAME(c1.name), 
-                    QUOTENAME(s2.name) + ''.'' + QUOTENAME(t2.name), 
-                    QUOTENAME(c2.name)
-                FROM ' + QUOTENAME(@DbName) + N'.sys.foreign_keys fk
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON fk.parent_object_id = t.object_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON t.schema_id = s.schema_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.columns c1 ON fkc.parent_object_id = c1.object_id AND fkc.parent_column_id = c1.column_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t2 ON fk.referenced_object_id = t2.object_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s2 ON t2.schema_id = s2.schema_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.columns c2 ON fkc.referenced_object_id = c2.object_id AND fkc.referenced_column_id = c2.column_id';
-                EXEC sp_executesql @Sql;
-
-                DECLARE @CurParentTable NVARCHAR(256), @CurParentCol NVARCHAR(128), @CurRefTable NVARCHAR(256), @CurRefCol NVARCHAR(128);
-                DECLARE fk_db_cursor CURSOR LOCAL FAST_FORWARD FOR SELECT * FROM #FKs;
-                OPEN fk_db_cursor;
-                FETCH NEXT FROM fk_db_cursor INTO @CurParentTable, @CurParentCol, @CurRefTable, @CurRefCol;
-                WHILE @@FETCH_STATUS = 0
-                BEGIN
-                    DECLARE @RowSql NVARCHAR(MAX) = N'SELECT @p_Total = COUNT(*) FROM ' + @CurParentTable + ' WHERE ' + @CurParentCol + ' IS NOT NULL';
-                    DECLARE @TRows BIGINT = 0;
-                    EXEC sp_executesql @RowSql, N'@p_Total BIGINT OUTPUT', @p_Total = @TRows OUTPUT;
-                    SET @DbTotal = @DbTotal + @TRows;
-
-                    DECLARE @OrphanSql NVARCHAR(MAX) = N'SELECT COUNT(*) FROM ' + @CurParentTable + ' WHERE ' + @CurParentCol + ' IS NOT NULL AND ' + @CurParentCol + ' NOT IN (SELECT ' + @CurRefCol + ' FROM ' + @CurRefTable + ')';
-                    DECLARE @ORows BIGINT = 0;
-                    EXEC sp_executesql @OrphanSql, N'@p_Orphans BIGINT OUTPUT', @p_Orphans = @ORows OUTPUT;
-                    SET @DbOrphans = @DbOrphans + @ORows;
-
-                    FETCH NEXT FROM fk_db_cursor INTO @CurParentTable, @CurParentCol, @CurRefTable, @CurRefCol;
-                END
-                CLOSE fk_db_cursor;
-                DEALLOCATE fk_db_cursor;
-                DROP TABLE #FKs;
-            END
-
-            DECLARE @DbPct FLOAT = CASE WHEN @DbTotal = 0 THEN 0 ELSE (CAST(@DbOrphans AS FLOAT) / CAST(@DbTotal AS FLOAT)) * 100 END;
-            DECLARE @DbScoreFinal INT = CASE 
-                WHEN @DbOrphans = 0 THEN 3 
-                WHEN @DbPct < 1 THEN 2 
-                WHEN @DbPct <= 5 THEN 1 
-                ELSE 0 END;
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, @DbScoreFinal, 'Orphaned rows: ' + CAST(@DbOrphans AS NVARCHAR(20)) + ' (' + CAST(ROUND(@DbPct, 2) AS NVARCHAR(10)) + '%)');
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
+    SET @Result = CASE WHEN @Score = 3 THEN N'Pass' ELSE N'Fail' END;
 END
 
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+DROP TABLE #DbResults;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
