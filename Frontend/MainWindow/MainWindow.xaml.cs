@@ -63,6 +63,9 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>? _evalItemMap;
         private System.Collections.Generic.Dictionary<string, (string Status, string Technique)>? _evalStatusMap;
         private bool _isHydratingManualUi = false;
+        // Coalesces EvalTree rebuilds: a full re-render per progress event blocks the dispatcher
+        // (and therefore the in-flight SQL/LLM continuations) once hundreds of items are loaded.
+        private bool _treeRenderQueued = false;
         // Selected checklist IDs are kept in-memory for the current session only
         private System.Collections.Generic.List<string>? _selectedIds;
 
@@ -473,7 +476,7 @@ namespace SQLAuditor.Wpf
                                 _evalStatusMap[r.Id] = (uiOutcome, r.Technique);
                             }
 
-                            RenderEvaluationTree();
+                            RequestEvaluationTreeRender();
                             UpdateManualActionButtonStates(GetCurrentManualSelectedOutcome(), IsCurrentManualSubmitted());
                         }
                     });
@@ -507,7 +510,7 @@ namespace SQLAuditor.Wpf
                             {
                                 _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
                             }
-                            RenderEvaluationTree();
+                            RequestEvaluationTreeRender();
                         }
                         ShowManualAtIndex();
                     });
@@ -526,7 +529,16 @@ namespace SQLAuditor.Wpf
             {
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
-                var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
+                var token = _evaluationCts.Token;
+                var idsForRun = selected.Count == 0 ? null : selected;
+                // The engine must not run on the dispatcher. Awaiting it directly kept every SQL
+                // and LLM continuation on the UI thread, so a manual Pass/Fail click (file I/O +
+                // full tree rebuild) stalled the in-flight script pipeline; the aborted command
+                // then left the shared connection broken and every remaining script item came
+                // back as a SQL error, which the outcome mapper scores as Fail.
+                var results = await Task.Run(
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token),
+                    token);
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
@@ -922,10 +934,22 @@ namespace SQLAuditor.Wpf
             return System.Windows.Media.Brushes.IndianRed;
         }
 
+        // Queues one rebuild at background priority instead of rendering synchronously on every
+        // engine progress event, so status updates never monopolise the dispatcher.
+        private void RequestEvaluationTreeRender()
+        {
+            if (_treeRenderQueued) return;
+            _treeRenderQueued = true;
+            this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
+            {
+                _treeRenderQueued = false;
+                RenderEvaluationTree();
+            }));
+        }
+
         private void RenderEvaluationTree()
         {
             if (_evalItemMap == null || _evalStatusMap == null) return;
-
             EvalTree.Items.Clear();
             var techniqueOrder = new[] { "Script", "AI-MCP", "AI-Manual" };
 
@@ -1140,30 +1164,34 @@ namespace SQLAuditor.Wpf
         private void PersistManualResult(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
         {
             var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
-            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
-            if (System.IO.File.Exists(path))
+            // The engine writes this same file from its own thread at the end of a run.
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
             {
-                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+                var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+                if (System.IO.File.Exists(path))
+                {
+                    try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+                }
+
+                var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
+                var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
+                var updated = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual")
+                {
+                    McpUsage = null,
+                    McpExecutionTimeMs = null,
+                    McpEvidence = null
+                };
+                // Back-fill the report fields (Score, Severity, Finding, Recommendation, ...)
+                // so manually evaluated items match the schema used by the report generator.
+                updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(updated);
+
+                var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0) list[idx] = updated;
+                else list.Add(updated);
+
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+                System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
             }
-
-            var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
-            var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
-            var updated = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual")
-            {
-                McpUsage = null,
-                McpExecutionTimeMs = null,
-                McpEvidence = null
-            };
-            // Back-fill the report fields (Score, Severity, Finding, Recommendation, ...)
-            // so manually evaluated items match the schema used by the report generator.
-            updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(updated);
-
-            var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0) list[idx] = updated;
-            else list.Add(updated);
-
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
         }
 
         // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.

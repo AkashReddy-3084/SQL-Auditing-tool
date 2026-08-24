@@ -103,6 +103,11 @@ namespace SQLAuditor.Lib
 
     public class Auditor
     {
+        // checklist_results.json is written by this engine at the end of a run and, in the WPF
+        // flow, by the manual Pass/Fail handler while the run is still in progress. Both writers
+        // take this lock so neither can observe or produce a half-written file.
+        public static readonly object ResultsFileLock = new object();
+
         private string _connectionString;
         private SqlServerMcpEvaluator? _mcpEvaluator;
         private ManualStepsGenerator? _manualStepsGenerator;
@@ -889,21 +894,48 @@ namespace SQLAuditor.Lib
                 // };
             }
 
-            async Task RunPipelineAsync(System.Collections.Generic.List<ChecklistItem> items, bool isScriptPipeline)
+            // One aborted command (a timeout, or a continuation starved while the host was busy)
+            // leaves the shared pipeline connection unusable. Every later script would then come
+            // back as "SQL ERROR" and be scored Fail without ever being evaluated, so the
+            // connection is probed before each item and transparently re-opened when broken.
+            async Task<Microsoft.Data.SqlClient.SqlConnection?> EnsureUsableConnectionAsync(Microsoft.Data.SqlClient.SqlConnection? conn)
             {
-                Microsoft.Data.SqlClient.SqlConnection? pipelineConn = null;
-                if (!string.IsNullOrWhiteSpace(_connectionString))
+                if (string.IsNullOrWhiteSpace(_connectionString)) return null;
+
+                if (conn != null && conn.State == ConnectionState.Open)
                 {
                     try
                     {
-                        pipelineConn = new Microsoft.Data.SqlClient.SqlConnection(_connectionString);
-                        await pipelineConn.OpenAsync(cancellationToken);
+                        using var probe = new SqlCommand("SELECT 1", conn) { CommandTimeout = 15 };
+                        await probe.ExecuteScalarAsync(cancellationToken);
+                        return conn;
                     }
-                    catch
-                    {
-                        pipelineConn = null;
-                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch { }
                 }
+
+                if (conn != null)
+                {
+                    try { await conn.DisposeAsync(); } catch { }
+                }
+
+                try
+                {
+                    var fresh = new Microsoft.Data.SqlClient.SqlConnection(_connectionString);
+                    await fresh.OpenAsync(cancellationToken);
+                    return fresh;
+                }
+                catch
+                {
+                    // Falling back to null makes the evaluators open their own short-lived
+                    // connection instead of reporting a fabricated failure.
+                    return null;
+                }
+            }
+
+            async Task RunPipelineAsync(System.Collections.Generic.List<ChecklistItem> items, bool isScriptPipeline)
+            {
+                Microsoft.Data.SqlClient.SqlConnection? pipelineConn = await EnsureUsableConnectionAsync(null);
 
                 try
                 {
@@ -916,6 +948,8 @@ namespace SQLAuditor.Lib
                             progress?.Report(stopped);
                             break;
                         }
+
+                        pipelineConn = await EnsureUsableConnectionAsync(pipelineConn);
 
                         var startingScriptFile = string.Empty;
                         if (!IsDocumentationCheck(it) && mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
@@ -975,7 +1009,11 @@ namespace SQLAuditor.Lib
             try
             {
                 Directory.CreateDirectory(resultsDir);
-                await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(enrichedResults, new JsonSerializerOptions { WriteIndented = true }));
+                var payload = JsonSerializer.Serialize(enrichedResults, new JsonSerializerOptions { WriteIndented = true });
+                lock (ResultsFileLock)
+                {
+                    File.WriteAllText(jsonPath, payload);
+                }
             }
             catch { }
 
