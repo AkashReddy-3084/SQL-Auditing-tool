@@ -17,14 +17,15 @@ Field policy:
    database names, configuration values).
    Judge first whether the result carries ANY supporting artefact for this item. If
    every value the script returned is absent - NULL, empty, zero, "none", "not found",
-   "no ... found" - then the control does not exist at the root at all, there is
-   nothing to evidence, and you must return evidence exactly as: Not Applicable
-   (that literal string, nothing else). Do not describe what was searched for.
+   "no ... found" - then the control does not exist at the root at all and there is
+   nothing to evidence. In that case evidence MUST start with the exact words
+   "Not Applicable." and then one sentence of YOUR OWN reasoning saying why, naming
+   what the script looked for and where it looked. Shape: "Not Applicable. <reason>"
    Judge this on the values themselves, not on the outcome: a zero can be the proof
    that a control holds (e.g. "0 unauthorised logins" on a Pass), and then it IS
    evidence and must be quoted normally.
    If at least one value is concrete and non-empty, quote those values as evidence
-   and never write "Not Applicable".
+   and never start with "Not Applicable".
 3. riskImpact: the specific business, security, operational, compliance, data-quality
    or performance consequence of THIS finding. No generic phrases such as
    "control absent" or "partial coverage".

@@ -766,6 +766,12 @@ namespace SQLAuditor.Lib
                     ? ai!.Finding!
                     : (scriptOutcome.Finding ?? string.Empty);
 
+                // Evidence opening with "Not Applicable." means the enricher found no
+                // supporting artefact at all: the control does not exist to be assessed, so
+                // the item is reported as N/A and carries no weight in the score.
+                var notApplicable = NotApplicableEvidence.IsMarked(ai?.Evidence);
+                if (notApplicable) outcome = NotApplicableEvidence.Outcome;
+
                 return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, ai?.Evidence, string.Join(';', files), "Script")
                 {
                     Score = score,
@@ -775,6 +781,7 @@ namespace SQLAuditor.Lib
                     Recommendation = ai?.Recommendation,
                     DatabasesVerified = scriptOutcome.DatabasesVerified,
                     ScriptOutcome = scriptOutcome,
+                    NotApplicable = notApplicable ? true : null,
                 };
             }
 
@@ -1054,6 +1061,8 @@ namespace SQLAuditor.Lib
             if (target == null) return false;
 
             target["Outcome"] = outcome;
+            // A human verdict makes the item assessable again, so any earlier N/A marking goes.
+            target.Remove("NotApplicable");
             if (!string.IsNullOrWhiteSpace(notes))
             {
                 var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
@@ -1141,6 +1150,14 @@ namespace SQLAuditor.Lib
             if (!string.IsNullOrWhiteSpace(riskImpact)) target["RiskImpact"] = riskImpact;
             if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
 
+            // Evidence opening with "Not Applicable." means the control does not exist to be
+            // assessed, so the item is re-stamped N/A and dropped from the scoring.
+            if (NotApplicableEvidence.IsMarked(evidence))
+            {
+                target["Outcome"] = NotApplicableEvidence.Outcome;
+                target["NotApplicable"] = true;
+            }
+
             try
             {
                 File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
@@ -1197,7 +1214,7 @@ namespace SQLAuditor.Lib
             sb.AppendLine("  2. Never change Outcome, Score, Severity or Databases Verified — the script already decided them.");
             sb.AppendLine("  3. Produce these four values:");
             sb.AppendLine("       finding        - 1-2 sentences on the ACTUAL state the script found (object/database names, counts). Do not restate the checklist description.");
-            sb.AppendLine("       evidence       - how that finding justifies the outcome, quoting the values returned. Under 120 words.");
+            sb.AppendLine("       evidence       - how that finding justifies the outcome, quoting the values returned. Under 120 words. When the script result holds no supporting artefact at all (every value NULL, empty, zero or 'not found'), the control does not exist to be assessed: start evidence with the exact words 'Not Applicable.' followed by one sentence of your own reasoning. A zero that itself proves compliance is real evidence, not 'Not Applicable'.");
             sb.AppendLine("       riskImpact     - the specific business/security/operational consequence of THIS finding. Under 50 words, no generic phrases.");
             sb.AppendLine("       recommendation - remediation targeted at this gap, consistent with the score. Leave empty when Score is 3 and the outcome is Pass.");
             sb.AppendLine("  4. Record them with the command shown under the item, then move to the next. Do not write a final summary until every item is enriched.");

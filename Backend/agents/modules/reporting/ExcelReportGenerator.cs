@@ -174,6 +174,7 @@ public sealed class ExcelReportGenerator
         BuildAreaDetailSheet(wb, areaScores, catalog);
         BuildChecklistsSheet(wb, items, areaScores, catalog);
         BuildRiskRegisterSheet(wb, items);
+        BuildNotApplicableSheet(wb, items, catalog);
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
         wb.SaveAs(outputPath);
@@ -216,13 +217,14 @@ public sealed class ExcelReportGenerator
         var passed = CountOutcome(items, "pass");
         var failed = CountOutcome(items, "fail");
         var needs = CountOutcome(items, "needsreview") + CountOutcome(items, "needs review");
-        var evaluated = items.Count;
+        var notApplicable = items.Count(i => i.IsNotApplicable);
+        var evaluated = items.Count - notApplicable;
 
         WriteKpiCard(ws, 4, 1, 3, "Overall Score", Pct(overall), NeutralStatus());
         WriteKpiCard(ws, 4, 4, 3, "Overall Risk Rating", overallRating.Label, StatusFor(overallRating.Label));
         WriteKpiCard(ws, 4, 7, 3, "Total Checks Evaluated",
             $"{evaluated}", NeutralStatus(),
-            subText: $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}");
+            subText: $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  N/A {notApplicable} (excluded)");
 
         // ---- Area Scorecard -------------------------------------------------
         var row = 8;
@@ -287,15 +289,16 @@ public sealed class ExcelReportGenerator
             XLAlignmentHorizontalValues.Left, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
+            XLAlignmentHorizontalValues.Right,
         };
         var covLast = WriteTable(ws, covHeaderRow, 1,
-            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "Pass Rate (%)" },
+            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "N/A (excluded)", "Pass Rate (%)" },
             covRows,
             covAligns,
-            wrap: new[] { false, false, false, false, false, false },
+            wrap: new[] { false, false, false, false, false, false, false },
             statusColumns: Array.Empty<int>());
         // Emphasize the trailing Total row.
-        ws.Range(covLast, 1, covLast, 6).Style.Font.Bold = true;
+        ws.Range(covLast, 1, covLast, 7).Style.Font.Bold = true;
 
         Finalize(ws, freezeRows: 3, autoFilterRange: null);
     }
@@ -303,10 +306,13 @@ public sealed class ExcelReportGenerator
     private string[] TechniqueRow(string label, List<ChecklistItemResult> techItems)
     {
         var total = techItems.Count;
+        var na = techItems.Count(i => i.IsNotApplicable);
         var p = CountOutcome(techItems, "pass");
         var f = CountOutcome(techItems, "fail");
         var nr = CountOutcome(techItems, "needsreview") + CountOutcome(techItems, "needs review");
-        var rate = total == 0 ? (double?)null : (double)p / total * 100.0;
+        // N/A items were never assessable, so they stay out of the pass-rate denominator.
+        var assessed = total - na;
+        var rate = assessed == 0 ? (double?)null : (double)p / assessed * 100.0;
         return new[]
         {
             label,
@@ -314,6 +320,7 @@ public sealed class ExcelReportGenerator
             p.ToString(CultureInfo.InvariantCulture),
             f.ToString(CultureInfo.InvariantCulture),
             nr.ToString(CultureInfo.InvariantCulture),
+            na.ToString(CultureInfo.InvariantCulture),
             Pct(rate),
         };
     }
@@ -416,7 +423,7 @@ public sealed class ExcelReportGenerator
             var itemRows = new List<string[]>();
             foreach (var i in a.Items.OrderBy(i => i.Id, StringComparer.Ordinal))
             {
-                var score = i.NotApplicable == true ? "N/A" : (i.Score?.ToString(CultureInfo.InvariantCulture) ?? "N/A");
+                var score = i.IsNotApplicable ? "N/A" : (i.Score?.ToString(CultureInfo.InvariantCulture) ?? "N/A");
                 itemRows.Add(new[]
                 {
                     i.Id,
@@ -464,7 +471,7 @@ public sealed class ExcelReportGenerator
         var rows = new List<string[]>();
         foreach (var i in items.OrderBy(i => i.Id, StringComparer.Ordinal))
         {
-            var score = i.NotApplicable == true ? "N/A" : (i.Score?.ToString(CultureInfo.InvariantCulture) ?? "N/A");
+            var score = i.IsNotApplicable ? "N/A" : (i.Score?.ToString(CultureInfo.InvariantCulture) ?? "N/A");
             rows.Add(new[]
             {
                 i.Id,
@@ -575,6 +582,9 @@ public sealed class ExcelReportGenerator
     // Active risk filter: Outcome == Fail OR Severity in {Critical, High, Medium} OR Score < 3.
     private static bool IsActiveRisk(ChecklistItemResult i)
     {
+        // An item that could not be assessed at all is not a measured risk; it is listed
+        // on the Not Applicable Items sheet instead.
+        if (i.IsNotApplicable) return false;
         if (IsOutcome(i, "fail")) return true;
         if (i.Severity is not null)
         {
@@ -589,9 +599,88 @@ public sealed class ExcelReportGenerator
     }
 
     // =========================================================================
-    // TABLE / STYLE PRIMITIVES
+    // TAB 5 — NOT APPLICABLE ITEMS
     // =========================================================================
 
+    /// <summary>
+    /// Lists the items whose evaluation found no supporting artefact at all, so the control
+    /// does not exist to be assessed (Outcome "N/A"). They are excluded from every score in
+    /// this workbook and are reported here with their full audit wording.
+    /// </summary>
+    private void BuildNotApplicableSheet(
+        XLWorkbook wb,
+        IReadOnlyList<ChecklistItemResult> items,
+        ChecklistCatalog catalog)
+    {
+        var ws = wb.Worksheets.Add("Not Applicable Items");
+
+        var headers = new[]
+        {
+            "Item Id", "Area Name", "Category Name", "Checklist Item", "Evaluation Type",
+            "Outcome", "Findings", "Evidence", "Recommendations", "Databases Verified",
+        };
+
+        ws.Range(1, 1, 1, headers.Length).Merge();
+        var note = ws.Cell(1, 1);
+        note.Value = "Checklist items the evaluation found no supporting artefact for: the control does not exist "
+                   + "to be assessed. They are reported as Outcome \"N/A\" and are excluded from the scoring in "
+                   + "every other sheet.";
+        note.Style.Font.Italic = true;
+        note.Style.Font.FontColor = XLColor.FromHtml("#667085");
+        note.Style.Alignment.WrapText = true;
+        note.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        ws.Row(1).Height = 30;
+
+        var rows = new List<string[]>();
+        foreach (var i in items.Where(i => i.IsNotApplicable).OrderBy(i => i.Id, StringComparer.Ordinal))
+        {
+            rows.Add(new[]
+            {
+                i.Id,
+                catalog.AreaName(i.AreaNumber),
+                catalog.CategoryName(i.CategoryId),
+                NA(i.Description),
+                NA(i.Technique),
+                SQLAuditor.Lib.NotApplicableEvidence.Outcome,
+                NA(i.Finding),
+                NA(i.Evidence),
+                NA(i.Recommendation),
+                NA(i.DatabasesVerified),
+            });
+        }
+
+        var aligns = new[]
+        {
+            XLAlignmentHorizontalValues.Center, // Item Id
+            XLAlignmentHorizontalValues.Left,   // Area Name
+            XLAlignmentHorizontalValues.Left,   // Category Name
+            XLAlignmentHorizontalValues.Left,   // Checklist Item
+            XLAlignmentHorizontalValues.Center, // Evaluation Type
+            XLAlignmentHorizontalValues.Center, // Outcome
+            XLAlignmentHorizontalValues.Left,   // Findings
+            XLAlignmentHorizontalValues.Left,   // Evidence
+            XLAlignmentHorizontalValues.Left,   // Recommendations
+            XLAlignmentHorizontalValues.Left,   // Databases Verified
+        };
+        var wrap = new[] { false, false, false, true, false, false, true, true, true, true };
+
+        const int headerRow = 3;
+        var last = WriteTable(ws, headerRow, 1, headers, rows, aligns, wrap, statusColumns: Array.Empty<int>());
+
+        if (rows.Count == 0)
+        {
+            var empty = ws.Cell(headerRow + 1, 1);
+            empty.Value = "No checklist items were marked Not Applicable.";
+            empty.Style.Font.Italic = true;
+            empty.Style.Font.FontColor = XLColor.FromHtml("#667085");
+        }
+
+        Finalize(ws, freezeRows: headerRow, autoFilterRange: ws.Range(headerRow, 1, Math.Max(last, headerRow), headers.Length));
+    }
+
+    // =========================================================================
+    // TABLE / STYLE PRIMITIVES
+    // =========================================================================
     /// <summary>
     /// Writes a styled table (navy header + zebra body + borders + alignment)
     /// and returns the last body row written (or the header row when no data).
