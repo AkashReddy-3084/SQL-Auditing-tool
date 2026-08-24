@@ -1,193 +1,78 @@
-SET NOCOUNT ON;
+-- Checklist: Schema-qualified object references (dbo.Table, not Table)
+-- Scope: DATABASE
+-- Scoring: 3 = 90%+ of table-referencing modules show schema-qualified references; 2 = 50-89%; 1 = under 50%; 0 = no table-referencing modules found
+-- NOTE: Automated evidence only; text-based detection is a proxy and may undercount schema qualification styles other than dbo. Full compliance requires human review.
 
-/* Checklist 3.1.3 - Schema-qualified object references (dbo.Table, not Table)
-   Read-only. Uses sys.sql_expression_dependencies.referenced_schema_name, which is NULL
-   when the referencing module did not schema-qualify a same-database object reference. */
-
-DECLARE @IsAzureSqlDb BIT = CASE WHEN CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
-
-IF OBJECT_ID('tempdb..#AuditDatabases') IS NOT NULL DROP TABLE #AuditDatabases;
-IF OBJECT_ID('tempdb..#AuditFindings') IS NOT NULL DROP TABLE #AuditFindings;
-IF OBJECT_ID('tempdb..#AuditSamples') IS NOT NULL DROP TABLE #AuditSamples;
-
-CREATE TABLE #AuditDatabases
-(
-    DatabaseName SYSNAME NOT NULL PRIMARY KEY
-);
-
-CREATE TABLE #AuditFindings
-(
-    DatabaseName           SYSNAME NOT NULL PRIMARY KEY,
-    TotalRefs              INT     NOT NULL,
-    UnqualifiedRefs        INT     NOT NULL,
-    ModulesWithUnqualified INT     NOT NULL,
-    TotalModules           INT     NOT NULL
-);
-
-CREATE TABLE #AuditSamples
-(
-    DatabaseName SYSNAME        NOT NULL,
-    SampleText   NVARCHAR(500)  NOT NULL
-);
-
-IF @IsAzureSqlDb = 1
-BEGIN
-    INSERT INTO #AuditDatabases (DatabaseName)
-    VALUES (DB_NAME());
-END
-ELSE
-BEGIN
-    INSERT INTO #AuditDatabases (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state_desc = 'ONLINE'
-      AND d.source_database_id IS NULL
-      AND d.is_in_standby = 0
-      AND HAS_DBACCESS(d.name) = 1;
-END
-
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
+DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
 DECLARE @DbName SYSNAME;
-DECLARE @Sql    NVARCHAR(MAX);
+DECLARE @Sql NVARCHAR(MAX);
 
-DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT DatabaseName FROM #AuditDatabases ORDER BY DatabaseName;
+CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
 
-OPEN db_cur;
-FETCH NEXT FROM db_cur INTO @DbName;
-
-WHILE @@FETCH_STATUS = 0
+IF SERVERPROPERTY('EngineEdition') = 5
 BEGIN
-    BEGIN TRY
-        SET @Sql = N'
-SELECT
-    @pDb AS DatabaseName,
-    COUNT(*) AS TotalRefs,
-    ISNULL(SUM(CASE WHEN d.referenced_schema_name IS NULL THEN 1 ELSE 0 END), 0) AS UnqualifiedRefs,
-    COUNT(DISTINCT CASE WHEN d.referenced_schema_name IS NULL THEN d.referencing_id END) AS ModulesWithUnqualified,
-    (SELECT COUNT(*)
-     FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules AS sm
-     INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS mo
-             ON mo.object_id = sm.object_id
-     WHERE mo.is_ms_shipped = 0) AS TotalModules
-FROM ' + QUOTENAME(@DbName) + N'.sys.sql_expression_dependencies AS d
-INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS o
-        ON o.object_id = d.referencing_id
-WHERE d.referencing_class = 1
-  AND d.referenced_class = 1
-  AND d.referenced_minor_id = 0
-  AND d.referenced_server_name IS NULL
-  AND d.referenced_database_name IS NULL
-  AND d.is_ambiguous = 0
-  AND o.is_ms_shipped = 0;';
+    DECLARE @ReferencingModules INT, @QualifiedModules INT;
 
-        INSERT INTO #AuditFindings (DatabaseName, TotalRefs, UnqualifiedRefs, ModulesWithUnqualified, TotalModules)
-        EXEC sp_executesql @Sql, N'@pDb SYSNAME', @pDb = @DbName;
+    SELECT @ReferencingModules = COUNT(*) FROM sys.sql_modules WHERE definition LIKE '%FROM %' OR definition LIKE '%JOIN %';
+    SELECT @QualifiedModules = COUNT(*) FROM sys.sql_modules
+    WHERE (definition LIKE '%FROM %' OR definition LIKE '%JOIN %')
+      AND (definition LIKE '%FROM dbo.%' OR definition LIKE '%JOIN dbo.%' OR definition LIKE '%FROM [dbo].%' OR definition LIKE '%JOIN [dbo].%');
 
-        SET @Sql = N'
-SELECT TOP (5)
-    @pDb AS DatabaseName,
-    LEFT(QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name) + N'' -> '' + d.referenced_entity_name, 500) AS SampleText
-FROM ' + QUOTENAME(@DbName) + N'.sys.sql_expression_dependencies AS d
-INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS o
-        ON o.object_id = d.referencing_id
-INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas AS s
-        ON s.schema_id = o.schema_id
-WHERE d.referencing_class = 1
-  AND d.referenced_class = 1
-  AND d.referenced_minor_id = 0
-  AND d.referenced_server_name IS NULL
-  AND d.referenced_database_name IS NULL
-  AND d.is_ambiguous = 0
-  AND d.referenced_schema_name IS NULL
-  AND o.is_ms_shipped = 0
-ORDER BY s.name, o.name, d.referenced_entity_name;';
-
-        INSERT INTO #AuditSamples (DatabaseName, SampleText)
-        EXEC sp_executesql @Sql, N'@pDb SYSNAME', @pDb = @DbName;
-    END TRY
-    BEGIN CATCH
-        /* Database not readable by this login - excluded from the assessment. */
-        DELETE FROM #AuditFindings WHERE DatabaseName = @DbName;
-        DELETE FROM #AuditSamples  WHERE DatabaseName = @DbName;
-    END CATCH
-
-    FETCH NEXT FROM db_cur INTO @DbName;
-END
-
-CLOSE db_cur;
-DEALLOCATE db_cur;
-
-DECLARE @DbCount        INT = (SELECT COUNT(*) FROM #AuditFindings);
-DECLARE @AffectedDbs    INT = (SELECT COUNT(*) FROM #AuditFindings WHERE UnqualifiedRefs > 0);
-DECLARE @TotalRefs      INT = (SELECT ISNULL(SUM(TotalRefs), 0) FROM #AuditFindings);
-DECLARE @Unqualified    INT = (SELECT ISNULL(SUM(UnqualifiedRefs), 0) FROM #AuditFindings);
-DECLARE @BadModules     INT = (SELECT ISNULL(SUM(ModulesWithUnqualified), 0) FROM #AuditFindings);
-DECLARE @TotalModules   INT = (SELECT ISNULL(SUM(TotalModules), 0) FROM #AuditFindings);
-
-DECLARE @Pct DECIMAL(9,2) =
-    CASE WHEN @TotalRefs = 0 THEN CONVERT(DECIMAL(9,2), 0)
-         ELSE CONVERT(DECIMAL(9,2), (@Unqualified * 100.0) / @TotalRefs)
-    END;
-
-DECLARE @DbList NVARCHAR(MAX) =
-    STUFF((SELECT N', ' + f.DatabaseName
-           FROM #AuditFindings AS f
-           ORDER BY f.DatabaseName
-           FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-DECLARE @SampleList NVARCHAR(MAX) =
-    STUFF((SELECT N'; ' + sp.DatabaseName + N': ' + sp.SampleText
-           FROM #AuditSamples AS sp
-           ORDER BY sp.DatabaseName, sp.SampleText
-           FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-DECLARE @Result           NVARCHAR(50);
-DECLARE @Score            INT;
-DECLARE @DatabaseQueried  NVARCHAR(500) = ISNULL(LEFT(@DbList, 500), N'None');
-DECLARE @Finding          NVARCHAR(MAX);
-
-IF @DbCount = 0
-BEGIN
-    SET @Score = 0;
-    SET @Finding = N'No accessible online user database was found, so schema qualification of object references could not be assessed. Re-run with a login that has VIEW DEFINITION on the target databases.';
-END
-ELSE IF @TotalModules = 0
-BEGIN
-    SET @Score = 0;
-    SET @Finding = N'Databases examined (' + CONVERT(NVARCHAR(20), @DbCount) + N') contain no user-defined programmable objects (procedures, views, functions, triggers), so schema qualification of object references could not be evidenced from metadata.';
+    INSERT INTO #DbResults (DbName, DbScore, Finding)
+    VALUES (
+        DB_NAME(),
+        CASE WHEN ISNULL(@ReferencingModules,0) = 0 THEN 0
+             WHEN (CAST(ISNULL(@QualifiedModules,0) AS DECIMAL(9,4)) / NULLIF(@ReferencingModules,0)) >= 0.90 THEN 3
+             WHEN (CAST(ISNULL(@QualifiedModules,0) AS DECIMAL(9,4)) / NULLIF(@ReferencingModules,0)) >= 0.50 THEN 2
+             ELSE 1 END,
+        CONCAT('Table-referencing modules = ', ISNULL(@ReferencingModules,0), ', with schema-qualified reference = ', ISNULL(@QualifiedModules,0))
+    );
 END
 ELSE
 BEGIN
-    SET @Score =
-        CASE
-            WHEN @Unqualified = 0 THEN 3
-            WHEN @Pct <= 5.00     THEN 2
-            WHEN @Pct <= 20.00    THEN 1
-            ELSE 0
-        END;
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name FROM sys.databases
+        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
 
-    SET @Finding =
-        N'Databases examined: ' + CONVERT(NVARCHAR(20), @DbCount)
-      + N'. User-defined modules: ' + CONVERT(NVARCHAR(20), @TotalModules)
-      + N'. Same-database object references resolved from module definitions: ' + CONVERT(NVARCHAR(20), @TotalRefs)
-      + N'. References written without a schema qualifier: ' + CONVERT(NVARCHAR(20), @Unqualified)
-      + N' (' + CONVERT(NVARCHAR(20), @Pct) + N'%)'
-      + N', spanning ' + CONVERT(NVARCHAR(20), @BadModules) + N' module(s) in '
-      + CONVERT(NVARCHAR(20), @AffectedDbs) + N' database(s).'
-      + CASE WHEN @SampleList IS NULL THEN N''
-             ELSE N' Examples (referencing object -> unqualified reference): ' + LEFT(@SampleList, 900)
-        END;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        BEGIN TRY
+            SET @Sql = N'DECLARE @rm INT, @qm INT;
+SELECT @rm = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules WHERE definition LIKE ''%FROM %'' OR definition LIKE ''%JOIN %'';
+SELECT @qm = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules
+WHERE (definition LIKE ''%FROM %'' OR definition LIKE ''%JOIN %'')
+  AND (definition LIKE ''%FROM dbo.%'' OR definition LIKE ''%JOIN dbo.%'' OR definition LIKE ''%FROM [dbo].%'' OR definition LIKE ''%JOIN [dbo].%'');
+SELECT @p_Db,
+       CASE WHEN ISNULL(@rm,0) = 0 THEN 0
+            WHEN (CAST(ISNULL(@qm,0) AS DECIMAL(9,4)) / NULLIF(@rm,0)) >= 0.90 THEN 3
+            WHEN (CAST(ISNULL(@qm,0) AS DECIMAL(9,4)) / NULLIF(@rm,0)) >= 0.50 THEN 2
+            ELSE 1 END,
+       CONCAT(''Table-referencing modules = '', ISNULL(@rm,0), '', with schema-qualified reference = '', ISNULL(@qm,0));';
+
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO #DbResults (DbName, DbScore, Finding)
+            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
 END
 
+SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
+SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
+SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT
-    @Result          AS Result,
-    @Score           AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding         AS Finding;
-
-IF OBJECT_ID('tempdb..#AuditDatabases') IS NOT NULL DROP TABLE #AuditDatabases;
-IF OBJECT_ID('tempdb..#AuditFindings') IS NOT NULL DROP TABLE #AuditFindings;
-IF OBJECT_ID('tempdb..#AuditSamples') IS NOT NULL DROP TABLE #AuditSamples;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

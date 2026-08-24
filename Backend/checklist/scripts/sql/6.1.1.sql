@@ -1,115 +1,50 @@
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition   INT           = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @IntegratedOnly  INT           = CAST(ISNULL(SERVERPROPERTY('IsIntegratedSecurityOnly'), -1) AS INT);
-DECLARE @Scope           NVARCHAR(128) = N'SERVER';
-DECLARE @Context         NVARCHAR(200) = N'';
-DECLARE @ExternalCount   INT           = 0;
-DECLARE @WindowsCount    INT           = 0;
-DECLARE @SqlCount        INT           = 0;
-DECLARE @NonSqlCount     INT           = 0;
-DECLARE @SqlSample       NVARCHAR(1000) = N'';
-DECLARE @Result          NVARCHAR(20);
-DECLARE @Score           INT;
-DECLARE @Finding         NVARCHAR(4000);
+DECLARE @EntraPrincipalCount int = 0;
+DECLARE @EnabledSqlLoginCount int = 0;
+DECLARE @Result nvarchar(20);
+DECLARE @Score int;
+DECLARE @Finding nvarchar(2000);
 
-IF @EngineEdition = 5
-BEGIN
-    /* Azure SQL Database exposes no server principals to a user database; evaluate contained users. */
-    SET @Scope   = DB_NAME();
-    SET @Context = N'Azure SQL Database - database-scoped principals in [' + DB_NAME() + N']';
+SELECT @EntraPrincipalCount = COUNT(*)
+FROM sys.server_principals
+WHERE type IN ('E', 'X')
+  AND name NOT LIKE N'##%';
 
-    SELECT
-        @ExternalCount = SUM(CASE WHEN dp.type IN ('E', 'X') THEN 1 ELSE 0 END),
-        @SqlCount      = SUM(CASE WHEN dp.type = 'S' THEN 1 ELSE 0 END)
-    FROM sys.database_principals AS dp
-    WHERE dp.type IN ('E', 'X', 'S')
-      AND dp.sid IS NOT NULL
-      AND dp.is_fixed_role = 0
-      AND dp.name NOT IN (N'guest', N'INFORMATION_SCHEMA', N'sys');
+SELECT @EnabledSqlLoginCount = COUNT(*)
+FROM sys.server_principals
+WHERE type = 'S'
+  AND is_disabled = 0
+  AND principal_id > 1
+  AND name NOT LIKE N'##%';
 
-    SELECT @SqlSample = ISNULL(STUFF((
-        SELECT TOP (10) N', ' + dp.name
-        FROM sys.database_principals AS dp
-        WHERE dp.type = 'S'
-          AND dp.sid IS NOT NULL
-          AND dp.is_fixed_role = 0
-          AND dp.name NOT IN (N'guest', N'INFORMATION_SCHEMA', N'sys')
-        ORDER BY dp.name
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(1000)'), 1, 2, N''), N'');
-END
-ELSE
-BEGIN
-    SET @Context = N'SQL Server / Azure SQL Managed Instance - server-scoped principals';
+SET @Score = CASE
+    WHEN @EntraPrincipalCount > 0 AND @EnabledSqlLoginCount = 0 THEN 3
+    WHEN @EntraPrincipalCount > 0 AND @EnabledSqlLoginCount > 0 THEN 2
+    WHEN @EntraPrincipalCount = 0 AND @EnabledSqlLoginCount = 0 THEN 1
+    ELSE 0
+END;
 
-    SELECT
-        @ExternalCount = SUM(CASE WHEN sp.type IN ('E', 'X') THEN 1 ELSE 0 END),
-        @WindowsCount  = SUM(CASE WHEN sp.type IN ('U', 'G') THEN 1 ELSE 0 END),
-        @SqlCount      = SUM(CASE WHEN sp.type = 'S' THEN 1 ELSE 0 END)
-    FROM sys.server_principals AS sp
-    WHERE sp.type IN ('E', 'X', 'U', 'G', 'S')
-      AND sp.is_disabled = 0
-      AND sp.name NOT LIKE N'##%'
-      AND sp.name NOT LIKE N'NT SERVICE\%'
-      AND sp.name NOT LIKE N'NT AUTHORITY\%';
+SET @Result = CASE
+    WHEN @Score = 3 THEN N'Pass'
+    WHEN @Score IN (1, 2) THEN N'Partial'
+    ELSE N'Fail'
+END;
 
-    SELECT @SqlSample = ISNULL(STUFF((
-        SELECT TOP (10) N', ' + sp.name
-        FROM sys.server_principals AS sp
-        WHERE sp.type = 'S'
-          AND sp.is_disabled = 0
-          AND sp.name NOT LIKE N'##%'
-        ORDER BY sp.name
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(1000)'), 1, 2, N''), N'');
-END
-
-SET @ExternalCount = ISNULL(@ExternalCount, 0);
-SET @WindowsCount  = ISNULL(@WindowsCount, 0);
-SET @SqlCount      = ISNULL(@SqlCount, 0);
-SET @NonSqlCount   = @ExternalCount + @WindowsCount;
-
-IF @EngineEdition = 5
-BEGIN
-    IF @ExternalCount > 0 AND @SqlCount = 0
-        SET @Score = 3;
-    ELSE IF @ExternalCount > 0
-        SET @Score = 2;
-    ELSE
-        SET @Score = 1;
-END
-ELSE
-BEGIN
-    IF @IntegratedOnly = 1 OR (@NonSqlCount > 0 AND @SqlCount = 0)
-        SET @Score = 3;
-    ELSE IF @NonSqlCount > 0
-        SET @Score = 2;
-    ELSE
-        SET @Score = 1;
-END
-
-SET @Result = CASE WHEN @Score = 3 THEN N'Pass' ELSE N'Fail' END;
-
-SET @Finding =
-      @Context
-    + N'. Entra ID / external principals: ' + CAST(@ExternalCount AS NVARCHAR(10))
-    + N'; Windows principals: '             + CAST(@WindowsCount  AS NVARCHAR(10))
-    + N'; enabled SQL-authentication principals: ' + CAST(@SqlCount AS NVARCHAR(10))
-    + N'. Server authentication mode: '
-    + CASE @IntegratedOnly
-        WHEN 1 THEN N'Windows/Entra ID only (mixed mode disabled)'
-        WHEN 0 THEN N'Mixed Mode (SQL authentication enabled)'
-        ELSE N'not reported by this engine edition'
-      END
-    + CASE WHEN LEN(@SqlSample) > 0 THEN N'. SQL principals (up to 10): ' + @SqlSample ELSE N'' END
-    + N'. '
-    + CASE @Score
-        WHEN 3 THEN N'Authentication relies on Microsoft Entra ID / integrated identities; no enabled SQL-authentication principals were found.'
-        WHEN 2 THEN N'Entra ID / Windows principals are in use, but SQL-authentication principals are still enabled alongside them (partial adoption).'
-        ELSE N'No Microsoft Entra ID or Windows principals were found; authentication depends entirely on SQL logins.'
-      END;
+SET @Finding = CONCAT(
+    N'Microsoft Entra server principals: ', @EntraPrincipalCount,
+    N'; enabled user-created SQL logins: ', @EnabledSqlLoginCount,
+    N'. ',
+    CASE @Score
+        WHEN 3 THEN N'Entra authentication is configured and no enabled user-created SQL logins were found.'
+        WHEN 2 THEN N'Entra authentication is configured, but enabled user-created SQL logins remain available.'
+        WHEN 1 THEN N'No enabled user-created SQL logins were found, but no Entra server principals were visible.'
+        ELSE N'Enabled user-created SQL logins were found and no Entra server principals were visible.'
+    END
+);
 
 SELECT
-    @Result  AS Result,
-    @Score   AS Score,
-    @Scope   AS DatabaseQueried,
+    @Result AS Result,
+    @Score AS Score,
+    CAST(SERVERPROPERTY('ServerName') AS nvarchar(128)) AS DatabaseQueried,
     @Finding AS Finding;

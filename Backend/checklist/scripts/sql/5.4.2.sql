@@ -1,246 +1,275 @@
-/*
-    Checklist 5.4.2 - Numeric / Financial: precision preserved; no rounding errors; currency codes valid
-    Read-only metadata inspection of every accessible user database. No data is modified.
-*/
 SET NOCOUNT ON;
 
-DECLARE @IsAzureSqlDb bit = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS int) = 5 THEN 1 ELSE 0 END;
-
-IF OBJECT_ID('tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
-CREATE TABLE #DbList
-(
-    DatabaseName sysname NOT NULL PRIMARY KEY,
-    Scanned      bit     NOT NULL DEFAULT (0)
+IF OBJECT_ID('tempdb..#NumericFindings') IS NOT NULL DROP TABLE #NumericFindings;
+CREATE TABLE #NumericFindings (
+    DatabaseName   sysname       NOT NULL,
+    SchemaName     sysname       NOT NULL,
+    TableName      sysname       NOT NULL,
+    ColumnName     sysname       NOT NULL,
+    TypeName       sysname       NOT NULL,
+    PrecisionVal   int           NULL,
+    ScaleVal       int           NULL,
+    MaxLength      int           NULL,
+    IssueCategory  varchar(40)   NOT NULL,
+    IssueDetail    varchar(300)  NOT NULL,
+    Severity       tinyint       NOT NULL
 );
 
-IF OBJECT_ID('tempdb..#Cols') IS NOT NULL DROP TABLE #Cols;
-CREATE TABLE #Cols
-(
-    DatabaseName    sysname       NOT NULL,
-    SchemaName      sysname       NOT NULL,
-    TableName       sysname       NOT NULL,
-    ColumnName      sysname       NOT NULL,
-    DataTypeName    nvarchar(128) NOT NULL,
-    NumScale        int           NULL,
-    CharLen         int           NULL,
-    IsMonetaryName  bit           NOT NULL,
-    IsCurrencyName  bit           NOT NULL,
-    HasValueControl bit           NOT NULL
+IF OBJECT_ID('tempdb..#TargetDbs') IS NOT NULL DROP TABLE #TargetDbs;
+CREATE TABLE #TargetDbs (
+    DatabaseName sysname NOT NULL PRIMARY KEY
 );
 
-IF OBJECT_ID('tempdb..#Findings') IS NOT NULL DROP TABLE #Findings;
-CREATE TABLE #Findings
-(
-    DatabaseName sysname       NOT NULL,
-    SchemaName   sysname       NOT NULL,
-    TableName    sysname       NOT NULL,
-    ColumnName   sysname       NOT NULL,
-    DataTypeName nvarchar(128) NOT NULL,
-    IssueType    varchar(40)   NOT NULL
-);
+INSERT INTO #TargetDbs (DatabaseName)
+SELECT name
+FROM sys.databases
+WHERE database_id > 4
+  AND state_desc = N'ONLINE'
+  AND HAS_DBACCESS(name) = 1
+  AND ISNULL(CONVERT(sysname, DATABASEPROPERTYEX(name, 'Updateability')), N'') IN (N'READ_WRITE', N'READ_ONLY');
 
-/* Azure SQL Database cannot enumerate sibling databases - inspect the current one only. */
-IF @IsAzureSqlDb = 1
-    INSERT INTO #DbList (DatabaseName) VALUES (DB_NAME());
-ELSE
-    INSERT INTO #DbList (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state = 0
-      AND d.source_database_id IS NULL
-      AND d.name NOT IN ('SSISDB', 'distribution', 'ReportServer', 'ReportServerTempDB')
-      AND HAS_DBACCESS(d.name) = 1;
+DECLARE @Score int;
+DECLARE @Result varchar(10);
+DECLARE @DatabaseQueried nvarchar(max);
+DECLARE @Finding nvarchar(max);
 
-DECLARE @db sysname, @sql nvarchar(max), @FailedDbs int = 0;
-
-DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT DatabaseName FROM #DbList ORDER BY DatabaseName;
-
-OPEN db_cur;
-FETCH NEXT FROM db_cur INTO @db;
-
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    BEGIN TRY
-        SET @sql = N'
-INSERT INTO #Cols (DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, NumScale, CharLen, IsMonetaryName, IsCurrencyName, HasValueControl)
-SELECT @dbn, x.SchemaName, x.TableName, x.ColumnName, x.DataTypeName, x.NumScale, x.CharLen, x.IsMonetaryName, x.IsCurrencyName, x.HasValueControl
-FROM (
-    SELECT s.name AS SchemaName,
-           t.name AS TableName,
-           c.name AS ColumnName,
-           ty.name AS DataTypeName,
-           c.scale AS NumScale,
-           CASE WHEN ty.name IN (N''nchar'', N''nvarchar'') AND c.max_length > 0
-                THEN c.max_length / 2 ELSE c.max_length END AS CharLen,
-           CASE WHEN LOWER(c.name) LIKE N''%amount%''  OR LOWER(c.name) LIKE N''%amt%''
-                  OR LOWER(c.name) LIKE N''%price%''   OR LOWER(c.name) LIKE N''%cost%''
-                  OR LOWER(c.name) LIKE N''%salary%''  OR LOWER(c.name) LIKE N''%wage%''
-                  OR LOWER(c.name) LIKE N''%balance%'' OR LOWER(c.name) LIKE N''%revenue%''
-                  OR LOWER(c.name) LIKE N''%payment%'' OR LOWER(c.name) LIKE N''%fee%''
-                  OR LOWER(c.name) LIKE N''%charge%''  OR LOWER(c.name) LIKE N''%discount%''
-                  OR LOWER(c.name) LIKE N''%total%''   OR LOWER(c.name) LIKE N''%invoice%''
-                  OR LOWER(c.name) LIKE N''%credit%''  OR LOWER(c.name) LIKE N''%debit%''
-                  OR LOWER(c.name) LIKE N''%profit%''  OR LOWER(c.name) LIKE N''%budget%''
-                THEN 1 ELSE 0 END AS IsMonetaryName,
-           CASE WHEN LOWER(c.name) LIKE N''%currency%'' OR LOWER(c.name) LIKE N''%ccy%''
-                THEN 1 ELSE 0 END AS IsCurrencyName,
-           CASE WHEN EXISTS (SELECT 1
-                             FROM ' + QUOTENAME(@db) + N'.sys.check_constraints AS cc
-                             WHERE cc.parent_object_id = c.object_id
-                               AND (cc.parent_column_id = c.column_id
-                                    OR cc.definition LIKE N''%[[]'' + c.name + N'']%''))
-                  OR EXISTS (SELECT 1
-                             FROM ' + QUOTENAME(@db) + N'.sys.foreign_key_columns AS fkc
-                             WHERE fkc.parent_object_id = c.object_id
-                               AND fkc.parent_column_id = c.column_id)
-                THEN 1 ELSE 0 END AS HasValueControl
-    FROM ' + QUOTENAME(@db) + N'.sys.columns AS c
-    INNER JOIN ' + QUOTENAME(@db) + N'.sys.tables AS t ON t.object_id = c.object_id
-    INNER JOIN ' + QUOTENAME(@db) + N'.sys.schemas AS s ON s.schema_id = t.schema_id
-    INNER JOIN ' + QUOTENAME(@db) + N'.sys.types AS ty ON ty.user_type_id = c.user_type_id
-    WHERE t.is_ms_shipped = 0
-) AS x
-WHERE x.IsMonetaryName = 1
-   OR x.IsCurrencyName = 1
-   OR x.DataTypeName IN (N''money'', N''smallmoney'');';
-
-        EXEC sys.sp_executesql @sql, N'@dbn sysname', @dbn = @db;
-
-        UPDATE #DbList SET Scanned = 1 WHERE DatabaseName = @db;
-    END TRY
-    BEGIN CATCH
-        SET @FailedDbs = @FailedDbs + 1;
-    END CATCH
-
-    FETCH NEXT FROM db_cur INTO @db;
-END
-
-CLOSE db_cur;
-DEALLOCATE db_cur;
-
-/* Classify the collected candidate columns. */
-INSERT INTO #Findings (DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, IssueType)
-SELECT DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, 'FloatMonetaryColumn'
-FROM #Cols
-WHERE IsMonetaryName = 1 AND DataTypeName IN ('float', 'real')
-UNION ALL
-SELECT DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, 'ZeroScaleDecimalMonetary'
-FROM #Cols
-WHERE IsMonetaryName = 1 AND DataTypeName IN ('decimal', 'numeric') AND NumScale = 0
-UNION ALL
-SELECT DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, 'LegacyMoneyType'
-FROM #Cols
-WHERE DataTypeName IN ('money', 'smallmoney')
-UNION ALL
-SELECT DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, 'UnconstrainedCurrencyCode'
-FROM #Cols
-WHERE IsCurrencyName = 1
-  AND DataTypeName IN ('char', 'varchar', 'nchar', 'nvarchar')
-  AND CharLen BETWEEN 1 AND 10
-  AND HasValueControl = 0
-UNION ALL
-SELECT DatabaseName, SchemaName, TableName, ColumnName, DataTypeName, 'CurrencyCodeLengthNotIso'
-FROM #Cols
-WHERE IsCurrencyName = 1
-  AND DataTypeName IN ('char', 'varchar', 'nchar', 'nvarchar')
-  AND CharLen BETWEEN 1 AND 10
-  AND CharLen <> 3;
-
-DECLARE @DbScanned     int = (SELECT COUNT(*) FROM #DbList WHERE Scanned = 1),
-        @DbTotal       int = (SELECT COUNT(*) FROM #DbList),
-        @CandidateCols int = (SELECT COUNT(*) FROM #Cols),
-        @MonetaryCols  int = (SELECT COUNT(*) FROM #Cols WHERE IsMonetaryName = 1 OR DataTypeName IN ('money', 'smallmoney')),
-        @CurrencyCols  int = (SELECT COUNT(*) FROM #Cols WHERE IsCurrencyName = 1),
-        @FloatMoney    int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = 'FloatMonetaryColumn'),
-        @ZeroScale     int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = 'ZeroScaleDecimalMonetary'),
-        @LegacyMoney   int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = 'LegacyMoneyType'),
-        @UnconCurr     int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = 'UnconstrainedCurrencyCode'),
-        @BadCurrLen    int = (SELECT COUNT(*) FROM #Findings WHERE IssueType = 'CurrencyCodeLengthNotIso');
-
-DECLARE @Critical int = @FloatMoney + @ZeroScale,
-        @CurrencyIssues int = @UnconCurr + @BadCurrLen;
-
-DECLARE @DatabaseQueried nvarchar(max) =
-    ISNULL(STUFF((SELECT N', ' + d.DatabaseName
-                  FROM #DbList AS d
-                  WHERE d.Scanned = 1
-                  ORDER BY d.DatabaseName
-                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'None');
-
-DECLARE @Examples nvarchar(max) =
-    ISNULL(STUFF((SELECT TOP (10) N'; ' + f.DatabaseName + N'.' + f.SchemaName + N'.' + f.TableName + N'.' + f.ColumnName
-                         + N' (' + f.DataTypeName + N' / ' + f.IssueType + N')'
-                  FROM #Findings AS f
-                  ORDER BY CASE f.IssueType
-                               WHEN 'FloatMonetaryColumn' THEN 1
-                               WHEN 'ZeroScaleDecimalMonetary' THEN 2
-                               WHEN 'UnconstrainedCurrencyCode' THEN 3
-                               WHEN 'CurrencyCodeLengthNotIso' THEN 4
-                               ELSE 5
-                           END,
-                           f.DatabaseName, f.SchemaName, f.TableName, f.ColumnName
-                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'none');
-
-DECLARE @Counts nvarchar(max) =
-    CONCAT(N'Databases inspected: ', @DbScanned, N' of ', @DbTotal,
-           N' (inaccessible/errored: ', @FailedDbs, N'). Candidate columns: ', @CandidateCols,
-           N' (monetary: ', @MonetaryCols, N', currency-code: ', @CurrencyCols,
-           N'). float/real monetary columns: ', @FloatMoney,
-           N'; scale-0 decimal monetary columns: ', @ZeroScale,
-           N'; legacy money/smallmoney columns: ', @LegacyMoney,
-           N'; currency-code columns with no CHECK/FK: ', @UnconCurr,
-           N'; currency-code columns not 3 characters: ', @BadCurrLen, N'.');
-
-DECLARE @Score int, @Result varchar(20), @Finding nvarchar(max);
-
-IF @DbScanned = 0
+IF NOT EXISTS (SELECT 1 FROM #TargetDbs)
 BEGIN
     SET @Score = 0;
-    SET @Finding = CONCAT(N'No user database could be inspected, so numeric precision and currency-code validity could not be evidenced. ', @Counts);
-END
-ELSE IF @CandidateCols = 0
-BEGIN
-    SET @Score = 3;
-    SET @Finding = CONCAT(N'No monetary or currency-code columns were detected in the inspected databases, so no precision-loss or invalid-currency-code exposure exists. ', @Counts);
-END
-ELSE IF @Critical = 0 AND @CurrencyIssues = 0
-BEGIN
-    SET @Score = 3;
-    SET @Finding = CONCAT(N'All monetary columns use exact numeric types with a non-zero scale and every currency-code column is 3 characters and controlled by a CHECK constraint or foreign key. ', @Counts,
-                          N' Advisory examples: ', @Examples);
-END
-ELSE IF @Critical = 0
-BEGIN
-    SET @Score = 2;
-    SET @Finding = CONCAT(N'Monetary columns use precision-safe types, but ', @CurrencyIssues,
-                          N' currency-code column(s) are unvalidated or not ISO 4217 (3 character) length. ', @Counts,
-                          N' Examples: ', @Examples);
-END
-ELSE IF @Critical <= 5
-BEGIN
-    SET @Score = 1;
-    SET @Finding = CONCAT(N'Precision defects found: ', @Critical,
-                          N' monetary column(s) use approximate float/real types or a zero-scale decimal, plus ', @CurrencyIssues,
-                          N' currency-code issue(s). ', @Counts, N' Examples: ', @Examples);
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+    SET @DatabaseQueried = N'None';
+    SET @Finding = N'No database found to be queried';
+    SELECT
+        @Result AS Result,
+        @Score AS Score,
+        @DatabaseQueried AS DatabaseQueried,
+        @Finding AS Finding;
 END
 ELSE
 BEGIN
-    SET @Score = 0;
-    SET @Finding = CONCAT(N'Widespread precision defects: ', @Critical,
-                          N' monetary column(s) use approximate float/real types or a zero-scale decimal, plus ', @CurrencyIssues,
-                          N' currency-code issue(s). ', @Counts, N' Examples: ', @Examples);
-END
+    DECLARE @sql nvarchar(max) = N'
+USE [?];
+IF DB_ID() IS NULL RETURN;
+IF DATABASEPROPERTYEX(DB_NAME(), ''Status'') <> ''ONLINE'' RETURN;
+IF DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') <> ''READ_WRITE''
+   AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') <> ''READ_ONLY'' RETURN;
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
+INSERT INTO #NumericFindings (
+    DatabaseName, SchemaName, TableName, ColumnName, TypeName,
+    PrecisionVal, ScaleVal, MaxLength, IssueCategory, IssueDetail, Severity
+)
 SELECT
-    @Result          AS Result,
-    @Score           AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding         AS Finding;
+    x.DatabaseName,
+    x.SchemaName,
+    x.TableName,
+    x.ColumnName,
+    x.TypeName,
+    x.PrecisionVal,
+    x.ScaleVal,
+    x.MaxLength,
+    x.IssueCategory,
+    x.IssueDetail,
+    x.Severity
+FROM (
+    SELECT
+        DB_NAME() AS DatabaseName,
+        s.name AS SchemaName,
+        t.name AS TableName,
+        c.name AS ColumnName,
+        ty.name AS TypeName,
+        c.precision AS PrecisionVal,
+        c.scale AS ScaleVal,
+        c.max_length AS MaxLength,
+        CASE
+            WHEN ty.name IN (N''float'', N''real'')
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%salary%'' OR c.name LIKE N''%wage%''
+                     OR c.name LIKE N''%revenue%'' OR c.name LIKE N''%income%'' OR c.name LIKE N''%expense%''
+                     OR c.name LIKE N''%currency%amt%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%debit%''
+                     OR c.name LIKE N''%credit%'' OR c.name LIKE N''%invoice%'' OR c.name LIKE N''%total%''
+                     OR c.name LIKE N''%rate%'' OR c.name LIKE N''%pct%'' OR c.name LIKE N''%percent%''
+                     OR c.name LIKE N''%discount%'' OR c.name LIKE N''%interest%'' OR c.name LIKE N''%principal%''
+                 )
+                THEN N''FloatRealFinancial''
+            WHEN ty.name IN (N''money'', N''smallmoney'')
+                THEN N''MoneyType''
+            WHEN ty.name IN (N''decimal'', N''numeric'') AND c.scale = 0
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%total%''
+                 )
+                THEN N''DecimalZeroScaleFinancial''
+            WHEN (
+                     c.name LIKE N''%currency%code%'' OR c.name LIKE N''%curr%code%''
+                     OR c.name = N''Currency'' OR c.name = N''CurrencyCode'' OR c.name = N''CurrCode''
+                     OR c.name = N''ISOCurrency'' OR c.name LIKE N''%_ccy'' OR c.name LIKE N''%CcyCode%''
+                 )
+                 AND ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'')
+                 AND (
+                     (ty.name IN (N''char'', N''nchar'') AND c.max_length NOT IN (3, 6))
+                     OR (ty.name = N''varchar'' AND c.max_length <> -1 AND (c.max_length < 3 OR c.max_length > 3))
+                     OR (ty.name = N''nvarchar'' AND c.max_length <> -1 AND (c.max_length < 6 OR c.max_length > 6))
+                 )
+                THEN N''CurrencyCodeDefinition''
+            ELSE NULL
+        END AS IssueCategory,
+        CASE
+            WHEN ty.name IN (N''float'', N''real'')
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%salary%'' OR c.name LIKE N''%wage%''
+                     OR c.name LIKE N''%revenue%'' OR c.name LIKE N''%income%'' OR c.name LIKE N''%expense%''
+                     OR c.name LIKE N''%currency%amt%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%debit%''
+                     OR c.name LIKE N''%credit%'' OR c.name LIKE N''%invoice%'' OR c.name LIKE N''%total%''
+                     OR c.name LIKE N''%rate%'' OR c.name LIKE N''%pct%'' OR c.name LIKE N''%percent%''
+                     OR c.name LIKE N''%discount%'' OR c.name LIKE N''%interest%'' OR c.name LIKE N''%principal%''
+                 )
+                THEN N''Approximate type '' + ty.name + N'' used for financial-like column; binary floating point can introduce rounding errors.''
+            WHEN ty.name IN (N''money'', N''smallmoney'')
+                THEN N''Type '' + ty.name + N'' is fixed-scale legacy money; prefer decimal/numeric with explicit precision/scale for financial amounts.''
+            WHEN ty.name IN (N''decimal'', N''numeric'') AND c.scale = 0
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%total%''
+                 )
+                THEN N''Financial-like decimal/numeric has scale 0 (no fractional precision); may cause rounding/truncation of currency amounts.''
+            WHEN (
+                     c.name LIKE N''%currency%code%'' OR c.name LIKE N''%curr%code%''
+                     OR c.name = N''Currency'' OR c.name = N''CurrencyCode'' OR c.name = N''CurrCode''
+                     OR c.name = N''ISOCurrency'' OR c.name LIKE N''%_ccy'' OR c.name LIKE N''%CcyCode%''
+                 )
+                 AND ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'')
+                THEN N''Currency-code column definition may not match ISO 4217 (expected 3 characters); type=''
+                     + ty.name + N'', max_length='' + CONVERT(varchar(11), c.max_length) + N''.''
+            ELSE NULL
+        END AS IssueDetail,
+        CASE
+            WHEN ty.name IN (N''float'', N''real'')
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%salary%'' OR c.name LIKE N''%wage%''
+                     OR c.name LIKE N''%revenue%'' OR c.name LIKE N''%income%'' OR c.name LIKE N''%expense%''
+                     OR c.name LIKE N''%currency%amt%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%debit%''
+                     OR c.name LIKE N''%credit%'' OR c.name LIKE N''%invoice%'' OR c.name LIKE N''%total%''
+                     OR c.name LIKE N''%rate%'' OR c.name LIKE N''%pct%'' OR c.name LIKE N''%percent%''
+                     OR c.name LIKE N''%discount%'' OR c.name LIKE N''%interest%'' OR c.name LIKE N''%principal%''
+                 )
+                THEN CONVERT(tinyint, 1)
+            WHEN (
+                     c.name LIKE N''%currency%code%'' OR c.name LIKE N''%curr%code%''
+                     OR c.name = N''Currency'' OR c.name = N''CurrencyCode'' OR c.name = N''CurrCode''
+                     OR c.name = N''ISOCurrency'' OR c.name LIKE N''%_ccy'' OR c.name LIKE N''%CcyCode%''
+                 )
+                 AND ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'')
+                 AND (
+                     (ty.name IN (N''char'', N''nchar'') AND c.max_length NOT IN (3, 6))
+                     OR (ty.name = N''varchar'' AND c.max_length <> -1 AND (c.max_length < 3 OR c.max_length > 3))
+                     OR (ty.name = N''nvarchar'' AND c.max_length <> -1 AND (c.max_length < 6 OR c.max_length > 6))
+                 )
+                THEN CONVERT(tinyint, 1)
+            WHEN ty.name IN (N''money'', N''smallmoney'')
+                THEN CONVERT(tinyint, 2)
+            WHEN ty.name IN (N''decimal'', N''numeric'') AND c.scale = 0
+                 AND (
+                     c.name LIKE N''%amount%'' OR c.name LIKE N''%price%'' OR c.name LIKE N''%cost%''
+                     OR c.name LIKE N''%fee%'' OR c.name LIKE N''%tax%'' OR c.name LIKE N''%balance%''
+                     OR c.name LIKE N''%payment%'' OR c.name LIKE N''%money%'' OR c.name LIKE N''%total%''
+                 )
+                THEN CONVERT(tinyint, 2)
+            ELSE NULL
+        END AS Severity
+    FROM sys.tables t
+    INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+    INNER JOIN sys.columns c ON c.object_id = t.object_id
+    INNER JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+    WHERE t.is_ms_shipped = 0
+      AND OBJECTPROPERTY(t.object_id, ''IsMSShipped'') = 0
+) AS x
+WHERE x.IssueCategory IS NOT NULL
+  AND x.IssueDetail IS NOT NULL
+  AND x.Severity IS NOT NULL;
+';
 
-IF OBJECT_ID('tempdb..#Findings') IS NOT NULL DROP TABLE #Findings;
-IF OBJECT_ID('tempdb..#Cols') IS NOT NULL DROP TABLE #Cols;
-IF OBJECT_ID('tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
+    DECLARE @db sysname;
+    DECLARE @stmt nvarchar(max);
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT DatabaseName FROM #TargetDbs ORDER BY DatabaseName;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @db;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @stmt = REPLACE(@sql, N'?', REPLACE(@db, N']', N']]'));
+        BEGIN TRY
+            EXEC sys.sp_executesql @stmt;
+        END TRY
+        BEGIN CATCH
+            -- Skip databases that cannot be queried
+        END CATCH
+        FETCH NEXT FROM db_cursor INTO @db;
+    END
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    DECLARE @high int = (SELECT COUNT(*) FROM #NumericFindings WHERE Severity = 1);
+    DECLARE @med int = (SELECT COUNT(*) FROM #NumericFindings WHERE Severity = 2);
+    DECLARE @total int = (SELECT COUNT(*) FROM #NumericFindings);
+
+    SELECT @DatabaseQueried = STUFF((
+        SELECT N', ' + DatabaseName
+        FROM #TargetDbs
+        ORDER BY DatabaseName
+        FOR XML PATH(N''), TYPE
+    ).value(N'.', N'nvarchar(max)'), 1, 2, N'');
+
+    DECLARE @sample nvarchar(max);
+    SELECT @sample = STUFF((
+        SELECT TOP 15
+            N'; ' + DatabaseName + N'.' + SchemaName + N'.' + TableName + N'.' + ColumnName
+            + N' [' + IssueCategory + N': ' + TypeName + N']'
+        FROM #NumericFindings
+        ORDER BY Severity ASC, DatabaseName, SchemaName, TableName, ColumnName
+        FOR XML PATH(N''), TYPE
+    ).value(N'.', N'nvarchar(max)'), 1, 2, N'');
+
+    IF @high = 0 AND @med = 0
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = N'No numeric/financial precision or currency-code definition issues detected across accessible user databases. Catalog scan found no float/real financial-like columns, no zero-scale financial decimals of concern, and no currency-code column length mismatches.';
+    END
+    ELSE IF @high = 0 AND @med > 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = N'Found ' + CONVERT(varchar(11), @med)
+            + N' medium-severity numeric/financial definition issue(s) (money/smallmoney and/or scale-0 financial decimals) and 0 high-severity float/real or currency-code issues. Sample: '
+            + ISNULL(@sample, N'n/a');
+    END
+    ELSE
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = N'Found ' + CONVERT(varchar(11), @high)
+            + N' high-severity issue(s) (float/real on financial-like columns and/or invalid currency-code definitions) and '
+            + CONVERT(varchar(11), @med) + N' medium-severity issue(s). Total findings: '
+            + CONVERT(varchar(11), @total) + N'. Sample: ' + ISNULL(@sample, N'n/a');
+    END
+
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
+    IF LEN(@Finding) > 3500
+        SET @Finding = LEFT(@Finding, 3497) + N'...';
+
+    SELECT
+        @Result AS Result,
+        @Score AS Score,
+        @DatabaseQueried AS DatabaseQueried,
+        @Finding AS Finding;
+END
+
+DROP TABLE #NumericFindings;
+DROP TABLE #TargetDbs;

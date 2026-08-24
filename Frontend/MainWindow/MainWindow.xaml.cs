@@ -50,6 +50,8 @@ namespace SQLAuditor.Wpf
         private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
         private bool _checklistLoaded = false;
+        // guards two-way sync between the "Select All" checkbox and the individual checklist checkboxes
+        private bool _suppressSelectAllSync = false;
         // keep area association for items so UI can render Area -> Category -> Item
         private System.Collections.Generic.List<(string Area, SQLAuditor.Lib.ChecklistItem Item)>? _loadedStructure;
         private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
@@ -1671,6 +1673,83 @@ namespace SQLAuditor.Wpf
             }
         }
 
+        private void SelectAllChecklistCb_Checked(object sender, RoutedEventArgs e) => SetAllChecklistChecked(true);
+
+        private void SelectAllChecklistCb_Unchecked(object sender, RoutedEventArgs e) => SetAllChecklistChecked(false);
+
+        private void SetAllChecklistChecked(bool isChecked)
+        {
+            if (_suppressSelectAllSync) return;
+            _suppressSelectAllSync = true;
+            try
+            {
+                foreach (var areaObj in ChecklistTree.Items)
+                {
+                    if (areaObj is System.Windows.Controls.TreeViewItem areaNode)
+                    {
+                        if (areaNode.Header is System.Windows.Controls.StackPanel areaPanel)
+                        {
+                            foreach (var child in areaPanel.Children)
+                            {
+                                if (child is System.Windows.Controls.CheckBox areaCb) areaCb.IsChecked = isChecked;
+                            }
+                        }
+                        SetChildrenChecked(areaNode, isChecked);
+                    }
+                }
+            }
+            finally
+            {
+                _suppressSelectAllSync = false;
+            }
+        }
+
+        private void ItemCb_SelectionChanged(object? sender, RoutedEventArgs e)
+        {
+            if (_suppressSelectAllSync) return;
+            SyncSelectAllState();
+        }
+
+        private void SyncSelectAllState()
+        {
+            var total = 0;
+            var selected = 0;
+            foreach (var cb in EnumerateChecklistItemCheckBoxes())
+            {
+                total++;
+                if (cb.IsChecked == true) selected++;
+            }
+
+            _suppressSelectAllSync = true;
+            try
+            {
+                SelectAllChecklistCb.IsChecked = total > 0 && selected == total;
+            }
+            finally
+            {
+                _suppressSelectAllSync = false;
+            }
+        }
+
+        private System.Collections.Generic.IEnumerable<System.Windows.Controls.CheckBox> EnumerateChecklistItemCheckBoxes()
+        {
+            foreach (var areaObj in ChecklistTree.Items)
+            {
+                if (areaObj is not System.Windows.Controls.TreeViewItem areaNode) continue;
+                foreach (var catObj in areaNode.Items)
+                {
+                    if (catObj is not System.Windows.Controls.TreeViewItem catNode) continue;
+                    foreach (var itemObj in catNode.Items)
+                    {
+                        if (itemObj is System.Windows.Controls.TreeViewItem itemTvi && itemTvi.Header is System.Windows.Controls.CheckBox cb)
+                        {
+                            yield return cb;
+                        }
+                    }
+                }
+            }
+        }
+
         private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
         {
             GenerateScriptsBtn.IsEnabled = false;
@@ -1921,6 +2000,8 @@ namespace SQLAuditor.Wpf
                             {
                                 var item = pair.Item;
                                 var cb = new System.Windows.Controls.CheckBox() { Content = item.Id + " " + item.Description, Tag = item };
+                                cb.Checked += ItemCb_SelectionChanged;
+                                cb.Unchecked += ItemCb_SelectionChanged;
                                 var node = new System.Windows.Controls.TreeViewItem() { Header = cb };
                                 catNode.Items.Add(node);
                             }
@@ -1928,6 +2009,8 @@ namespace SQLAuditor.Wpf
                         }
                         ChecklistTree.Items.Add(areaHeader);
                     }
+
+                    SyncSelectAllState();
                 });
             }
             catch (Exception ex)
