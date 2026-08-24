@@ -1,315 +1,470 @@
-/* =====================================================================
-   Checklist Item : 5.4.7 - Boolean / Flag: only expected values;
-                    consistent representation across tables
-   Scope          : DATABASE (iterates every qualifying user database)
-   Type           : READ-ONLY assessment (catalog reads + SELECT probes)
-   Output         : Result, Score, DatabaseQueried, Finding
-   ===================================================================== */
 SET NOCOUNT ON;
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-DECLARE @DatabaseQueried nvarchar(4000) = N'None';
-DECLARE @Result          nvarchar(20);
-DECLARE @Score           int            = 0;
-DECLARE @Finding         nvarchar(4000) = N'No database found to be queried';
-DECLARE @IsAzureDb       bit = CASE WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
+DECLARE @Result varchar(10) = 'Fail';
+DECLARE @Score int = 0;
+DECLARE @DatabaseQueried nvarchar(max) = N'None';
+DECLARE @Finding nvarchar(max) = N'No database found to be queried';
 
-BEGIN TRY
+IF OBJECT_ID('tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
+IF OBJECT_ID('tempdb..#FlagCols') IS NOT NULL DROP TABLE #FlagCols;
+IF OBJECT_ID('tempdb..#DbSummary') IS NOT NULL DROP TABLE #DbSummary;
+IF OBJECT_ID('tempdb..#BadValues') IS NOT NULL DROP TABLE #BadValues;
 
-    IF OBJECT_ID('tempdb..#Dbs')         IS NOT NULL DROP TABLE #Dbs;
-    IF OBJECT_ID('tempdb..#FlagColumns') IS NOT NULL DROP TABLE #FlagColumns;
+CREATE TABLE #DbList
+(
+    DatabaseName sysname NOT NULL PRIMARY KEY
+);
 
-    CREATE TABLE #Dbs (DbName sysname NOT NULL PRIMARY KEY);
+CREATE TABLE #FlagCols
+(
+    DatabaseName sysname NOT NULL,
+    SchemaName sysname NOT NULL,
+    TableName sysname NOT NULL,
+    ColumnName sysname NOT NULL,
+    TypeName sysname NOT NULL,
+    MaxLength int NULL,
+    IsBit bit NOT NULL,
+    Representation nvarchar(40) NOT NULL,
+    DistinctValueCount int NULL,
+    SampleValues nvarchar(400) NULL,
+    HasInvalidValue bit NOT NULL DEFAULT(0)
+);
 
-    CREATE TABLE #FlagColumns
-    (
-        DbName         sysname       NOT NULL,
-        SchemaName     sysname       NOT NULL,
-        TableName      sysname       NOT NULL,
-        ColumnName     sysname       NOT NULL,
-        TypeName       sysname       NOT NULL,
-        Category       varchar(10)   NOT NULL,
-        BadValueCount  int           NULL,
-        SampleBadValue nvarchar(100) NULL,
-        CheckFailed    bit           NOT NULL DEFAULT (0)
-    );
+CREATE TABLE #DbSummary
+(
+    DatabaseName sysname NOT NULL PRIMARY KEY,
+    FlagColCount int NOT NULL,
+    BitColCount int NOT NULL,
+    NonBitFlagCount int NOT NULL,
+    InvalidValueCount int NOT NULL,
+    RepresentationStyles int NOT NULL
+);
 
-    /* ---- 1. Enumerate qualifying user databases ---------------------- */
-    IF @IsAzureDb = 1
+CREATE TABLE #BadValues
+(
+    DatabaseName sysname NOT NULL,
+    SchemaName sysname NOT NULL,
+    TableName sysname NOT NULL,
+    ColumnName sysname NOT NULL,
+    BadSample nvarchar(400) NULL
+);
+
+DECLARE @IsAzure bit = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS int) = 5 THEN 1 ELSE 0 END;
+
+IF @IsAzure = 1
+BEGIN
+    INSERT INTO #DbList (DatabaseName) VALUES (DB_NAME());
+END
+ELSE
+BEGIN
+    INSERT INTO #DbList (DatabaseName)
+    SELECT d.name
+    FROM sys.databases d
+    WHERE d.state = 0
+      AND d.name NOT IN (N'master', N'tempdb', N'model', N'msdb')
+      AND HAS_DBACCESS(d.name) = 1;
+END;
+
+DECLARE @Sql nvarchar(max);
+DECLARE @Db sysname;
+DECLARE @Schema sysname;
+DECLARE @Table sysname;
+DECLARE @Column sysname;
+DECLARE @TypeName sysname;
+DECLARE @MaxLength int;
+DECLARE @cnt int;
+DECLARE @samples nvarchar(400);
+DECLARE @invalid bit;
+DECLARE @tok nvarchar(400);
+
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT DatabaseName FROM #DbList ORDER BY DatabaseName;
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @Db;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    IF @IsAzure = 1
     BEGIN
-        INSERT INTO #Dbs (DbName)
-        SELECT DB_NAME()
-        WHERE DB_NAME() NOT IN ('master','tempdb','model','msdb');
+        SET @Sql = N'
+INSERT INTO #FlagCols
+(
+    DatabaseName, SchemaName, TableName, ColumnName, TypeName, MaxLength, IsBit, Representation
+)
+SELECT
+    DB_NAME(),
+    s.name,
+    t.name,
+    c.name,
+    ty.name,
+    c.max_length,
+    CASE WHEN ty.name = N''bit'' THEN 1 ELSE 0 END,
+    CASE
+        WHEN ty.name = N''bit'' THEN N''bit''
+        WHEN ty.name IN (N''tinyint'', N''smallint'', N''int'', N''bigint'') THEN N''integer_0_1''
+        WHEN ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'') AND c.max_length IN (1, 2)
+            THEN N''char_YN''
+        WHEN ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'')
+            THEN N''string_truefalse''
+        ELSE N''other''
+    END
+FROM sys.tables t
+INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+INNER JOIN sys.columns c ON c.object_id = t.object_id
+INNER JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+WHERE t.is_ms_shipped = 0
+  AND
+  (
+        ty.name = N''bit''
+     OR c.name LIKE N''Is%''
+     OR c.name LIKE N''Has%''
+     OR c.name LIKE N''Can%''
+     OR c.name LIKE N''Allow%''
+     OR c.name LIKE N''Enable%''
+     OR c.name LIKE N''Enabled%''
+     OR c.name LIKE N''Active%''
+     OR c.name LIKE N''Flag%''
+     OR c.name LIKE N''%Flag''
+     OR c.name LIKE N''%Ind''
+     OR c.name LIKE N''%_Flg''
+     OR c.name LIKE N''%_Flag''
+     OR c.name LIKE N''Yn%''
+     OR c.name LIKE N''%_YN''
+     OR c.name LIKE N''%Yn''
+  );';
     END
     ELSE
     BEGIN
-        INSERT INTO #Dbs (DbName)
-        SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.name NOT IN ('master','model','msdb','tempdb')
-          AND d.state_desc = 'ONLINE'
-          AND d.is_in_standby = 0
-          AND d.source_database_id IS NULL
-          AND HAS_DBACCESS(d.name) = 1;
+        SET @Sql = N'
+INSERT INTO #FlagCols
+(
+    DatabaseName, SchemaName, TableName, ColumnName, TypeName, MaxLength, IsBit, Representation
+)
+SELECT
+    @DbName,
+    s.name,
+    t.name,
+    c.name,
+    ty.name,
+    c.max_length,
+    CASE WHEN ty.name = N''bit'' THEN 1 ELSE 0 END,
+    CASE
+        WHEN ty.name = N''bit'' THEN N''bit''
+        WHEN ty.name IN (N''tinyint'', N''smallint'', N''int'', N''bigint'') THEN N''integer_0_1''
+        WHEN ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'') AND c.max_length IN (1, 2)
+            THEN N''char_YN''
+        WHEN ty.name IN (N''char'', N''nchar'', N''varchar'', N''nvarchar'')
+            THEN N''string_truefalse''
+        ELSE N''other''
     END
+FROM ' + QUOTENAME(@Db) + N'.sys.tables t
+INNER JOIN ' + QUOTENAME(@Db) + N'.sys.schemas s ON s.schema_id = t.schema_id
+INNER JOIN ' + QUOTENAME(@Db) + N'.sys.columns c ON c.object_id = t.object_id
+INNER JOIN ' + QUOTENAME(@Db) + N'.sys.types ty ON ty.user_type_id = c.user_type_id
+WHERE t.is_ms_shipped = 0
+  AND
+  (
+        ty.name = N''bit''
+     OR c.name LIKE N''Is%''
+     OR c.name LIKE N''Has%''
+     OR c.name LIKE N''Can%''
+     OR c.name LIKE N''Allow%''
+     OR c.name LIKE N''Enable%''
+     OR c.name LIKE N''Enabled%''
+     OR c.name LIKE N''Active%''
+     OR c.name LIKE N''Flag%''
+     OR c.name LIKE N''%Flag''
+     OR c.name LIKE N''%Ind''
+     OR c.name LIKE N''%_Flg''
+     OR c.name LIKE N''%_Flag''
+     OR c.name LIKE N''Yn%''
+     OR c.name LIKE N''%_YN''
+     OR c.name LIKE N''%Yn''
+  );';
+    END;
 
-    IF NOT EXISTS (SELECT 1 FROM #Dbs)
-    BEGIN
-        SET @DatabaseQueried = N'None';
-        SET @Finding         = N'No database found to be queried';
-        SET @Score           = 0;
-    END
-    ELSE
-    BEGIN
-
-        DECLARE @DbList nvarchar(3000) = N'';
-        SELECT @DbList = @DbList + N', ' + DbName FROM #Dbs ORDER BY DbName;
-        SET @DatabaseQueried = CASE WHEN LEN(@DbList) > 2 THEN LEFT(STUFF(@DbList, 1, 2, N''), 3900) ELSE N'None' END;
-
-        DECLARE @db sysname, @pfx nvarchar(300), @sql nvarchar(max);
-        DECLARE @DbFailed int = 0;
-
-        /* ---- 2. Collect flag-like columns from each database --------- */
-        DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-            SELECT DbName FROM #Dbs ORDER BY DbName;
-
-        OPEN db_cur;
-        FETCH NEXT FROM db_cur INTO @db;
-
-        WHILE @@FETCH_STATUS = 0
-        BEGIN
-            SET @pfx = CASE WHEN @IsAzureDb = 1 THEN N'' ELSE QUOTENAME(@db) + N'.' END;
-
-            BEGIN TRY
-                SET @sql =
-                    N'INSERT INTO #FlagColumns (DbName, SchemaName, TableName, ColumnName, TypeName, Category) ' +
-                    N'SELECT @db_in, s.name, t.name, c.name, ty.name, ' +
-                    N'       CASE WHEN ty.name = ''bit'' THEN ''BIT'' ' +
-                    N'            WHEN ty.name IN (''char'',''nchar'',''varchar'',''nvarchar'') THEN ''CHAR'' ' +
-                    N'            ELSE ''NUMERIC'' END ' +
-                    N'FROM ' + @pfx + N'sys.columns  AS c ' +
-                    N'INNER JOIN ' + @pfx + N'sys.tables  AS t  ON t.object_id     = c.object_id ' +
-                    N'INNER JOIN ' + @pfx + N'sys.schemas AS s  ON s.schema_id     = t.schema_id ' +
-                    N'INNER JOIN ' + @pfx + N'sys.types   AS ty ON ty.user_type_id = c.user_type_id ' +
-                    N'WHERE t.is_ms_shipped = 0 ' +
-                    N'  AND t.type = ''U'' ' +
-                    N'  AND s.name NOT IN (''sys'',''INFORMATION_SCHEMA'') ' +
-                    N'  AND c.is_computed = 0 ' +
-                    N'  AND ( ty.name = ''bit'' ' +
-                    N'        OR ( ( (ty.name IN (''char'',''varchar'')   AND c.max_length BETWEEN 1 AND 5) ' +
-                    N'              OR (ty.name IN (''nchar'',''nvarchar'') AND c.max_length BETWEEN 1 AND 10) ' +
-                    N'              OR (ty.name IN (''tinyint'',''smallint'',''int'')) ) ' +
-                    N'             AND ( c.name LIKE ''Is%'' OR c.name LIKE ''Has%'' OR c.name LIKE ''Can%'' ' +
-                    N'                OR c.name LIKE ''%Flag'' OR c.name LIKE ''%Flg'' ' +
-                    N'                OR c.name LIKE ''%Enabled'' OR c.name LIKE ''%Active'' ' +
-                    N'                OR c.name LIKE ''%Deleted'' OR c.name LIKE ''%Indicator'' ' +
-                    N'                OR c.name LIKE ''%[_]YN'' OR c.name LIKE ''%[_]IND'' ) ) );';
-
-                EXEC sp_executesql @sql, N'@db_in sysname', @db_in = @db;
-            END TRY
-            BEGIN CATCH
-                SET @DbFailed = @DbFailed + 1;
-            END CATCH
-
-            FETCH NEXT FROM db_cur INTO @db;
-        END
-
-        CLOSE db_cur;
-        DEALLOCATE db_cur;
-
-        /* ---- 3. Probe non-bit flag columns for unexpected values ----- */
-        DECLARE @sch sysname, @tab sysname, @col sysname, @cat varchar(10);
-        DECLARE @expected nvarchar(400), @objRef nvarchar(800);
-        DECLARE @cnt int, @sample nvarchar(100);
-
-        DECLARE flag_cur CURSOR LOCAL FAST_FORWARD FOR
-            SELECT DbName, SchemaName, TableName, ColumnName, Category
-            FROM #FlagColumns
-            WHERE Category <> 'BIT';
-
-        OPEN flag_cur;
-        FETCH NEXT FROM flag_cur INTO @db, @sch, @tab, @col, @cat;
-
-        WHILE @@FETCH_STATUS = 0
-        BEGIN
-            SET @pfx      = CASE WHEN @IsAzureDb = 1 THEN N'' ELSE QUOTENAME(@db) + N'.' END;
-            SET @objRef   = @pfx + QUOTENAME(@sch) + N'.' + QUOTENAME(@tab);
-            SET @expected = CASE WHEN @cat = 'CHAR'
-                                 THEN N'''0'',''1'',''Y'',''N'',''T'',''F'',''YES'',''NO'',''TRUE'',''FALSE'''
-                                 ELSE N'''0'',''1'''
-                            END;
-            SET @cnt    = NULL;
-            SET @sample = NULL;
-
-            BEGIN TRY
-                SET @sql =
-                    N'SELECT @cnt_out = COUNT(*), @sample_out = MIN(x.v) FROM (' +
-                    N'SELECT DISTINCT TOP (25) CONVERT(nvarchar(100), ' + QUOTENAME(@col) + N') AS v ' +
-                    N'FROM ' + @objRef + N' ' +
-                    N'WHERE ' + QUOTENAME(@col) + N' IS NOT NULL ' +
-                    N'AND UPPER(LTRIM(RTRIM(CONVERT(nvarchar(100), ' + QUOTENAME(@col) + N')))) NOT IN (' + @expected + N')' +
-                    N') AS x;';
-
-                EXEC sp_executesql
-                     @sql,
-                     N'@cnt_out int OUTPUT, @sample_out nvarchar(100) OUTPUT',
-                     @cnt_out = @cnt OUTPUT, @sample_out = @sample OUTPUT;
-
-                UPDATE #FlagColumns
-                   SET BadValueCount  = ISNULL(@cnt, 0),
-                       SampleBadValue = @sample
-                 WHERE DbName = @db AND SchemaName = @sch AND TableName = @tab AND ColumnName = @col;
-            END TRY
-            BEGIN CATCH
-                UPDATE #FlagColumns
-                   SET CheckFailed = 1
-                 WHERE DbName = @db AND SchemaName = @sch AND TableName = @tab AND ColumnName = @col;
-            END CATCH
-
-            FETCH NEXT FROM flag_cur INTO @db, @sch, @tab, @col, @cat;
-        END
-
-        CLOSE flag_cur;
-        DEALLOCATE flag_cur;
-
-        /* ---- 4. Aggregate -------------------------------------------- */
-        DECLARE @DbCount int = 0, @Total int = 0, @BitCols int = 0, @CharCols int = 0,
-                @NumCols int = 0, @BadCols int = 0, @Unchecked int = 0, @MixedDbs int = 0;
-
-        SELECT @DbCount = COUNT(*) FROM #Dbs;
-
-        SELECT @Total     = COUNT(*),
-               @BitCols   = SUM(CASE WHEN Category = 'BIT'     THEN 1 ELSE 0 END),
-               @CharCols  = SUM(CASE WHEN Category = 'CHAR'    THEN 1 ELSE 0 END),
-               @NumCols   = SUM(CASE WHEN Category = 'NUMERIC' THEN 1 ELSE 0 END),
-               @BadCols   = SUM(CASE WHEN ISNULL(BadValueCount, 0) > 0 THEN 1 ELSE 0 END),
-               @Unchecked = SUM(CASE WHEN CheckFailed = 1 THEN 1 ELSE 0 END)
-        FROM #FlagColumns;
-
-        SET @Total     = ISNULL(@Total, 0);
-        SET @BitCols   = ISNULL(@BitCols, 0);
-        SET @CharCols  = ISNULL(@CharCols, 0);
-        SET @NumCols   = ISNULL(@NumCols, 0);
-        SET @BadCols   = ISNULL(@BadCols, 0);
-        SET @Unchecked = ISNULL(@Unchecked, 0);
-
-        SELECT @MixedDbs = COUNT(*)
-        FROM (
-            SELECT DbName
-            FROM #FlagColumns
-            GROUP BY DbName
-            HAVING COUNT(DISTINCT Category) > 1
-        ) AS m;
-
-        SET @MixedDbs = ISNULL(@MixedDbs, 0);
-
-        DECLARE @MixedList nvarchar(800) = N'';
-        SELECT TOP (5) @MixedList = @MixedList + DbName + N', '
-        FROM (
-            SELECT DbName
-            FROM #FlagColumns
-            GROUP BY DbName
-            HAVING COUNT(DISTINCT Category) > 1
-        ) AS m2
-        ORDER BY DbName;
-
-        DECLARE @BadList nvarchar(1500) = N'';
-        SELECT TOP (5)
-               @BadList = @BadList + DbName + N'.' + SchemaName + N'.' + TableName + N'.' + ColumnName
-                        + N' [' + TypeName + N', e.g. "' + ISNULL(SampleBadValue, N'') + N'"]; '
-        FROM #FlagColumns
-        WHERE ISNULL(BadValueCount, 0) > 0
-        ORDER BY DbName, SchemaName, TableName, ColumnName;
-
-        DECLARE @Mix nvarchar(200) =
-                N'BIT=' + CAST(@BitCols AS nvarchar(10)) +
-                N', CHAR=' + CAST(@CharCols AS nvarchar(10)) +
-                N', NUMERIC=' + CAST(@NumCols AS nvarchar(10));
-
-        /* ---- 5. Score ------------------------------------------------ */
-        IF @Total = 0
-        BEGIN
-            SET @Score   = 3;
-            SET @Finding = N'No boolean/flag columns were identified across the ' + CAST(@DbCount AS nvarchar(10)) +
-                           N' user database(s) scanned (no bit columns and no short char/integer columns matching flag naming patterns), so there is no inconsistent representation or unexpected flag value to report.';
-        END
-        ELSE IF @BadCols = 0 AND @MixedDbs = 0
-        BEGIN
-            SET @Score   = 3;
-            SET @Finding = N'All ' + CAST(@Total AS nvarchar(10)) + N' boolean/flag columns across ' + CAST(@DbCount AS nvarchar(10)) +
-                           N' user database(s) use a single consistent representation per database (' + @Mix +
-                           N') and no column stores a value outside the accepted boolean set.';
-        END
-        ELSE IF @BadCols = 0 AND @MixedDbs > 0
-        BEGIN
-            SET @Score   = 2;
-            SET @Finding = N'Stored values are all valid, but ' + CAST(@MixedDbs AS nvarchar(10)) +
-                           N' of ' + CAST(@DbCount AS nvarchar(10)) + N' database(s) model boolean/flag columns with more than one representation. Overall mix across ' +
-                           CAST(@Total AS nvarchar(10)) + N' flag columns: ' + @Mix + N'. Affected database(s): ' +
-                           CASE WHEN @MixedList = N'' THEN N'(none captured)' ELSE @MixedList END;
-        END
-        ELSE IF @BadCols * 10 <= @Total
-        BEGIN
-            SET @Score   = 1;
-            SET @Finding = CAST(@BadCols AS nvarchar(10)) + N' of ' + CAST(@Total AS nvarchar(10)) +
-                           N' boolean/flag columns store values outside the accepted boolean set. Representation mix: ' + @Mix +
-                           N'. Databases mixing representations: ' + CAST(@MixedDbs AS nvarchar(10)) +
-                           N'. Examples: ' + CASE WHEN @BadList = N'' THEN N'(none captured)' ELSE @BadList END;
-        END
+    BEGIN TRY
+        IF @IsAzure = 1
+            EXEC sys.sp_executesql @Sql;
         ELSE
+            EXEC sys.sp_executesql @Sql, N'@DbName sysname', @DbName = @Db;
+    END TRY
+    BEGIN CATCH
+        -- Skip databases that cannot be fully read
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @Db;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+DECLARE col_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT DatabaseName, SchemaName, TableName, ColumnName, TypeName, MaxLength
+    FROM #FlagCols
+    WHERE IsBit = 0
+    ORDER BY DatabaseName, SchemaName, TableName, ColumnName;
+
+OPEN col_cursor;
+FETCH NEXT FROM col_cursor INTO @Db, @Schema, @Table, @Column, @TypeName, @MaxLength;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @cnt = NULL;
+    SET @samples = NULL;
+    SET @invalid = 0;
+
+    IF @IsAzure = 1
+    BEGIN
+        SET @Sql = N'
+SELECT
+    @cntOut = COUNT(*),
+    @samplesOut = STUFF((
+        SELECT TOP (8) N'','' + REPLACE(REPLACE(CONVERT(nvarchar(40), v.val), N'','', N'';''), N''|'', N''/'')
+        FROM (
+            SELECT DISTINCT TOP (8) CONVERT(nvarchar(40), ' + QUOTENAME(@Column) + N') AS val
+            FROM ' + QUOTENAME(@Schema) + N'.' + QUOTENAME(@Table) + N'
+            WHERE ' + QUOTENAME(@Column) + N' IS NOT NULL
+        ) v
+        FOR XML PATH(N''''), TYPE
+    ).value(N''text()[1]'', N''nvarchar(400)''), 1, 1, N'''')
+FROM (
+    SELECT DISTINCT TOP (50) CONVERT(nvarchar(40), ' + QUOTENAME(@Column) + N') AS val
+    FROM ' + QUOTENAME(@Schema) + N'.' + QUOTENAME(@Table) + N'
+    WHERE ' + QUOTENAME(@Column) + N' IS NOT NULL
+) d;
+';
+    END
+    ELSE
+    BEGIN
+        SET @Sql = N'
+SELECT
+    @cntOut = COUNT(*),
+    @samplesOut = STUFF((
+        SELECT TOP (8) N'','' + REPLACE(REPLACE(CONVERT(nvarchar(40), v.val), N'','', N'';''), N''|'', N''/'')
+        FROM (
+            SELECT DISTINCT TOP (8) CONVERT(nvarchar(40), ' + QUOTENAME(@Column) + N') AS val
+            FROM ' + QUOTENAME(@Db) + N'.' + QUOTENAME(@Schema) + N'.' + QUOTENAME(@Table) + N'
+            WHERE ' + QUOTENAME(@Column) + N' IS NOT NULL
+        ) v
+        FOR XML PATH(N''''), TYPE
+    ).value(N''text()[1]'', N''nvarchar(400)''), 1, 1, N'''')
+FROM (
+    SELECT DISTINCT TOP (50) CONVERT(nvarchar(40), ' + QUOTENAME(@Column) + N') AS val
+    FROM ' + QUOTENAME(@Db) + N'.' + QUOTENAME(@Schema) + N'.' + QUOTENAME(@Table) + N'
+    WHERE ' + QUOTENAME(@Column) + N' IS NOT NULL
+) d;
+';
+    END;
+
+    BEGIN TRY
+        EXEC sys.sp_executesql
+            @Sql,
+            N'@cntOut int OUTPUT, @samplesOut nvarchar(400) OUTPUT',
+            @cntOut = @cnt OUTPUT,
+            @samplesOut = @samples OUTPUT;
+
+        UPDATE #FlagCols
+        SET DistinctValueCount = ISNULL(@cnt, 0),
+            SampleValues = @samples
+        WHERE DatabaseName = @Db
+          AND SchemaName = @Schema
+          AND TableName = @Table
+          AND ColumnName = @Column;
+
+        IF @samples IS NOT NULL
         BEGIN
-            SET @Score   = 0;
-            SET @Finding = CAST(@BadCols AS nvarchar(10)) + N' of ' + CAST(@Total AS nvarchar(10)) +
-                           N' boolean/flag columns store values outside the accepted boolean set. Representation mix: ' + @Mix +
-                           N'. Databases mixing representations: ' + CAST(@MixedDbs AS nvarchar(10)) +
-                           N'. Examples: ' + CASE WHEN @BadList = N'' THEN N'(none captured)' ELSE @BadList END;
-        END
+            IF EXISTS (
+                SELECT 1
+                FROM #FlagCols f
+                WHERE f.DatabaseName = @Db
+                  AND f.SchemaName = @Schema
+                  AND f.TableName = @Table
+                  AND f.ColumnName = @Column
+                  AND f.Representation = N'integer_0_1'
+            )
+            BEGIN
+                IF @samples LIKE N'%2%' OR @samples LIKE N'%3%' OR @samples LIKE N'%4%'
+                   OR @samples LIKE N'%5%' OR @samples LIKE N'%6%' OR @samples LIKE N'%7%'
+                   OR @samples LIKE N'%8%' OR @samples LIKE N'%9%' OR @samples LIKE N'%-%'
+                    SET @invalid = 1;
+            END
+            ELSE IF EXISTS (
+                SELECT 1
+                FROM #FlagCols f
+                WHERE f.DatabaseName = @Db
+                  AND f.SchemaName = @Schema
+                  AND f.TableName = @Table
+                  AND f.ColumnName = @Column
+                  AND f.Representation = N'char_YN'
+            )
+            BEGIN
+                IF @samples LIKE N'%[^YyNnTtFf01, ]%' COLLATE Latin1_General_BIN
+                    SET @invalid = 1;
+            END
+            ELSE IF EXISTS (
+                SELECT 1
+                FROM #FlagCols f
+                WHERE f.DatabaseName = @Db
+                  AND f.SchemaName = @Schema
+                  AND f.TableName = @Table
+                  AND f.ColumnName = @Column
+                  AND f.Representation = N'string_truefalse'
+            )
+            BEGIN
+                SET @tok = LOWER(@samples);
+                IF ISNULL(@cnt, 0) > 6
+                    SET @invalid = 1;
+                ELSE IF @tok NOT LIKE N'%true%'
+                    AND @tok NOT LIKE N'%false%'
+                    AND @tok NOT LIKE N'%yes%'
+                    AND @tok NOT LIKE N'%no%'
+                    AND @tok NOT LIKE N'%y%'
+                    AND @tok NOT LIKE N'%n%'
+                    AND @tok NOT LIKE N'%0%'
+                    AND @tok NOT LIKE N'%1%'
+                    AND LEN(@tok) > 0
+                    SET @invalid = 1;
+            END
+            ELSE
+            BEGIN
+                IF ISNULL(@cnt, 0) > 4
+                    SET @invalid = 1;
+            END;
+        END;
 
-        IF @DbFailed > 0
-            SET @Finding = @Finding + N' Note: ' + CAST(@DbFailed AS nvarchar(10)) +
-                           N' database(s) could not be read and were excluded.';
+        IF @invalid = 1
+        BEGIN
+            UPDATE #FlagCols
+            SET HasInvalidValue = 1
+            WHERE DatabaseName = @Db
+              AND SchemaName = @Schema
+              AND TableName = @Table
+              AND ColumnName = @Column;
 
-        IF @Unchecked > 0
-            SET @Finding = @Finding + N' Note: ' + CAST(@Unchecked AS nvarchar(10)) +
-                           N' flag column(s) could not be read (permissions or inaccessible object) and were excluded from the value check.';
-    END
+            INSERT INTO #BadValues (DatabaseName, SchemaName, TableName, ColumnName, BadSample)
+            VALUES (@Db, @Schema, @Table, @Column, @samples);
+        END;
+    END TRY
+    BEGIN CATCH
+        -- Skip unreadable tables/columns
+    END CATCH;
 
-    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+    FETCH NEXT FROM col_cursor INTO @Db, @Schema, @Table, @Column, @TypeName, @MaxLength;
+END;
 
-    IF OBJECT_ID('tempdb..#FlagColumns') IS NOT NULL DROP TABLE #FlagColumns;
-    IF OBJECT_ID('tempdb..#Dbs')         IS NOT NULL DROP TABLE #Dbs;
+CLOSE col_cursor;
+DEALLOCATE col_cursor;
 
-    SELECT @Result                    AS Result,
-           @Score                     AS Score,
-           LEFT(@DatabaseQueried,3900) AS DatabaseQueried,
-           LEFT(@Finding,3900)         AS Finding;
+INSERT INTO #DbSummary
+(
+    DatabaseName, FlagColCount, BitColCount, NonBitFlagCount, InvalidValueCount, RepresentationStyles
+)
+SELECT
+    f.DatabaseName,
+    COUNT(*),
+    SUM(CASE WHEN f.IsBit = 1 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN f.IsBit = 0 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN f.HasInvalidValue = 1 THEN 1 ELSE 0 END),
+    COUNT(DISTINCT f.Representation)
+FROM #FlagCols f
+GROUP BY f.DatabaseName;
 
-END TRY
-BEGIN CATCH
+DECLARE @DbCount int = (SELECT COUNT(*) FROM #DbList);
+DECLARE @FlagDbCount int = (SELECT COUNT(*) FROM #DbSummary);
+DECLARE @TotalFlags int = (SELECT ISNULL(SUM(FlagColCount), 0) FROM #DbSummary);
+DECLARE @TotalBit int = (SELECT ISNULL(SUM(BitColCount), 0) FROM #DbSummary);
+DECLARE @TotalNonBit int = (SELECT ISNULL(SUM(NonBitFlagCount), 0) FROM #DbSummary);
+DECLARE @TotalInvalid int = (SELECT ISNULL(SUM(InvalidValueCount), 0) FROM #DbSummary);
+DECLARE @MaxStyles int = (SELECT ISNULL(MAX(RepresentationStyles), 0) FROM #DbSummary);
+DECLARE @DbsMultiStyle int = (SELECT COUNT(*) FROM #DbSummary WHERE RepresentationStyles > 1);
+DECLARE @NonBitPct decimal(9, 2) =
+    CASE WHEN @TotalFlags = 0 THEN CAST(0 AS decimal(9, 2))
+         ELSE CAST(@TotalNonBit AS decimal(9, 2)) * 100.0 / CAST(@TotalFlags AS decimal(9, 2))
+    END;
 
-    IF CURSOR_STATUS('local','flag_cur') > -3
+DECLARE @BadPreview nvarchar(max);
+SELECT @BadPreview = STUFF((
+    SELECT TOP (5)
+        N'; '
+        + bv.DatabaseName + N'.' + bv.SchemaName + N'.' + bv.TableName
+        + N'.' + bv.ColumnName + N'=[' + ISNULL(bv.BadSample, N'') + N']'
+    FROM #BadValues bv
+    ORDER BY bv.DatabaseName, bv.SchemaName, bv.TableName, bv.ColumnName
+    FOR XML PATH(N''), TYPE
+).value(N'text()[1]', N'nvarchar(max)'), 1, 2, N'');
+
+IF @DbCount = 0
+BEGIN
+    SET @Score = 0;
+    SET @DatabaseQueried = N'None';
+    SET @Finding = N'No database found to be queried';
+END
+ELSE IF @TotalFlags = 0
+BEGIN
+    SET @Score = 0;
+    SELECT @DatabaseQueried = ISNULL(STUFF((
+        SELECT N', ' + d.DatabaseName
+        FROM #DbList d
+        ORDER BY d.DatabaseName
+        FOR XML PATH(N''), TYPE
+    ).value(N'text()[1]', N'nvarchar(max)'), 1, 2, N''), N'None');
+    SET @Finding = N'Queried ' + CAST(@DbCount AS varchar(20))
+        + N' database(s); no bit columns or flag-named columns were found to evaluate.';
+END
+ELSE
+BEGIN
+    SELECT @DatabaseQueried = ISNULL(STUFF((
+        SELECT N', ' + d.DatabaseName
+        FROM #DbList d
+        ORDER BY d.DatabaseName
+        FOR XML PATH(N''), TYPE
+    ).value(N'text()[1]', N'nvarchar(max)'), 1, 2, N''), N'None');
+
+    IF @TotalInvalid > 0
     BEGIN
-        IF CURSOR_STATUS('local','flag_cur') > -1 CLOSE flag_cur;
-        DEALLOCATE flag_cur;
+        SET @Score = 0;
+        SET @Finding = N'Found ' + CAST(@TotalFlags AS varchar(20)) + N' flag-like column(s) across '
+            + CAST(@FlagDbCount AS varchar(20)) + N' database(s); '
+            + CAST(@TotalInvalid AS varchar(20))
+            + N' non-bit flag column(s) have values outside expected boolean domains.'
+            + CASE WHEN ISNULL(@BadPreview, N'') <> N'' THEN N' Examples: ' + @BadPreview + N'.' ELSE N'' END;
     END
-
-    IF CURSOR_STATUS('local','db_cur') > -3
+    ELSE IF @TotalNonBit = 0 AND @MaxStyles <= 1
     BEGIN
-        IF CURSOR_STATUS('local','db_cur') > -1 CLOSE db_cur;
-        DEALLOCATE db_cur;
+        SET @Score = 3;
+        SET @Finding = N'All ' + CAST(@TotalFlags AS varchar(20)) + N' flag-like column(s) across '
+            + CAST(@FlagDbCount AS varchar(20))
+            + N' database(s) use bit type with a single consistent representation.';
     END
+    ELSE IF @NonBitPct <= 10.00 AND @DbsMultiStyle = 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = N'Found ' + CAST(@TotalFlags AS varchar(20)) + N' flag-like column(s) ('
+            + CAST(@TotalBit AS varchar(20)) + N' bit, ' + CAST(@TotalNonBit AS varchar(20))
+            + N' non-bit). Non-bit usage is limited ('
+            + CAST(@NonBitPct AS varchar(20))
+            + N'%) with no invalid values and consistent representation per database.';
+    END
+    ELSE IF @NonBitPct <= 35.00 AND @DbsMultiStyle <= 2
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = N'Found ' + CAST(@TotalFlags AS varchar(20)) + N' flag-like column(s) across '
+            + CAST(@FlagDbCount AS varchar(20)) + N' database(s): '
+            + CAST(@TotalBit AS varchar(20)) + N' bit and ' + CAST(@TotalNonBit AS varchar(20))
+            + N' non-bit. Minor representation variance without invalid values.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = N'Found ' + CAST(@TotalFlags AS varchar(20)) + N' flag-like column(s): '
+            + CAST(@TotalBit AS varchar(20)) + N' bit, ' + CAST(@TotalNonBit AS varchar(20))
+            + N' non-bit (' + CAST(@NonBitPct AS varchar(20)) + N'%). '
+            + CAST(@DbsMultiStyle AS varchar(20))
+            + N' database(s) mix multiple flag representations (bit/int/char/string), reducing consistency.';
+    END;
+END;
 
-    IF OBJECT_ID('tempdb..#FlagColumns') IS NOT NULL DROP TABLE #FlagColumns;
-    IF OBJECT_ID('tempdb..#Dbs')         IS NOT NULL DROP TABLE #Dbs;
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-    SET @Score   = 0;
-    SET @Result  = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-    SET @Finding = N'Boolean/flag column evaluation could not be completed: ' + ERROR_MESSAGE();
-
-    SELECT @Result                    AS Result,
-           @Score                     AS Score,
-           LEFT(@DatabaseQueried,3900) AS DatabaseQueried,
-           LEFT(@Finding,3900)         AS Finding;
-
-END CATCH
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

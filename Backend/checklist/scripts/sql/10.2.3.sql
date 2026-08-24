@@ -1,220 +1,238 @@
-/* Checklist 10.2.3 - DMVs used for ongoing performance analysis (waits, missing/unused indexes)
-   Read-only. Detects persisted artifacts that consume the relevant performance DMVs. */
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @IsAzureDb BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
-DECLARE @ScanErrors INT = 0;
-DECLARE @JobScanOk BIT = 0;
+DECLARE @Result NVARCHAR(20);
+DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(200);
+DECLARE @Finding NVARCHAR(MAX);
 
-IF OBJECT_ID('tempdb..#Evidence') IS NOT NULL DROP TABLE #Evidence;
-CREATE TABLE #Evidence
+DECLARE @WaitSignal INT = 0;
+DECLARE @MissingSignal INT = 0;
+DECLARE @UsageSignal INT = 0;
+DECLARE @SignalCount INT = 0;
+
+DECLARE @WaitRows INT = 0;
+DECLARE @MeaningfulWaits INT = 0;
+DECLARE @TopWait NVARCHAR(128) = NULL;
+DECLARE @TopWaitMs BIGINT = 0;
+
+DECLARE @MissingIdxGroups INT = 0;
+DECLARE @UsageStatRows INT = 0;
+DECLARE @UnusedIndexRows INT = 0;
+DECLARE @DbTouched INT = 0;
+DECLARE @IsAzure BIT = 0;
+
+SET @DatabaseQueried = N'server';
+
+IF SERVERPROPERTY('EngineEdition') = 5
+    SET @IsAzure = 1;
+
+/* Category 1: wait stats DMV */
+BEGIN TRY
+    SELECT
+        @WaitRows = COUNT(*),
+        @MeaningfulWaits = SUM(CASE
+            WHEN wait_type NOT IN (
+                N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
+                N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
+                N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE',
+                N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
+                N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
+                N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
+                N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT',
+                N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
+                N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', N'MEMORY_ALLOCATION_EXT',
+                N'ONDEMAND_TASK_QUEUE', N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE',
+                N'PARALLEL_REDO_TRAN_LIST', N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
+                N'PREEMPTIVE_OS_FLUSHFILEBUFFERS', N'PREEMPTIVE_XE_GETTARGETSTATE',
+                N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+                N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', N'QDS_ASYNC_QUEUE',
+                N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'QDS_SHUTDOWN_QUEUE',
+                N'REDO_THREAD_PENDING_WORK', N'REQUEST_FOR_DEADLOCK_SEARCH', N'RESOURCE_QUEUE',
+                N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP', N'SLEEP_DCOMSTARTUP',
+                N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY', N'SLEEP_MASTERUPGRADED',
+                N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK', N'SLEEP_TEMPDBSTARTUP',
+                N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP', N'SQLTRACE_BUFFER_FLUSH',
+                N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES', N'WAIT_FOR_RESULTS',
+                N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT',
+                N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'XE_DISPATCHER_JOIN',
+                N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT'
+            ) AND waiting_tasks_count > 0 THEN 1 ELSE 0 END)
+    FROM sys.dm_os_wait_stats;
+
+    SELECT TOP (1)
+        @TopWait = wait_type,
+        @TopWaitMs = wait_time_ms
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type NOT IN (
+        N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
+        N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
+        N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE',
+        N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
+        N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
+        N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
+        N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT',
+        N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
+        N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', N'MEMORY_ALLOCATION_EXT',
+        N'ONDEMAND_TASK_QUEUE', N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE',
+        N'PARALLEL_REDO_TRAN_LIST', N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
+        N'PREEMPTIVE_OS_FLUSHFILEBUFFERS', N'PREEMPTIVE_XE_GETTARGETSTATE',
+        N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+        N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', N'QDS_ASYNC_QUEUE',
+        N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'QDS_SHUTDOWN_QUEUE',
+        N'REDO_THREAD_PENDING_WORK', N'REQUEST_FOR_DEADLOCK_SEARCH', N'RESOURCE_QUEUE',
+        N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP', N'SLEEP_DCOMSTARTUP',
+        N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY', N'SLEEP_MASTERUPGRADED',
+        N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK', N'SLEEP_TEMPDBSTARTUP',
+        N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP', N'SQLTRACE_BUFFER_FLUSH',
+        N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES', N'WAIT_FOR_RESULTS',
+        N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT',
+        N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'XE_DISPATCHER_JOIN',
+        N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT'
+    )
+    ORDER BY wait_time_ms DESC;
+
+    IF @WaitRows > 0
+        SET @WaitSignal = 1;
+END TRY
+BEGIN CATCH
+    SET @WaitSignal = 0;
+END CATCH;
+
+/* Categories 2-3: missing-index and index-usage DMVs (database-scoped) */
+IF OBJECT_ID('tempdb..#IdxDmv') IS NOT NULL DROP TABLE #IdxDmv;
+CREATE TABLE #IdxDmv
 (
-    EvidenceType NVARCHAR(50)  NOT NULL,
-    Category     NVARCHAR(30)  NOT NULL,
-    DatabaseName NVARCHAR(128) NULL,
-    ObjectName   NVARCHAR(512) NULL
+    DbName SYSNAME NOT NULL,
+    MissingGroups INT NOT NULL,
+    UsageRows INT NOT NULL,
+    UnusedRows INT NOT NULL
 );
 
-IF OBJECT_ID('tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
-CREATE TABLE #DbList (DatabaseName NVARCHAR(128) NOT NULL);
-
-IF @IsAzureDb = 1
+IF @IsAzure = 1
 BEGIN
-    INSERT INTO #DbList (DatabaseName) SELECT DB_NAME();
+    BEGIN TRY
+        INSERT INTO #IdxDmv (DbName, MissingGroups, UsageRows, UnusedRows)
+        SELECT
+            DB_NAME(),
+            (SELECT COUNT(*) FROM sys.dm_db_missing_index_groups),
+            (SELECT COUNT(*) FROM sys.dm_db_index_usage_stats WHERE database_id = DB_ID()),
+            (
+                SELECT COUNT(*)
+                FROM sys.indexes AS i
+                INNER JOIN sys.tables AS t ON t.object_id = i.object_id
+                LEFT JOIN sys.dm_db_index_usage_stats AS u
+                    ON u.object_id = i.object_id
+                   AND u.index_id = i.index_id
+                   AND u.database_id = DB_ID()
+                WHERE i.index_id > 0
+                  AND t.is_ms_shipped = 0
+                  AND ISNULL(u.user_seeks, 0) = 0
+                  AND ISNULL(u.user_scans, 0) = 0
+                  AND ISNULL(u.user_lookups, 0) = 0
+            );
+    END TRY
+    BEGIN CATCH
+        /* leave empty on permission/access failure */
+    END CATCH;
 END
 ELSE
 BEGIN
-    INSERT INTO #DbList (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.state = 0
-      AND d.database_id <> 2
-      AND d.source_database_id IS NULL
-      AND HAS_DBACCESS(d.name) = 1;
+    DECLARE @DbName SYSNAME;
+    DECLARE @Sql NVARCHAR(MAX);
+
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name
+        FROM sys.databases
+        WHERE database_id > 4
+          AND state_desc = N'ONLINE'
+          AND HAS_DBACCESS(name) = 1
+          AND is_read_only = 0
+          AND is_distributor = 0;
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @Sql = N'
+        BEGIN TRY
+            INSERT INTO #IdxDmv (DbName, MissingGroups, UsageRows, UnusedRows)
+            SELECT
+                @DbNameIn,
+                (SELECT COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.dm_db_missing_index_groups),
+                (SELECT COUNT(*) FROM sys.dm_db_index_usage_stats WHERE database_id = DB_ID(@DbNameIn)),
+                (
+                    SELECT COUNT(*)
+                    FROM ' + QUOTENAME(@DbName) + N'.sys.indexes AS i
+                    INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.tables AS t ON t.object_id = i.object_id
+                    LEFT JOIN sys.dm_db_index_usage_stats AS u
+                        ON u.object_id = i.object_id
+                       AND u.index_id = i.index_id
+                       AND u.database_id = DB_ID(@DbNameIn)
+                    WHERE i.index_id > 0
+                      AND t.is_ms_shipped = 0
+                      AND ISNULL(u.user_seeks, 0) = 0
+                      AND ISNULL(u.user_scans, 0) = 0
+                      AND ISNULL(u.user_lookups, 0) = 0
+                );
+        END TRY
+        BEGIN CATCH
+        END CATCH;';
+
+        BEGIN TRY
+            EXEC sys.sp_executesql @Sql, N'@DbNameIn SYSNAME', @DbNameIn = @DbName;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
 END
 
-DECLARE @db NVARCHAR(128), @prefix NVARCHAR(300), @sql NVARCHAR(MAX);
+SELECT
+    @DbTouched = COUNT(*),
+    @MissingIdxGroups = ISNULL(SUM(MissingGroups), 0),
+    @UsageStatRows = ISNULL(SUM(UsageRows), 0),
+    @UnusedIndexRows = ISNULL(SUM(UnusedRows), 0)
+FROM #IdxDmv;
 
-DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR SELECT DatabaseName FROM #DbList;
-OPEN db_cur;
-FETCH NEXT FROM db_cur INTO @db;
+IF @DbTouched > 0
+    SET @MissingSignal = 1;
 
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    SET @prefix = CASE WHEN @IsAzureDb = 1 THEN N'' ELSE QUOTENAME(@db) + N'.' END;
+IF @DbTouched > 0
+    SET @UsageSignal = 1;
 
-    BEGIN TRY
-        /* Programmable objects whose definition references the performance DMVs */
-        SET @sql = N'
-        SELECT N''ProgrammableObject'', c.Category, @dbname,
-               o.type_desc + N'': '' + s.name + N''.'' + o.name
-        FROM ' + @prefix + N'sys.sql_modules AS m
-        JOIN ' + @prefix + N'sys.objects  AS o ON o.object_id = m.object_id
-        JOIN ' + @prefix + N'sys.schemas  AS s ON s.schema_id = o.schema_id
-        CROSS APPLY (VALUES
-            (N''Waits'',
-                CASE WHEN m.definition LIKE N''%dm[_]os[_]wait[_]stats%''
-                       OR m.definition LIKE N''%dm[_]exec[_]session[_]wait[_]stats%''
-                       OR m.definition LIKE N''%query[_]store[_]wait[_]stats%''
-                     THEN 1 ELSE 0 END),
-            (N''MissingIndex'',
-                CASE WHEN m.definition LIKE N''%dm[_]db[_]missing[_]index%''
-                     THEN 1 ELSE 0 END),
-            (N''IndexUsage'',
-                CASE WHEN m.definition LIKE N''%dm[_]db[_]index[_]usage[_]stats%''
-                       OR m.definition LIKE N''%dm[_]db[_]index[_]operational[_]stats%''
-                     THEN 1 ELSE 0 END)
-        ) AS c(Category, IsMatch)
-        WHERE c.IsMatch = 1
-          AND o.is_ms_shipped = 0;';
+SET @SignalCount = @WaitSignal + @MissingSignal + @UsageSignal;
 
-        INSERT INTO #Evidence (EvidenceType, Category, DatabaseName, ObjectName)
-        EXEC sp_executesql @sql, N'@dbname NVARCHAR(128)', @dbname = @db;
-
-        /* User tables that look like DMV capture / history tables */
-        SET @sql = N'
-        SELECT N''CollectionTable'', c.Category, @dbname, s.name + N''.'' + t.name
-        FROM ' + @prefix + N'sys.tables  AS t
-        JOIN ' + @prefix + N'sys.schemas AS s ON s.schema_id = t.schema_id
-        CROSS APPLY (VALUES
-            (N''Waits'',
-                CASE WHEN t.name LIKE N''%wait%stat%'' THEN 1 ELSE 0 END),
-            (N''MissingIndex'',
-                CASE WHEN t.name LIKE N''%missing%index%'' THEN 1 ELSE 0 END),
-            (N''IndexUsage'',
-                CASE WHEN t.name LIKE N''%index%usage%''
-                       OR t.name LIKE N''%unused%index%'' THEN 1 ELSE 0 END)
-        ) AS c(Category, IsMatch)
-        WHERE c.IsMatch = 1
-          AND t.is_ms_shipped = 0;';
-
-        INSERT INTO #Evidence (EvidenceType, Category, DatabaseName, ObjectName)
-        EXEC sp_executesql @sql, N'@dbname NVARCHAR(128)', @dbname = @db;
-    END TRY
-    BEGIN CATCH
-        SET @ScanErrors = @ScanErrors + 1;
-    END CATCH
-
-    FETCH NEXT FROM db_cur INTO @db;
-END
-
-CLOSE db_cur;
-DEALLOCATE db_cur;
-
-/* SQL Agent job steps that harvest the DMVs (not available on Azure SQL Database) */
-IF @IsAzureDb = 0 AND DB_ID('msdb') IS NOT NULL
-BEGIN
-    BEGIN TRY
-        INSERT INTO #Evidence (EvidenceType, Category, DatabaseName, ObjectName)
-        SELECT N'AgentJobStep', c.Category, N'msdb',
-               j.name + N' / step ' + CAST(js.step_id AS NVARCHAR(10)) + N': ' + js.step_name
-        FROM msdb.dbo.sysjobs AS j
-        JOIN msdb.dbo.sysjobsteps AS js ON js.job_id = j.job_id
-        CROSS APPLY (VALUES
-            (N'Waits',
-                CASE WHEN js.command LIKE N'%dm[_]os[_]wait[_]stats%'
-                       OR js.command LIKE N'%dm[_]exec[_]session[_]wait[_]stats%'
-                       OR js.command LIKE N'%query[_]store[_]wait[_]stats%'
-                     THEN 1 ELSE 0 END),
-            (N'MissingIndex',
-                CASE WHEN js.command LIKE N'%dm[_]db[_]missing[_]index%'
-                     THEN 1 ELSE 0 END),
-            (N'IndexUsage',
-                CASE WHEN js.command LIKE N'%dm[_]db[_]index[_]usage[_]stats%'
-                       OR js.command LIKE N'%dm[_]db[_]index[_]operational[_]stats%'
-                     THEN 1 ELSE 0 END)
-        ) AS c(Category, IsMatch)
-        WHERE c.IsMatch = 1
-          AND j.enabled = 1;
-
-        SET @JobScanOk = 1;
-    END TRY
-    BEGIN CATCH
-        SET @ScanErrors = @ScanErrors + 1;
-    END CATCH
-END
-
-/* Supporting context only - Query Store adoption */
-DECLARE @QsDbCount INT = 0;
-IF COL_LENGTH('sys.databases', 'is_query_store_on') IS NOT NULL
-BEGIN
-    BEGIN TRY
-        SET @sql = N'SELECT @cnt = COUNT(*) FROM sys.databases WHERE state = 0 AND is_query_store_on = 1;';
-        EXEC sp_executesql @sql, N'@cnt INT OUTPUT', @cnt = @QsDbCount OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @QsDbCount = 0;
-    END CATCH
-END
-
-DECLARE @WaitEvidence INT = 0, @MissingEvidence INT = 0, @UsageEvidence INT = 0;
-DECLARE @TotalEvidence INT = 0, @Categories INT = 0, @DbScanned INT = 0;
-
-SELECT @DbScanned = COUNT(*) FROM #DbList;
-
-SELECT @WaitEvidence    = SUM(CASE WHEN Category = N'Waits'        THEN 1 ELSE 0 END),
-       @MissingEvidence = SUM(CASE WHEN Category = N'MissingIndex' THEN 1 ELSE 0 END),
-       @UsageEvidence   = SUM(CASE WHEN Category = N'IndexUsage'   THEN 1 ELSE 0 END),
-       @TotalEvidence   = COUNT(*)
-FROM #Evidence;
-
-SET @WaitEvidence    = ISNULL(@WaitEvidence, 0);
-SET @MissingEvidence = ISNULL(@MissingEvidence, 0);
-SET @UsageEvidence   = ISNULL(@UsageEvidence, 0);
-SET @TotalEvidence   = ISNULL(@TotalEvidence, 0);
-
-SET @Categories = CASE WHEN @WaitEvidence    > 0 THEN 1 ELSE 0 END
-                + CASE WHEN @MissingEvidence > 0 THEN 1 ELSE 0 END
-                + CASE WHEN @UsageEvidence   > 0 THEN 1 ELSE 0 END;
-
-DECLARE @Samples NVARCHAR(MAX) = N'';
-
-SELECT @Samples = ISNULL(STUFF((
-        SELECT TOP (5) N'; ' + ISNULL(e.DatabaseName, N'(unknown)') + N'.'
-                     + ISNULL(e.ObjectName, N'(unknown)') + N' [' + e.Category + N']'
-        FROM #Evidence AS e
-        ORDER BY e.EvidenceType, e.DatabaseName, e.ObjectName
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'');
-
-DECLARE @Score INT;
-DECLARE @Result NVARCHAR(20);
-
-SET @Score = CASE WHEN @Categories = 3 THEN 3
-                  WHEN @Categories = 2 THEN 2
-                  WHEN @Categories = 1 THEN 1
-                  ELSE 0 END;
+IF @SignalCount >= 3
+    SET @Score = 3;
+ELSE IF @SignalCount = 2
+    SET @Score = 2;
+ELSE IF @SignalCount = 1
+    SET @Score = 1;
+ELSE
+    SET @Score = 0;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-DECLARE @Finding NVARCHAR(MAX) =
-    N'Scanned ' + CAST(@DbScanned AS NVARCHAR(10)) + N' accessible database(s)'
-    + CASE WHEN @JobScanOk = 1 THEN N' plus msdb Agent job steps' ELSE N'' END
-    + N'. DMV performance-analysis artifacts found: ' + CAST(@TotalEvidence AS NVARCHAR(10))
-    + N' (wait stats: ' + CAST(@WaitEvidence AS NVARCHAR(10))
-    + N', missing index: ' + CAST(@MissingEvidence AS NVARCHAR(10))
-    + N', index usage/unused: ' + CAST(@UsageEvidence AS NVARCHAR(10))
-    + N'). Categories covered: ' + CAST(@Categories AS NVARCHAR(10)) + N' of 3.'
-    + CASE WHEN @Samples <> N'' THEN N' Examples: ' + @Samples + N'.' ELSE N'' END
-    + N' Query Store enabled on ' + CAST(@QsDbCount AS NVARCHAR(10)) + N' database(s) (supporting context only).'
-    + CASE WHEN @Categories = 3
-                THEN N' All three DMV categories are consumed by persisted objects or jobs, indicating ongoing DMV-based performance analysis.'
-           WHEN @Categories = 2
-                THEN N' Two of the three DMV categories are covered; the remaining category has no persisted consumer and should be added.'
-           WHEN @Categories = 1
-                THEN N' Only one DMV category is covered; ongoing performance analysis is incomplete.'
-           ELSE N' No stored procedure, view, function, collection table or enabled Agent job references the wait-stats or index DMVs.' END
-    + CASE WHEN @ScanErrors > 0
-           THEN N' NOTE: ' + CAST(@ScanErrors AS NVARCHAR(10)) + N' scope(s) could not be scanned (permission or state); evidence may be understated.'
+SET @Finding = N'Wait DMV usable=' + CASE WHEN @WaitSignal = 1 THEN N'yes' ELSE N'no' END
+    + N' (rows=' + CAST(@WaitRows AS NVARCHAR(20))
+    + N', meaningful_wait_types=' + CAST(ISNULL(@MeaningfulWaits, 0) AS NVARCHAR(20))
+    + CASE WHEN @TopWait IS NOT NULL
+           THEN N', top_wait=' + @TopWait + N'/' + CAST(@TopWaitMs AS NVARCHAR(30)) + N'ms'
            ELSE N'' END
-    + CASE WHEN @IsAzureDb = 1
-           THEN N' NOTE: Azure SQL Database - only the current database was scanned and SQL Agent jobs do not exist.'
-           ELSE N'' END;
+    + N'). Missing-index DMV usable=' + CASE WHEN @MissingSignal = 1 THEN N'yes' ELSE N'no' END
+    + N' (dbs=' + CAST(@DbTouched AS NVARCHAR(20))
+    + N', missing_index_groups=' + CAST(@MissingIdxGroups AS NVARCHAR(20))
+    + N'). Index-usage DMV usable=' + CASE WHEN @UsageSignal = 1 THEN N'yes' ELSE N'no' END
+    + N' (usage_rows=' + CAST(@UsageStatRows AS NVARCHAR(20))
+    + N', potentially_unused_indexes=' + CAST(@UnusedIndexRows AS NVARCHAR(20))
+    + N'). Categories available for performance analysis: '
+    + CAST(@SignalCount AS NVARCHAR(10)) + N'/3.';
 
-IF OBJECT_ID('tempdb..#Evidence') IS NOT NULL DROP TABLE #Evidence;
-IF OBJECT_ID('tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
+IF OBJECT_ID('tempdb..#IdxDmv') IS NOT NULL DROP TABLE #IdxDmv;
 
-SELECT @Result AS Result,
-       @Score  AS Score,
-       CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)) AS DatabaseQueried,
-       @Finding AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

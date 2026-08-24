@@ -1,241 +1,305 @@
 SET NOCOUNT ON;
 
--- 5.4.5 Categorical / Enum: values within expected domain; no invalid codes
--- Read-only: inspects catalog metadata only.
+DECLARE @IsAzureBit BIT = CASE WHEN SERVERPROPERTY('EngineEdition') = 5 THEN 1 ELSE 0 END;
+DECLARE @DbName NVARCHAR(128);
+DECLARE @Sql NVARCHAR(MAX);
 
-DECLARE @IsAzureSqlDb bit =
-    CASE WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
-
-IF OBJECT_ID('tempdb..#Databases') IS NOT NULL DROP TABLE #Databases;
-CREATE TABLE #Databases
-(
-    DatabaseName sysname NOT NULL PRIMARY KEY
+DECLARE @Agg TABLE (
+    DatabaseName NVARCHAR(128) NOT NULL,
+    CandidateCols INT NOT NULL,
+    CheckEnforced INT NOT NULL,
+    FkEnforced INT NOT NULL,
+    DomainEnforced INT NOT NULL,
+    Unenforced INT NOT NULL
 );
 
-IF OBJECT_ID('tempdb..#CategoricalColumns') IS NOT NULL DROP TABLE #CategoricalColumns;
-CREATE TABLE #CategoricalColumns
-(
-    DatabaseName       sysname NOT NULL,
-    SchemaName         sysname NOT NULL,
-    TableName          sysname NOT NULL,
-    ColumnName         sysname NOT NULL,
-    DataTypeName       sysname NOT NULL,
-    HasCheckConstraint bit     NOT NULL,
-    HasForeignKey      bit     NOT NULL,
-    HasWeakConstraint  bit     NOT NULL
-);
-
-IF @IsAzureSqlDb = 1
+IF @IsAzureBit = 1
 BEGIN
-    INSERT INTO #Databases (DatabaseName)
-    SELECT DB_NAME();
-END
-ELSE
-BEGIN
-    INSERT INTO #Databases (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state_desc = 'ONLINE'
-      AND d.source_database_id IS NULL
-      AND d.is_in_standby = 0
-      AND HAS_DBACCESS(d.name) = 1;
-END
+    SET @DbName = DB_NAME();
 
-DECLARE @DbName sysname;
-DECLARE @QuotedDb nvarchar(258);
-DECLARE @Sql nvarchar(max);
-
-DECLARE DbCursor CURSOR LOCAL FAST_FORWARD FOR
-    SELECT DatabaseName FROM #Databases ORDER BY DatabaseName;
-
-OPEN DbCursor;
-FETCH NEXT FROM DbCursor INTO @DbName;
-
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    BEGIN TRY
-        SET @QuotedDb = QUOTENAME(@DbName);
-
-        SET @Sql = N'
+    ;WITH Cols AS (
         SELECT
-            @p_db AS DatabaseName,
-            s.name AS SchemaName,
-            t.name AS TableName,
+            c.object_id,
+            c.column_id,
             c.name AS ColumnName,
-            ty.name AS DataTypeName,
-            CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM ' + @QuotedDb + N'.sys.check_constraints AS cc
-                    WHERE cc.parent_object_id = t.object_id
-                      AND (
-                            cc.parent_column_id = c.column_id
-                            OR EXISTS (
-                                SELECT 1
-                                FROM ' + @QuotedDb + N'.sys.sql_expression_dependencies AS d
-                                WHERE d.referencing_id = cc.object_id
-                                  AND d.referenced_id = t.object_id
-                                  AND d.referenced_minor_id = c.column_id
-                            )
-                          )
-                 ) THEN 1 ELSE 0 END AS HasCheckConstraint,
-            CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM ' + @QuotedDb + N'.sys.foreign_key_columns AS fkc
-                    WHERE fkc.parent_object_id = t.object_id
-                      AND fkc.parent_column_id = c.column_id
-                 ) THEN 1 ELSE 0 END AS HasForeignKey,
-            CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM ' + @QuotedDb + N'.sys.check_constraints AS cw
-                    WHERE cw.parent_object_id = t.object_id
-                      AND (cw.is_disabled = 1 OR cw.is_not_trusted = 1)
-                      AND (
-                            cw.parent_column_id = c.column_id
-                            OR EXISTS (
-                                SELECT 1
-                                FROM ' + @QuotedDb + N'.sys.sql_expression_dependencies AS dw
-                                WHERE dw.referencing_id = cw.object_id
-                                  AND dw.referenced_id = t.object_id
-                                  AND dw.referenced_minor_id = c.column_id
-                            )
-                          )
-                 )
-                 OR EXISTS (
-                    SELECT 1
-                    FROM ' + @QuotedDb + N'.sys.foreign_keys AS fk
-                    INNER JOIN ' + @QuotedDb + N'.sys.foreign_key_columns AS fw
-                        ON fw.constraint_object_id = fk.object_id
-                    WHERE fw.parent_object_id = t.object_id
-                      AND fw.parent_column_id = c.column_id
-                      AND (fk.is_disabled = 1 OR fk.is_not_trusted = 1)
-                 ) THEN 1 ELSE 0 END AS HasWeakConstraint
-        FROM ' + @QuotedDb + N'.sys.columns AS c
-        INNER JOIN ' + @QuotedDb + N'.sys.tables AS t
-            ON t.object_id = c.object_id
-        INNER JOIN ' + @QuotedDb + N'.sys.schemas AS s
-            ON s.schema_id = t.schema_id
-        INNER JOIN ' + @QuotedDb + N'.sys.types AS ty
-            ON ty.system_type_id = c.system_type_id
-           AND ty.user_type_id = ty.system_type_id
+            ty.name AS TypeName,
+            c.max_length
+        FROM sys.tables t
+        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+        INNER JOIN sys.columns c ON c.object_id = t.object_id
+        INNER JOIN sys.types ty ON ty.user_type_id = c.user_type_id
         WHERE t.is_ms_shipped = 0
+          AND c.is_identity = 0
           AND c.is_computed = 0
-          AND s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'')
+          AND ty.name IN ('char','nchar','varchar','nvarchar','tinyint','smallint','int','bigint','bit')
           AND (
-                (ty.name IN (''char'', ''nchar'', ''varchar'', ''nvarchar'') AND c.max_length BETWEEN 1 AND 60)
-                OR ty.name IN (''tinyint'', ''smallint'')
-              )
+                c.name LIKE '%status%'
+             OR c.name LIKE '%type%'
+             OR c.name LIKE '%code%'
+             OR c.name LIKE '%flag%'
+             OR c.name LIKE '%category%'
+             OR c.name LIKE '%state%'
+             OR c.name LIKE '%level%'
+             OR c.name LIKE '%gender%'
+             OR c.name LIKE '%priority%'
+             OR c.name LIKE '%class%'
+             OR c.name LIKE '%mode%'
+             OR c.name LIKE '%reason%'
+             OR c.name LIKE '%result%'
+             OR c.name LIKE '%enum%'
+             OR (ty.name IN ('char','nchar') AND c.max_length BETWEEN 1 AND 20)
+             OR (ty.name IN ('varchar','nvarchar') AND c.max_length BETWEEN 2 AND 40)
+             OR ty.name IN ('tinyint','bit')
+          )
+    ),
+    CheckCols AS (
+        SELECT DISTINCT
+            c.object_id,
+            c.column_id
+        FROM sys.check_constraints chk
+        INNER JOIN sys.columns c
+            ON c.object_id = chk.parent_object_id
+        WHERE chk.is_disabled = 0
+          AND chk.is_not_trusted = 0
           AND (
-                c.name LIKE ''%status%''   OR c.name LIKE ''%type%''     OR c.name LIKE ''%code%''
-             OR c.name LIKE ''%state%''    OR c.name LIKE ''%categ%''    OR c.name LIKE ''%class%''
-             OR c.name LIKE ''%kind%''     OR c.name LIKE ''%level%''    OR c.name LIKE ''%flag%''
-             OR c.name LIKE ''%mode%''     OR c.name LIKE ''%method%''   OR c.name LIKE ''%priority%''
-             OR c.name LIKE ''%severity%'' OR c.name LIKE ''%gender%''   OR c.name LIKE ''%currency%''
-             OR c.name LIKE ''%country%''  OR c.name LIKE ''%region%''   OR c.name LIKE ''%lang%''
-              );';
-
-        INSERT INTO #CategoricalColumns
-            (DatabaseName, SchemaName, TableName, ColumnName, DataTypeName,
-             HasCheckConstraint, HasForeignKey, HasWeakConstraint)
-        EXEC sp_executesql @Sql, N'@p_db sysname', @p_db = @DbName;
-    END TRY
-    BEGIN CATCH
-        -- Database not readable by this login; skip it and continue.
-        DELETE FROM #Databases WHERE DatabaseName = @DbName;
-    END CATCH
-
-    FETCH NEXT FROM DbCursor INTO @DbName;
-END
-
-CLOSE DbCursor;
-DEALLOCATE DbCursor;
-
-DECLARE @DbCount    int = (SELECT COUNT(*) FROM #Databases);
-DECLARE @Total      int = 0;
-DECLARE @Enforced   int = 0;
-DECLARE @Weak       int = 0;
-DECLARE @Unenforced int = 0;
-DECLARE @Coverage   decimal(6,2) = 0;
-
-SELECT
-    @Total    = COUNT(*),
-    @Enforced = SUM(CASE WHEN HasCheckConstraint = 1 OR HasForeignKey = 1 THEN 1 ELSE 0 END),
-    @Weak     = SUM(CASE WHEN HasWeakConstraint = 1 THEN 1 ELSE 0 END)
-FROM #CategoricalColumns;
-
-SET @Total    = ISNULL(@Total, 0);
-SET @Enforced = ISNULL(@Enforced, 0);
-SET @Weak     = ISNULL(@Weak, 0);
-SET @Unenforced = @Total - @Enforced;
-
-DECLARE @DbList nvarchar(max);
-SELECT @DbList = STUFF((
-    SELECT N', ' + d.DatabaseName
-    FROM #Databases AS d
-    ORDER BY d.DatabaseName
-    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
-
-IF @DbList IS NULL OR LEN(@DbList) = 0
-    SET @DbList = N'None';
-IF LEN(@DbList) > 250
-    SET @DbList = LEFT(@DbList, 247) + N'...';
-
-DECLARE @Examples nvarchar(max);
-SELECT @Examples = STUFF((
-    SELECT N', ' + x.DatabaseName + N'.' + x.SchemaName + N'.' + x.TableName + N'.' + x.ColumnName
-    FROM (
-        SELECT TOP (5) cc.DatabaseName, cc.SchemaName, cc.TableName, cc.ColumnName
-        FROM #CategoricalColumns AS cc
-        WHERE cc.HasCheckConstraint = 0 AND cc.HasForeignKey = 0
-        ORDER BY cc.DatabaseName, cc.SchemaName, cc.TableName, cc.ColumnName
-    ) AS x
-    ORDER BY x.DatabaseName, x.SchemaName, x.TableName, x.ColumnName
-    FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
-
-DECLARE @Score   int;
-DECLARE @Result  nvarchar(20);
-DECLARE @Finding nvarchar(max);
-
-IF @Total = 0
-BEGIN
-    SET @Score = 2;
-    SET @Result = N'Review';
-    SET @Finding = N'No candidate categorical/enum columns were identified across '
-                 + CAST(@DbCount AS nvarchar(20))
-                 + N' accessible user database(s). Domain validity for categorical values could not be measured from catalog metadata; manual review of the data model is required.';
+                chk.definition LIKE '% IN (%'
+             OR chk.definition LIKE '% in (%'
+          )
+          AND (
+                CHARINDEX(QUOTENAME(c.name), chk.definition) > 0
+             OR CHARINDEX(c.name, chk.definition) > 0
+          )
+    ),
+    FkCols AS (
+        SELECT DISTINCT
+            fkc.parent_object_id AS object_id,
+            fkc.parent_column_id AS column_id
+        FROM sys.foreign_keys fk
+        INNER JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+        WHERE fk.is_disabled = 0
+          AND fk.is_not_trusted = 0
+    ),
+    Scored AS (
+        SELECT
+            CASE WHEN cc.column_id IS NOT NULL THEN 1 ELSE 0 END AS HasCheck,
+            CASE WHEN fk.column_id IS NOT NULL THEN 1 ELSE 0 END AS HasFk
+        FROM Cols col
+        LEFT JOIN CheckCols cc
+            ON cc.object_id = col.object_id AND cc.column_id = col.column_id
+        LEFT JOIN FkCols fk
+            ON fk.object_id = col.object_id AND fk.column_id = col.column_id
+    )
+    INSERT INTO @Agg (DatabaseName, CandidateCols, CheckEnforced, FkEnforced, DomainEnforced, Unenforced)
+    SELECT
+        @DbName,
+        COUNT(*),
+        ISNULL(SUM(HasCheck), 0),
+        ISNULL(SUM(HasFk), 0),
+        ISNULL(SUM(CASE WHEN HasCheck = 1 OR HasFk = 1 THEN 1 ELSE 0 END), 0),
+        ISNULL(SUM(CASE WHEN HasCheck = 0 AND HasFk = 0 THEN 1 ELSE 0 END), 0)
+    FROM Scored;
 END
 ELSE
 BEGIN
-    SET @Coverage = CAST(@Enforced AS decimal(12,2)) * 100.0 / CAST(@Total AS decimal(12,2));
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name
+        FROM sys.databases
+        WHERE database_id > 4
+          AND state_desc = 'ONLINE'
+          AND HAS_DBACCESS(name) = 1
+          AND is_read_only = 0
+          AND name NOT IN ('distribution', 'SSISDB');
 
-    IF @Coverage >= 90 AND @Weak = 0
-        SET @Score = 3;
-    ELSE IF @Coverage >= 60
-        SET @Score = 2;
-    ELSE IF @Coverage >= 25
-        SET @Score = 1;
-    ELSE
-        SET @Score = 0;
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName;
 
-    SET @Result = CASE WHEN @Score = 3 THEN N'Pass' WHEN @Score = 2 THEN N'Review' ELSE N'Fail' END;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @Sql = N'
+        ;WITH Cols AS (
+            SELECT
+                c.object_id,
+                c.column_id,
+                c.name AS ColumnName,
+                ty.name AS TypeName,
+                c.max_length
+            FROM ' + QUOTENAME(@DbName) + N'.sys.tables t
+            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON s.schema_id = t.schema_id
+            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.columns c ON c.object_id = t.object_id
+            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.types ty ON ty.user_type_id = c.user_type_id
+            WHERE t.is_ms_shipped = 0
+              AND c.is_identity = 0
+              AND c.is_computed = 0
+              AND ty.name IN (''char'',''nchar'',''varchar'',''nvarchar'',''tinyint'',''smallint'',''int'',''bigint'',''bit'')
+              AND (
+                    c.name LIKE ''%status%''
+                 OR c.name LIKE ''%type%''
+                 OR c.name LIKE ''%code%''
+                 OR c.name LIKE ''%flag%''
+                 OR c.name LIKE ''%category%''
+                 OR c.name LIKE ''%state%''
+                 OR c.name LIKE ''%level%''
+                 OR c.name LIKE ''%gender%''
+                 OR c.name LIKE ''%priority%''
+                 OR c.name LIKE ''%class%''
+                 OR c.name LIKE ''%mode%''
+                 OR c.name LIKE ''%reason%''
+                 OR c.name LIKE ''%result%''
+                 OR c.name LIKE ''%enum%''
+                 OR (ty.name IN (''char'',''nchar'') AND c.max_length BETWEEN 1 AND 20)
+                 OR (ty.name IN (''varchar'',''nvarchar'') AND c.max_length BETWEEN 2 AND 40)
+                 OR ty.name IN (''tinyint'',''bit'')
+              )
+        ),
+        CheckCols AS (
+            SELECT DISTINCT
+                c.object_id,
+                c.column_id
+            FROM ' + QUOTENAME(@DbName) + N'.sys.check_constraints chk
+            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.columns c
+                ON c.object_id = chk.parent_object_id
+            WHERE chk.is_disabled = 0
+              AND chk.is_not_trusted = 0
+              AND (
+                    chk.definition LIKE ''% IN (%''
+                 OR chk.definition LIKE ''% in (%''
+              )
+              AND (
+                    CHARINDEX(QUOTENAME(c.name), chk.definition) > 0
+                 OR CHARINDEX(c.name, chk.definition) > 0
+              )
+        ),
+        FkCols AS (
+            SELECT DISTINCT
+                fkc.parent_object_id AS object_id,
+                fkc.parent_column_id AS column_id
+            FROM ' + QUOTENAME(@DbName) + N'.sys.foreign_keys fk
+            INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.foreign_key_columns fkc
+                ON fkc.constraint_object_id = fk.object_id
+            WHERE fk.is_disabled = 0
+              AND fk.is_not_trusted = 0
+        ),
+        Scored AS (
+            SELECT
+                CASE WHEN cc.column_id IS NOT NULL THEN 1 ELSE 0 END AS HasCheck,
+                CASE WHEN fk.column_id IS NOT NULL THEN 1 ELSE 0 END AS HasFk
+            FROM Cols col
+            LEFT JOIN CheckCols cc
+                ON cc.object_id = col.object_id AND cc.column_id = col.column_id
+            LEFT JOIN FkCols fk
+                ON fk.object_id = col.object_id AND fk.column_id = col.column_id
+        )
+        SELECT
+            @pDb,
+            COUNT(*),
+            ISNULL(SUM(HasCheck), 0),
+            ISNULL(SUM(HasFk), 0),
+            ISNULL(SUM(CASE WHEN HasCheck = 1 OR HasFk = 1 THEN 1 ELSE 0 END), 0),
+            ISNULL(SUM(CASE WHEN HasCheck = 0 AND HasFk = 0 THEN 1 ELSE 0 END), 0)
+        FROM Scored;
+        ';
 
-    SET @Finding = N'Across ' + CAST(@DbCount AS nvarchar(20)) + N' accessible user database(s), '
-                 + CAST(@Total AS nvarchar(20)) + N' candidate categorical/enum column(s) were identified; '
-                 + CAST(@Enforced AS nvarchar(20)) + N' ('
-                 + CAST(@Coverage AS nvarchar(20))
-                 + N'%) have an in-engine domain declaration via CHECK constraint or foreign key to a lookup table, and '
-                 + CAST(@Unenforced AS nvarchar(20)) + N' have no domain enforcement at all. '
-                 + CAST(@Weak AS nvarchar(20))
-                 + N' enforced column(s) rely on a CHECK or foreign key constraint that is disabled or NOT TRUSTED, so invalid codes may already be stored.'
-                 + CASE WHEN @Examples IS NULL THEN N''
-                        ELSE N' Unenforced examples: ' + @Examples + N'.' END;
+        BEGIN TRY
+            INSERT INTO @Agg (DatabaseName, CandidateCols, CheckEnforced, FkEnforced, DomainEnforced, Unenforced)
+            EXEC sys.sp_executesql
+                @Sql,
+                N'@pDb NVARCHAR(128)',
+                @pDb = @DbName;
+        END TRY
+        BEGIN CATCH
+            INSERT INTO @Agg (DatabaseName, CandidateCols, CheckEnforced, FkEnforced, DomainEnforced, Unenforced)
+            VALUES (@DbName, -1, 0, 0, 0, 0);
+        END CATCH;
+
+        FETCH NEXT FROM db_cursor INTO @DbName;
+    END
+
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
 END
 
-SELECT
-    @Result  AS Result,
-    @Score   AS Score,
-    @DbList  AS DatabaseQueried,
-    @Finding AS Finding;
+DECLARE @Score INT;
+DECLARE @Result NVARCHAR(20);
+DECLARE @DatabaseQueried NVARCHAR(128);
+DECLARE @Finding NVARCHAR(MAX);
 
-IF OBJECT_ID('tempdb..#CategoricalColumns') IS NOT NULL DROP TABLE #CategoricalColumns;
-IF OBJECT_ID('tempdb..#Databases') IS NOT NULL DROP TABLE #Databases;
+DECLARE @TotCandidates INT = 0;
+DECLARE @TotCheck INT = 0;
+DECLARE @TotFk INT = 0;
+DECLARE @TotDomain INT = 0;
+DECLARE @TotUnenforced INT = 0;
+DECLARE @DbCount INT = 0;
+DECLARE @ErrCount INT = 0;
+DECLARE @Pct DECIMAL(5, 2);
+DECLARE @DbList NVARCHAR(MAX);
+
+IF NOT EXISTS (SELECT 1 FROM @Agg)
+BEGIN
+    SET @Score = 0;
+    SET @DatabaseQueried = N'None';
+    SET @Finding = N'No database found to be queried';
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+END
+ELSE
+BEGIN
+    SELECT
+        @DbCount = COUNT(*),
+        @ErrCount = SUM(CASE WHEN CandidateCols < 0 THEN 1 ELSE 0 END),
+        @TotCandidates = SUM(CASE WHEN CandidateCols > 0 THEN CandidateCols ELSE 0 END),
+        @TotCheck = SUM(CASE WHEN CandidateCols > 0 THEN CheckEnforced ELSE 0 END),
+        @TotFk = SUM(CASE WHEN CandidateCols > 0 THEN FkEnforced ELSE 0 END),
+        @TotDomain = SUM(CASE WHEN CandidateCols > 0 THEN DomainEnforced ELSE 0 END),
+        @TotUnenforced = SUM(CASE WHEN CandidateCols > 0 THEN Unenforced ELSE 0 END)
+    FROM @Agg;
+
+    SELECT @DbList = STUFF((
+        SELECT N', ' + DatabaseName
+        FROM @Agg
+        ORDER BY DatabaseName
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
+
+    SET @DatabaseQueried = CASE WHEN @DbCount = 1 THEN (SELECT TOP 1 DatabaseName FROM @Agg) ELSE N'ALL' END;
+
+    IF @ErrCount = @DbCount
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = N'Could not read catalog metadata in any accessible database to assess categorical domain enforcement. Databases: ' + ISNULL(@DbList, N'n/a') + N'.';
+    END
+    ELSE IF @TotCandidates = 0
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = N'No categorical/enum candidate columns were identified by name/type heuristics across ' + CAST(@DbCount AS NVARCHAR(20)) + N' database(s) (' + ISNULL(@DbList, N'n/a') + N'); no unconstrained domain risk detected from metadata.';
+    END
+    ELSE
+    BEGIN
+        SET @Pct = (100.0 * @TotDomain) / NULLIF(@TotCandidates, 0);
+
+        IF @Pct >= 90.0 AND @TotUnenforced = 0
+            SET @Score = 3;
+        ELSE IF @Pct >= 60.0
+            SET @Score = 2;
+        ELSE IF @Pct >= 25.0
+            SET @Score = 1;
+        ELSE
+            SET @Score = 0;
+
+        SET @Finding =
+            N'Across ' + CAST(@DbCount AS NVARCHAR(20)) + N' database(s) (' + ISNULL(@DbList, N'n/a') + N'): categorical candidates=' + CAST(@TotCandidates AS NVARCHAR(20)) +
+            N'; CHECK(IN)-enforced=' + CAST(@TotCheck AS NVARCHAR(20)) +
+            N'; FK-enforced=' + CAST(@TotFk AS NVARCHAR(20)) +
+            N'; domain-enforced=' + CAST(@TotDomain AS NVARCHAR(20)) +
+            N'; unenforced=' + CAST(@TotUnenforced AS NVARCHAR(20)) +
+            N' (' + CAST(@Pct AS NVARCHAR(20)) + N'% coverage). ' +
+            CASE
+                WHEN @Score >= 3 THEN N'Domain enforcement via CHECK value lists and/or FKs is strong.'
+                WHEN @Score = 2 THEN N'Partial domain enforcement; some categorical columns lack CHECK/FK protection against invalid codes.'
+                WHEN @Score = 1 THEN N'Weak domain enforcement; many categorical columns can accept invalid codes.'
+                ELSE N'Domain enforcement is essentially absent; invalid categorical codes are largely unconstrained.'
+            END;
+    END
+
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+END
+
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

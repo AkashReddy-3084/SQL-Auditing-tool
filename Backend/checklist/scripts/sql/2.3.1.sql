@@ -1,233 +1,225 @@
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @IsAzureSqlDb BIT = CASE WHEN @EngineEdition = 5 THEN 1 ELSE 0 END;
+DECLARE @SsisDbExists bit = 0;
+DECLARE @PackageCount int = 0;
+DECLARE @PackagesWithHandlers int = 0;
+DECLARE @HandlerCount int = 0;
+DECLARE @TryCatchModules int = 0;
+DECLARE @EtlLikeModules int = 0;
+DECLARE @EtlLikeWithTryCatch int = 0;
+DECLARE @JobCount int = 0;
+DECLARE @JobsWithFailureAction int = 0;
+DECLARE @JobsWithNotifyFail int = 0;
+DECLARE @EvidenceParts nvarchar(max) = N'';
+DECLARE @Result varchar(20);
+DECLARE @Score int;
+DECLARE @Finding nvarchar(max);
+DECLARE @DatabaseQueried nvarchar(200);
+DECLARE @db sysname;
+DECLARE @sql nvarchar(max);
+DECLARE @HasEtlSurface bit = 0;
+DECLARE @StrongSsis bit = 0;
+DECLARE @PartialSsis bit = 0;
+DECLARE @StrongTsql bit = 0;
+DECLARE @PartialTsql bit = 0;
+DECLARE @StrongJobs bit = 0;
+DECLARE @PartialJobs bit = 0;
 
-IF OBJECT_ID('tempdb..#Dbs') IS NOT NULL DROP TABLE #Dbs;
-CREATE TABLE #Dbs (DatabaseName SYSNAME NOT NULL PRIMARY KEY);
+IF DB_ID(N'SSISDB') IS NOT NULL
+    SET @SsisDbExists = 1;
 
-IF OBJECT_ID('tempdb..#EtlModules') IS NOT NULL DROP TABLE #EtlModules;
-CREATE TABLE #EtlModules
-(
-    DatabaseName    SYSNAME       NOT NULL,
-    SchemaName      SYSNAME       NOT NULL,
-    ObjectName      SYSNAME       NOT NULL,
-    ObjectType      NVARCHAR(60)  NOT NULL,
-    HasTryCatch     BIT           NOT NULL,
-    HasErrorHandler BIT           NOT NULL
-);
-
-IF OBJECT_ID('tempdb..#EtlJobSteps') IS NOT NULL DROP TABLE #EtlJobSteps;
-CREATE TABLE #EtlJobSteps
-(
-    JobName       SYSNAME       NOT NULL,
-    StepName      SYSNAME       NOT NULL,
-    Subsystem     NVARCHAR(60)  NULL,
-    OnFailAction  INT           NULL,
-    RetryAttempts INT           NULL
-);
-
-IF @IsAzureSqlDb = 1
+IF @SsisDbExists = 1
 BEGIN
-    INSERT INTO #Dbs (DatabaseName) VALUES (DB_NAME());
+    BEGIN TRY
+        IF OBJECT_ID(N'SSISDB.catalog.packages', N'V') IS NOT NULL
+        BEGIN
+            SELECT @PackageCount = COUNT(*)
+            FROM SSISDB.catalog.packages;
+        END
+
+        IF OBJECT_ID(N'SSISDB.catalog.event_messages', N'V') IS NOT NULL
+        BEGIN
+            SELECT @HandlerCount = COUNT(*)
+            FROM SSISDB.catalog.event_messages
+            WHERE event_name IN (N'OnError', N'OnTaskFailed');
+
+            SELECT @PackagesWithHandlers = COUNT(DISTINCT package_name)
+            FROM SSISDB.catalog.event_messages
+            WHERE event_name IN (N'OnError', N'OnTaskFailed')
+              AND package_name IS NOT NULL;
+        END
+    END TRY
+    BEGIN CATCH
+        SET @PackageCount = ISNULL(@PackageCount, 0);
+        SET @PackagesWithHandlers = ISNULL(@PackagesWithHandlers, 0);
+        SET @HandlerCount = ISNULL(@HandlerCount, 0);
+    END CATCH
 END
-ELSE
-BEGIN
-    INSERT INTO #Dbs (DatabaseName)
+
+IF OBJECT_ID('tempdb..#ModuleStats') IS NOT NULL DROP TABLE #ModuleStats;
+CREATE TABLE #ModuleStats (
+    database_name sysname NOT NULL,
+    etl_like_modules int NOT NULL,
+    etl_like_with_trycatch int NOT NULL,
+    trycatch_modules int NOT NULL
+);
+
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state_desc = 'ONLINE'
-      AND d.is_in_standby = 0
-      AND d.source_database_id IS NULL
+    FROM sys.databases d
+    WHERE d.state = 0
+      AND d.database_id > 4
+      AND d.name NOT IN (N'SSISDB', N'distribution')
       AND HAS_DBACCESS(d.name) = 1;
-END
 
-DECLARE @db SYSNAME;
-DECLARE @prefix NVARCHAR(300);
-DECLARE @sql NVARCHAR(MAX);
-
-DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT DatabaseName FROM #Dbs ORDER BY DatabaseName;
-
-OPEN db_cur;
-FETCH NEXT FROM db_cur INTO @db;
-
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @db;
 WHILE @@FETCH_STATUS = 0
 BEGIN
+    SET @sql = N'
+    INSERT INTO #ModuleStats (database_name, etl_like_modules, etl_like_with_trycatch, trycatch_modules)
+    SELECT
+        @dbname,
+        SUM(CASE WHEN (
+                        o.name LIKE N''%ETL%'' OR o.name LIKE N''%Load%''
+                     OR o.name LIKE N''%Extract%'' OR o.name LIKE N''%Stage%''
+                     OR o.name LIKE N''%Staging%'' OR o.name LIKE N''%Import%''
+                     OR o.name LIKE N''%Export%'' OR o.name LIKE N''%Ingest%''
+                     OR s.name LIKE N''%etl%''
+                     OR s.name LIKE N''%stage%''
+                     OR s.name LIKE N''%staging%''
+                  ) THEN 1 ELSE 0 END),
+        SUM(CASE WHEN (
+                        o.name LIKE N''%ETL%'' OR o.name LIKE N''%Load%''
+                     OR o.name LIKE N''%Extract%'' OR o.name LIKE N''%Stage%''
+                     OR o.name LIKE N''%Staging%'' OR o.name LIKE N''%Import%''
+                     OR o.name LIKE N''%Export%'' OR o.name LIKE N''%Ingest%''
+                     OR s.name LIKE N''%etl%''
+                     OR s.name LIKE N''%stage%''
+                     OR s.name LIKE N''%staging%''
+                  )
+                  AND UPPER(m.definition) LIKE N''%BEGIN TRY%''
+                  AND UPPER(m.definition) LIKE N''%BEGIN CATCH%''
+             THEN 1 ELSE 0 END),
+        SUM(CASE WHEN m.definition IS NOT NULL
+                  AND UPPER(m.definition) LIKE N''%BEGIN TRY%''
+                  AND UPPER(m.definition) LIKE N''%BEGIN CATCH%''
+             THEN 1 ELSE 0 END)
+    FROM ' + QUOTENAME(@db) + N'.sys.objects o
+    INNER JOIN ' + QUOTENAME(@db) + N'.sys.sql_modules m ON m.object_id = o.object_id
+    INNER JOIN ' + QUOTENAME(@db) + N'.sys.schemas s ON s.schema_id = o.schema_id
+    WHERE o.type IN (N''P'', N''PC'', N''FN'', N''IF'', N''TF'', N''TR'')
+      AND o.is_ms_shipped = 0;';
+
     BEGIN TRY
-        SET @prefix = CASE WHEN @IsAzureSqlDb = 1 THEN N'' ELSE QUOTENAME(@db) + N'.' END;
-
-        SET @sql = N'
-        SELECT
-            @dbn,
-            s.name,
-            o.name,
-            o.type_desc,
-            CASE WHEN UPPER(m.definition) LIKE ''%BEGIN TRY%''
-                  AND UPPER(m.definition) LIKE ''%BEGIN CATCH%'' THEN 1 ELSE 0 END,
-            CASE WHEN UPPER(m.definition) LIKE ''%ERROR_MESSAGE%''
-                   OR UPPER(m.definition) LIKE ''%RAISERROR%''
-                   OR UPPER(m.definition) LIKE ''%THROW%''
-                   OR UPPER(m.definition) LIKE ''%XACT_STATE%'' THEN 1 ELSE 0 END
-        FROM ' + @prefix + N'sys.sql_modules AS m
-        INNER JOIN ' + @prefix + N'sys.objects AS o ON o.object_id = m.object_id
-        INNER JOIN ' + @prefix + N'sys.schemas AS s ON s.schema_id = o.schema_id
-        WHERE o.is_ms_shipped = 0
-          AND o.type IN (''P'', ''TR'')
-          AND (
-                   LOWER(o.name) LIKE ''%etl%''
-                OR LOWER(o.name) LIKE ''%load%''
-                OR LOWER(o.name) LIKE ''%import%''
-                OR LOWER(o.name) LIKE ''%export%''
-                OR LOWER(o.name) LIKE ''%extract%''
-                OR LOWER(o.name) LIKE ''%staging%''
-                OR LOWER(o.name) LIKE ''%stg[_]%''
-                OR LOWER(o.name) LIKE ''%transform%''
-                OR LOWER(o.name) LIKE ''%ingest%''
-                OR LOWER(o.name) LIKE ''%merge%''
-                OR LOWER(o.name) LIKE ''%sync%''
-                OR LOWER(s.name) LIKE ''%etl%''
-                OR LOWER(s.name) LIKE ''%stg%''
-                OR LOWER(s.name) LIKE ''%staging%''
-                OR UPPER(m.definition) LIKE ''%BULK INSERT%''
-                OR UPPER(m.definition) LIKE ''%OPENROWSET%''
-                OR UPPER(m.definition) LIKE ''%MERGE %''
-              );';
-
-        INSERT INTO #EtlModules (DatabaseName, SchemaName, ObjectName, ObjectType, HasTryCatch, HasErrorHandler)
-        EXEC sp_executesql @sql, N'@dbn SYSNAME', @dbn = @db;
+        EXEC sys.sp_executesql @sql, N'@dbname sysname', @dbname = @db;
     END TRY
     BEGIN CATCH
-        SET @sql = NULL;
-    END CATCH
+        -- skip inaccessible database
+    END CATCH;
 
-    FETCH NEXT FROM db_cur INTO @db;
+    FETCH NEXT FROM db_cursor INTO @db;
 END
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
 
-CLOSE db_cur;
-DEALLOCATE db_cur;
+SELECT
+    @EtlLikeModules = ISNULL(SUM(etl_like_modules), 0),
+    @EtlLikeWithTryCatch = ISNULL(SUM(etl_like_with_trycatch), 0),
+    @TryCatchModules = ISNULL(SUM(trycatch_modules), 0)
+FROM #ModuleStats;
 
-IF @IsAzureSqlDb = 0 AND DB_ID('msdb') IS NOT NULL
+IF OBJECT_ID(N'msdb.dbo.sysjobs', N'U') IS NOT NULL
 BEGIN
-    BEGIN TRY
-        SET @sql = N'
-        SELECT
-            j.name,
-            st.step_name,
-            st.subsystem,
-            st.on_fail_action,
-            st.retry_attempts
-        FROM msdb.dbo.sysjobs AS j
-        INNER JOIN msdb.dbo.sysjobsteps AS st ON st.job_id = j.job_id
-        WHERE j.enabled = 1
-          AND (
-                   st.subsystem IN (''SSIS'', ''DTS'')
-                OR LOWER(j.name) LIKE ''%etl%''
-                OR LOWER(j.name) LIKE ''%load%''
-                OR LOWER(j.name) LIKE ''%import%''
-                OR LOWER(j.name) LIKE ''%extract%''
-                OR LOWER(j.name) LIKE ''%staging%''
-                OR LOWER(st.step_name) LIKE ''%etl%''
-                OR LOWER(st.step_name) LIKE ''%load%''
-                OR LOWER(st.step_name) LIKE ''%import%''
-              );';
+    SELECT @JobCount = COUNT(*)
+    FROM msdb.dbo.sysjobs j
+    WHERE j.enabled = 1;
 
-        INSERT INTO #EtlJobSteps (JobName, StepName, Subsystem, OnFailAction, RetryAttempts)
-        EXEC sp_executesql @sql;
-    END TRY
-    BEGIN CATCH
-        SET @sql = NULL;
-    END CATCH
+    SELECT @JobsWithFailureAction = COUNT(DISTINCT j.job_id)
+    FROM msdb.dbo.sysjobs j
+    INNER JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id
+    WHERE j.enabled = 1
+      AND s.on_fail_action IN (2, 4);
+
+    SELECT @JobsWithNotifyFail = COUNT(*)
+    FROM msdb.dbo.sysjobs j
+    WHERE j.enabled = 1
+      AND (
+            ISNULL(j.notify_level_email, 0) IN (2, 3)
+            OR ISNULL(j.notify_level_eventlog, 0) IN (2, 3)
+            OR ISNULL(j.notify_level_page, 0) IN (2, 3)
+          );
 END
 
-DECLARE @TotalModules INT = (SELECT COUNT(*) FROM #EtlModules);
-DECLARE @ModulesOk    INT = (SELECT COUNT(*) FROM #EtlModules WHERE HasTryCatch = 1);
-DECLARE @TotalSteps   INT = (SELECT COUNT(*) FROM #EtlJobSteps);
-DECLARE @StepsOk      INT = (SELECT COUNT(*) FROM #EtlJobSteps WHERE OnFailAction = 4 OR RetryAttempts > 0);
-DECLARE @SsisSteps    INT = (SELECT COUNT(*) FROM #EtlJobSteps WHERE Subsystem IN ('SSIS', 'DTS'));
+IF @SsisDbExists = 1
+    SET @EvidenceParts = @EvidenceParts + N'SSISDB packages=' + CAST(@PackageCount AS nvarchar(20))
+        + N'; packages_with_OnError_or_OnTaskFailed_events=' + CAST(@PackagesWithHandlers AS nvarchar(20))
+        + N'; onerror_event_rows=' + CAST(@HandlerCount AS nvarchar(20)) + N'. ';
+ELSE
+    SET @EvidenceParts = @EvidenceParts + N'SSISDB not present. ';
 
-DECLARE @TotalUnits INT = @TotalModules + @TotalSteps;
-DECLARE @UnitsOk    INT = @ModulesOk + @StepsOk;
-DECLARE @Coverage DECIMAL(6,2) =
-    CASE WHEN @TotalUnits = 0 THEN 0 ELSE (@UnitsOk * 100.0) / @TotalUnits END;
+SET @EvidenceParts = @EvidenceParts
+    + N'ETL-like modules=' + CAST(@EtlLikeModules AS nvarchar(20))
+    + N'; ETL-like with TRY/CATCH=' + CAST(@EtlLikeWithTryCatch AS nvarchar(20))
+    + N'; total modules with TRY/CATCH=' + CAST(@TryCatchModules AS nvarchar(20)) + N'. ';
 
-DECLARE @BadModules NVARCHAR(1500) = ISNULL(STUFF((
-        SELECT TOP (5) N'; ' + e.DatabaseName + N'.' + e.SchemaName + N'.' + e.ObjectName
-        FROM #EtlModules AS e
-        WHERE e.HasTryCatch = 0
-        ORDER BY e.DatabaseName, e.SchemaName, e.ObjectName
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'none');
+SET @EvidenceParts = @EvidenceParts
+    + N'Enabled Agent jobs=' + CAST(@JobCount AS nvarchar(20))
+    + N'; jobs_with_on_fail_path=' + CAST(@JobsWithFailureAction AS nvarchar(20))
+    + N'; jobs_notify_on_failure=' + CAST(@JobsWithNotifyFail AS nvarchar(20)) + N'.';
 
-DECLARE @BadSteps NVARCHAR(1500) = ISNULL(STUFF((
-        SELECT TOP (5) N'; ' + s.JobName + N' / ' + s.StepName
-        FROM #EtlJobSteps AS s
-        WHERE NOT (s.OnFailAction = 4 OR s.RetryAttempts > 0)
-        ORDER BY s.JobName, s.StepName
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'none');
+IF @PackageCount > 0 OR @EtlLikeModules > 0 OR @JobCount > 0
+    SET @HasEtlSurface = 1;
 
-DECLARE @DbCount INT = (SELECT COUNT(*) FROM #Dbs);
-DECLARE @DbList NVARCHAR(MAX) = ISNULL(STUFF((
-        SELECT N', ' + d.DatabaseName
-        FROM #Dbs AS d
-        ORDER BY d.DatabaseName
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'none');
+IF @PackageCount > 0 AND @PackagesWithHandlers > 0 AND (@PackagesWithHandlers * 1.0 >= @PackageCount * 0.5)
+    SET @StrongSsis = 1;
+ELSE IF @PackageCount > 0 AND (@PackagesWithHandlers > 0 OR @HandlerCount > 0)
+    SET @PartialSsis = 1;
 
-DECLARE @DatabaseQueried NVARCHAR(1000) =
-    CASE
-        WHEN @DbCount = 0 THEN N'No accessible user databases'
-        WHEN @DbCount <= 10 THEN LEFT(@DbList, 900)
-        ELSE CAST(@DbCount AS NVARCHAR(10)) + N' accessible user databases'
-    END
-    + CASE WHEN @IsAzureSqlDb = 0 THEN N' + msdb' ELSE N'' END;
+IF @EtlLikeModules > 0 AND (@EtlLikeWithTryCatch * 1.0 >= @EtlLikeModules * 0.5)
+    SET @StrongTsql = 1;
+ELSE IF @EtlLikeWithTryCatch > 0
+    SET @PartialTsql = 1;
+ELSE IF @EtlLikeModules = 0 AND @TryCatchModules >= 5
+    SET @PartialTsql = 1;
 
-DECLARE @Score INT;
-DECLARE @Result NVARCHAR(20);
+IF @JobCount > 0 AND (@JobsWithFailureAction * 1.0 >= @JobCount * 0.5)
+    SET @StrongJobs = 1;
+ELSE IF @JobsWithFailureAction > 0 OR @JobsWithNotifyFail > 0
+    SET @PartialJobs = 1;
 
-IF @TotalUnits = 0
+IF @HasEtlSurface = 0
 BEGIN
     SET @Score = 0;
-    SET @Result = N'NeedsReview';
+    SET @Finding = N'No database found to be queried for ETL error-handling artifacts (no SSIS packages, ETL-like modules, or enabled Agent jobs). ' + @EvidenceParts;
+    SET @DatabaseQueried = N'None.';
+END
+ELSE IF (@StrongSsis = 1 OR @StrongTsql = 1)
+     AND (@StrongJobs = 1 OR @PartialJobs = 1 OR @JobCount = 0)
+BEGIN
+    SET @Score = 3;
+    SET @Finding = N'Structured ETL error handling is evident across available surfaces. ' + @EvidenceParts;
+    SET @DatabaseQueried = CASE WHEN @SsisDbExists = 1 THEN N'SSISDB; user databases; msdb' ELSE N'user databases; msdb' END;
+END
+ELSE IF @StrongSsis = 1 OR @StrongTsql = 1 OR @PartialSsis = 1 OR @PartialTsql = 1 OR @PartialJobs = 1 OR @StrongJobs = 1
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'Partial structured error handling detected; coverage of TRY/CATCH, SSIS OnError/OnTaskFailed evidence, or Agent failure paths is incomplete. ' + @EvidenceParts;
+    SET @DatabaseQueried = CASE WHEN @SsisDbExists = 1 THEN N'SSISDB; user databases; msdb' ELSE N'user databases; msdb' END;
 END
 ELSE
 BEGIN
-    IF @Coverage >= 90 SET @Score = 3;
-    ELSE IF @Coverage >= 70 SET @Score = 2;
-    ELSE IF @Coverage >= 30 SET @Score = 1;
-    ELSE SET @Score = 0;
-
-    IF @SsisSteps > 0 AND @Score = 3 SET @Score = 2;
-
-    SET @Result = CASE WHEN @Score = 3 THEN N'Pass'
-                       WHEN @Score = 2 THEN N'NeedsReview'
-                       ELSE N'Fail' END;
+    SET @Score = 1;
+    SET @Finding = N'ETL-related artifacts exist but structured error handling (TRY/CATCH, SSIS OnError/OnTaskFailed evidence, failure paths) was not detected. ' + @EvidenceParts;
+    SET @DatabaseQueried = CASE WHEN @SsisDbExists = 1 THEN N'SSISDB; user databases; msdb' ELSE N'user databases; msdb' END;
 END
 
-DECLARE @Finding NVARCHAR(4000) =
-    CASE
-        WHEN @TotalUnits = 0 THEN
-            N'No ETL-related T-SQL modules or ETL/SSIS SQL Agent job steps were discovered across '
-            + @DatabaseQueried
-            + N'. Structured ETL error handling could not be evidenced from SQL Server metadata; ETL may run entirely on an external platform (ADF, Databricks, third-party tool) and requires manual review.'
-        ELSE
-            N'ETL error-handling coverage ' + CAST(@Coverage AS NVARCHAR(10)) + N'% ('
-            + CAST(@UnitsOk AS NVARCHAR(10)) + N' of ' + CAST(@TotalUnits AS NVARCHAR(10))
-            + N' ETL units compliant). T-SQL ETL modules: ' + CAST(@ModulesOk AS NVARCHAR(10))
-            + N' of ' + CAST(@TotalModules AS NVARCHAR(10)) + N' contain BEGIN TRY/BEGIN CATCH. '
-            + N'ETL job steps: ' + CAST(@StepsOk AS NVARCHAR(10)) + N' of ' + CAST(@TotalSteps AS NVARCHAR(10))
-            + N' define an explicit on-failure path (goto step) or retry attempts; '
-            + CAST(@SsisSteps AS NVARCHAR(10)) + N' are SSIS/DTS steps whose package-internal event handlers are not visible to SQL Server metadata'
-            + CASE WHEN @SsisSteps > 0 THEN N' (score capped pending manual package review)' ELSE N'' END
-            + N'. Modules without TRY/CATCH (up to 5): ' + @BadModules
-            + N'. Job steps without a failure path (up to 5): ' + @BadSteps + N'.'
-    END;
-
-IF OBJECT_ID('tempdb..#EtlModules') IS NOT NULL DROP TABLE #EtlModules;
-IF OBJECT_ID('tempdb..#EtlJobSteps') IS NOT NULL DROP TABLE #EtlJobSteps;
-IF OBJECT_ID('tempdb..#Dbs') IS NOT NULL DROP TABLE #Dbs;
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT
-    @Result           AS Result,
-    @Score            AS Score,
-    @DatabaseQueried  AS DatabaseQueried,
-    @Finding          AS Finding;
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;
+
+IF OBJECT_ID('tempdb..#ModuleStats') IS NOT NULL DROP TABLE #ModuleStats;

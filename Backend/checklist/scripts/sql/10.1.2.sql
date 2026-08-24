@@ -1,167 +1,240 @@
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @IsAzureSqlDb BIT = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) IN (5, 6, 9, 11) THEN 1 ELSE 0 END;
-DECLARE @DatabaseQueried NVARCHAR(256) = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) IN (5, 6, 9, 11) THEN DB_NAME() ELSE N'master' END;
+DECLARE @Result          VARCHAR(10)  = 'Fail';
+DECLARE @Score           INT          = 0;
+DECLARE @DatabaseQueried NVARCHAR(200) = N'N/A';
+DECLARE @Finding         NVARCHAR(MAX) = N'';
 
-DECLARE @UserDbCount INT = 0;
-DECLARE @QueryStoreDbCount INT = 0;
-DECLARE @WaitXeSessions INT = 0;
-DECLARE @RunningXeSessions INT = 0;
-DECLARE @DataCollectorEnabled INT = 0;
-DECLARE @RunningCollectionSets INT = 0;
-DECLARE @PerfMonitoringJobs INT = 0;
-DECLARE @PlatformTelemetry INT = 0;
-DECLARE @Indicators INT = 0;
-DECLARE @Score INT;
-DECLARE @Result NVARCHAR(20);
-DECLARE @Finding NVARCHAR(4000);
-DECLARE @sql NVARCHAR(MAX);
+DECLARE @IsAzure         BIT = 0;
+DECLARE @CatCpu          BIT = 0;
+DECLARE @CatMemory       BIT = 0;
+DECLARE @CatIo           BIT = 0;
+DECLARE @CatResource     BIT = 0;
+DECLARE @CatWaits        BIT = 0;
+DECLARE @CategoryCount   INT = 0;
 
-/* Indicator 3: Query Store coverage over online, writable user databases */
-IF COL_LENGTH('sys.databases', 'is_query_store_on') IS NOT NULL
-BEGIN
-    BEGIN TRY
-        SET @sql = N'SELECT @u = COUNT(*), @q = SUM(CASE WHEN is_query_store_on = 1 THEN 1 ELSE 0 END)
-                     FROM sys.databases
-                     WHERE database_id > 4 AND state_desc = N''ONLINE'' AND is_read_only = 0;';
-        EXEC sys.sp_executesql @sql,
-             N'@u INT OUTPUT, @q INT OUTPUT',
-             @u = @UserDbCount OUTPUT, @q = @QueryStoreDbCount OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @UserDbCount = 0;
-        SET @QueryStoreDbCount = 0;
-    END CATCH;
-END;
+DECLARE @CpuDetail       NVARCHAR(200) = N'CPU: not available';
+DECLARE @MemDetail       NVARCHAR(200) = N'Memory: not available';
+DECLARE @IoDetail        NVARCHAR(200) = N'IO: not available';
+DECLARE @ResDetail       NVARCHAR(200) = N'Resource/DTU-vCore: not available';
+DECLARE @WaitDetail      NVARCHAR(200) = N'Waits: not available';
 
-SET @UserDbCount = ISNULL(@UserDbCount, 0);
-SET @QueryStoreDbCount = ISNULL(@QueryStoreDbCount, 0);
+DECLARE @Runnable        INT = 0;
+DECLARE @SchedulerCnt    INT = 0;
+DECLARE @PhysicalMemKb   BIGINT = 0;
+DECLARE @IoReads         BIGINT = 0;
+DECLARE @IoWrites        BIGINT = 0;
+DECLARE @WaitTypes       INT = 0;
+DECLARE @WaitMs          BIGINT = 0;
+DECLARE @AvgCpuPercent   DECIMAL(5, 2) = NULL;
+DECLARE @AvgDtuPercent   DECIMAL(5, 2) = NULL;
+DECLARE @ResourceSamples INT = 0;
+DECLARE @BatchReq        BIGINT = NULL;
+DECLARE @Ple             BIGINT = NULL;
+DECLARE @CpuCount        INT = NULL;
 
-/* Indicator 2: Extended Events sessions capturing wait / resource / CPU / IO events */
 BEGIN TRY
-    IF @IsAzureSqlDb = 1
-        SET @sql = N'SELECT @w = COUNT(DISTINCT es.event_session_id)
-                     FROM sys.database_event_sessions AS es
-                     INNER JOIN sys.database_event_session_events AS ev
-                         ON ev.event_session_id = es.event_session_id
-                     WHERE ev.name LIKE N''%wait%''
-                        OR ev.name LIKE N''%resource%''
-                        OR ev.name LIKE N''%cpu%''
-                        OR ev.name LIKE N''%io_%'';
-                     SELECT @r = COUNT(*) FROM sys.dm_xe_database_sessions;';
-    ELSE
-        SET @sql = N'SELECT @w = COUNT(DISTINCT es.event_session_id)
-                     FROM sys.server_event_sessions AS es
-                     INNER JOIN sys.server_event_session_events AS ev
-                         ON ev.event_session_id = es.event_session_id
-                     WHERE es.name NOT IN (N''system_health'', N''AlwaysOn_health'')
-                       AND (ev.name LIKE N''%wait%''
-                         OR ev.name LIKE N''%resource%''
-                         OR ev.name LIKE N''%cpu%''
-                         OR ev.name LIKE N''%io_%'');
-                     SELECT @r = COUNT(*)
-                     FROM sys.dm_xe_sessions
-                     WHERE name NOT IN (N''system_health'', N''AlwaysOn_health'')
-                       AND name NOT LIKE N''hkenginexesession%'';';
+    IF SERVERPROPERTY('EngineEdition') = 5
+        SET @IsAzure = 1;
 
-    EXEC sys.sp_executesql @sql,
-         N'@w INT OUTPUT, @r INT OUTPUT',
-         @w = @WaitXeSessions OUTPUT, @r = @RunningXeSessions OUTPUT;
+    /* CPU — schedulers show runnable/active workload signal */
+    SELECT
+        @Runnable     = ISNULL(SUM(CASE WHEN runnable_tasks_count > 0 THEN runnable_tasks_count ELSE 0 END), 0),
+        @SchedulerCnt = ISNULL(SUM(CASE WHEN status = N'VISIBLE ONLINE' THEN 1 ELSE 0 END), 0)
+    FROM sys.dm_os_schedulers
+    WHERE scheduler_id < 255;
+
+    IF @SchedulerCnt > 0
+    BEGIN
+        SET @CatCpu = 1;
+        SET @CpuDetail = N'CPU: ' + CAST(@SchedulerCnt AS NVARCHAR(20))
+            + N' online scheduler(s); runnable_tasks=' + CAST(@Runnable AS NVARCHAR(20));
+    END
+
+    /* Memory — process memory DMV */
+    IF OBJECT_ID(N'sys.dm_os_process_memory') IS NOT NULL
+    BEGIN
+        SELECT @PhysicalMemKb = ISNULL(physical_memory_in_use_kb, 0)
+        FROM sys.dm_os_process_memory;
+
+        IF @PhysicalMemKb > 0
+        BEGIN
+            SET @CatMemory = 1;
+            SET @MemDetail = N'Memory: physical_memory_in_use_kb='
+                + CAST(@PhysicalMemKb AS NVARCHAR(30));
+        END
+    END
+
+    IF @CatMemory = 0 AND OBJECT_ID(N'sys.dm_os_sys_memory') IS NOT NULL
+    BEGIN
+        SELECT @PhysicalMemKb = ISNULL(available_physical_memory_kb, 0)
+        FROM sys.dm_os_sys_memory;
+
+        IF @PhysicalMemKb >= 0
+        BEGIN
+            SET @CatMemory = 1;
+            SET @MemDetail = N'Memory: available_physical_memory_kb='
+                + CAST(@PhysicalMemKb AS NVARCHAR(30));
+        END
+    END
+
+    /* IO — virtual file stats cumulative reads/writes */
+    SELECT
+        @IoReads  = ISNULL(SUM(num_of_reads), 0),
+        @IoWrites = ISNULL(SUM(num_of_writes), 0)
+    FROM sys.dm_io_virtual_file_stats(NULL, NULL);
+
+    IF @IoReads > 0 OR @IoWrites > 0
+    BEGIN
+        SET @CatIo = 1;
+        SET @IoDetail = N'IO: reads=' + CAST(@IoReads AS NVARCHAR(30))
+            + N'; writes=' + CAST(@IoWrites AS NVARCHAR(30));
+    END
+
+    /* Resource / DTU / vCore */
+    IF @IsAzure = 1 AND OBJECT_ID(N'sys.dm_db_resource_stats') IS NOT NULL
+    BEGIN
+        SELECT
+            @ResourceSamples = COUNT(*),
+            @AvgCpuPercent   = AVG(CAST(avg_cpu_percent AS DECIMAL(5, 2))),
+            @AvgDtuPercent   = AVG(CAST(avg_dtu_percent AS DECIMAL(5, 2)))
+        FROM sys.dm_db_resource_stats;
+
+        IF @ResourceSamples > 0
+        BEGIN
+            SET @CatResource = 1;
+            SET @ResDetail = N'Resource/DTU-vCore: samples='
+                + CAST(@ResourceSamples AS NVARCHAR(20))
+                + N'; avg_cpu_percent='
+                + ISNULL(CAST(@AvgCpuPercent AS NVARCHAR(20)), N'n/a')
+                + N'; avg_dtu_percent='
+                + ISNULL(CAST(@AvgDtuPercent AS NVARCHAR(20)), N'n/a');
+            SET @DatabaseQueried = DB_NAME();
+        END
+    END
+    ELSE
+    BEGIN
+        /* On-prem / non-Azure: performance counters as resource signal */
+        IF EXISTS (
+            SELECT 1
+            FROM sys.dm_os_performance_counters
+            WHERE counter_name IN (
+                    N'Batch Requests/sec',
+                    N'Page life expectancy',
+                    N'Processes blocked',
+                    N'CPU usage %'
+                )
+              AND cntr_value IS NOT NULL
+        )
+        BEGIN
+            SELECT TOP 1 @BatchReq = cntr_value
+            FROM sys.dm_os_performance_counters
+            WHERE counter_name = N'Batch Requests/sec'
+              AND instance_name = N'';
+
+            SELECT TOP 1 @Ple = cntr_value
+            FROM sys.dm_os_performance_counters
+            WHERE counter_name = N'Page life expectancy'
+              AND object_name LIKE N'%Buffer Manager%';
+
+            IF @BatchReq IS NOT NULL OR @Ple IS NOT NULL OR @SchedulerCnt > 0
+            BEGIN
+                SET @CatResource = 1;
+                SET @ResDetail = N'Resource/vCore-equiv: BatchRequests/sec='
+                    + ISNULL(CAST(@BatchReq AS NVARCHAR(30)), N'n/a')
+                    + N'; PLE='
+                    + ISNULL(CAST(@Ple AS NVARCHAR(30)), N'n/a');
+            END
+        END
+
+        /* Fallback: sys.dm_os_sys_info cpu_count as resource inventory signal */
+        IF @CatResource = 0 AND OBJECT_ID(N'sys.dm_os_sys_info') IS NOT NULL
+        BEGIN
+            SELECT @CpuCount = cpu_count FROM sys.dm_os_sys_info;
+            IF @CpuCount IS NOT NULL AND @CpuCount > 0
+            BEGIN
+                SET @CatResource = 1;
+                SET @ResDetail = N'Resource/vCore-equiv: cpu_count='
+                    + CAST(@CpuCount AS NVARCHAR(20))
+                    + N' (sys.dm_os_sys_info)';
+            END
+        END
+    END
+
+    /* Waits — accumulated wait stats excluding benign waits */
+    SELECT
+        @WaitTypes = COUNT(*),
+        @WaitMs    = ISNULL(SUM(wait_time_ms), 0)
+    FROM sys.dm_os_wait_stats
+    WHERE waiting_tasks_count > 0
+      AND wait_time_ms > 0
+      AND wait_type NOT IN (
+            N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
+            N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
+            N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE',
+            N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
+            N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
+            N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
+            N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT',
+            N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
+            N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', N'MEMORY_ALLOCATION_EXT',
+            N'ONDEMAND_TASK_QUEUE', N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE',
+            N'PARALLEL_REDO_TRAN_LIST', N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
+            N'PREEMPTIVE_XE_GETTARGETSTATE', N'PWAIT_ALL_COMPONENTS_INITIALIZED',
+            N'PWAIT_DIRECTLOGCONSUMER_GETNEXT', N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
+            N'QDS_ASYNC_QUEUE', N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+            N'QDS_SHUTDOWN_QUEUE', N'REDO_THREAD_PENDING_WORK', N'REQUEST_FOR_DEADLOCK_SEARCH',
+            N'RESOURCE_QUEUE', N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP',
+            N'SLEEP_DCOMSTARTUP', N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY',
+            N'SLEEP_MASTERUPGRADED', N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK',
+            N'SLEEP_TEMPDBSTARTUP', N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP',
+            N'SQLTRACE_BUFFER_FLUSH', N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES',
+            N'WAIT_FOR_RESULTS', N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_RECOVERY',
+            N'WAIT_XTP_HOST_WAIT', N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE',
+            N'XE_DISPATCHER_JOIN', N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT'
+      );
+
+    IF @WaitTypes > 0
+    BEGIN
+        SET @CatWaits = 1;
+        SET @WaitDetail = N'Waits: meaningful_wait_types='
+            + CAST(@WaitTypes AS NVARCHAR(20))
+            + N'; total_wait_time_ms=' + CAST(@WaitMs AS NVARCHAR(30));
+    END
+
+    SET @CategoryCount =
+          CAST(@CatCpu AS INT)
+        + CAST(@CatMemory AS INT)
+        + CAST(@CatIo AS INT)
+        + CAST(@CatResource AS INT)
+        + CAST(@CatWaits AS INT);
+
+    IF @CategoryCount >= 5
+        SET @Score = 3;
+    ELSE IF @CategoryCount >= 3
+        SET @Score = 2;
+    ELSE IF @CategoryCount >= 1
+        SET @Score = 1;
+    ELSE
+        SET @Score = 0;
+
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
+    SET @Finding = N'Key metric categories tracked: '
+        + CAST(@CategoryCount AS NVARCHAR(10))
+        + N'/5. '
+        + @CpuDetail + N'; '
+        + @MemDetail + N'; '
+        + @IoDetail + N'; '
+        + @ResDetail + N'; '
+        + @WaitDetail
+        + CASE WHEN @IsAzure = 1 THEN N' [Azure SQL DB]' ELSE N' [Non-Azure]' END
+        + N'.';
 END TRY
 BEGIN CATCH
-    SET @WaitXeSessions = 0;
-    SET @RunningXeSessions = 0;
+    SET @Score   = 0;
+    SET @Result  = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+    SET @Finding = N'Error checking key metrics tracking: ' + ERROR_MESSAGE();
 END CATCH;
 
-SET @WaitXeSessions = ISNULL(@WaitXeSessions, 0);
-SET @RunningXeSessions = ISNULL(@RunningXeSessions, 0);
-
-/* Indicators 1 and 4: Data Collector / MDW and metric-collection Agent jobs, or Azure platform telemetry */
-IF @IsAzureSqlDb = 0 AND DB_ID('msdb') IS NOT NULL
-BEGIN
-    BEGIN TRY
-        SET @sql = N'SELECT @e = COUNT(*)
-                     FROM msdb.dbo.syscollector_config_store
-                     WHERE parameter_name = N''CollectorEnabled'' AND parameter_value = N''1'';';
-        EXEC sys.sp_executesql @sql, N'@e INT OUTPUT', @e = @DataCollectorEnabled OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @DataCollectorEnabled = 0;
-    END CATCH;
-
-    BEGIN TRY
-        SET @sql = N'SELECT @c = COUNT(*) FROM msdb.dbo.syscollector_collection_sets WHERE is_running = 1;';
-        EXEC sys.sp_executesql @sql, N'@c INT OUTPUT', @c = @RunningCollectionSets OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @RunningCollectionSets = 0;
-    END CATCH;
-
-    BEGIN TRY
-        SET @sql = N'SELECT @j = COUNT(*)
-                     FROM msdb.dbo.sysjobs
-                     WHERE enabled = 1
-                       AND (name LIKE N''%perf%''
-                         OR name LIKE N''%monitor%''
-                         OR name LIKE N''%metric%''
-                         OR name LIKE N''%baseline%''
-                         OR name LIKE N''%wait stat%''
-                         OR name LIKE N''%collect%'');';
-        EXEC sys.sp_executesql @sql, N'@j INT OUTPUT', @j = @PerfMonitoringJobs OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @PerfMonitoringJobs = 0;
-    END CATCH;
-END
-ELSE IF @IsAzureSqlDb = 1
-BEGIN
-    BEGIN TRY
-        SET @sql = N'SELECT @p = CASE WHEN EXISTS (SELECT 1 FROM sys.dm_db_resource_stats) THEN 1 ELSE 0 END;';
-        EXEC sys.sp_executesql @sql, N'@p INT OUTPUT', @p = @PlatformTelemetry OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @PlatformTelemetry = 0;
-    END CATCH;
-END;
-
-SET @DataCollectorEnabled = ISNULL(@DataCollectorEnabled, 0);
-SET @RunningCollectionSets = ISNULL(@RunningCollectionSets, 0);
-SET @PerfMonitoringJobs = ISNULL(@PerfMonitoringJobs, 0);
-SET @PlatformTelemetry = ISNULL(@PlatformTelemetry, 0);
-
-SET @Indicators =
-      CASE WHEN @DataCollectorEnabled > 0 OR @RunningCollectionSets > 0 OR @PlatformTelemetry > 0 THEN 1 ELSE 0 END
-    + CASE WHEN @WaitXeSessions > 0 THEN 1 ELSE 0 END
-    + CASE WHEN @UserDbCount > 0 AND @QueryStoreDbCount = @UserDbCount THEN 1 ELSE 0 END
-    + CASE WHEN @PerfMonitoringJobs > 0 THEN 1 ELSE 0 END;
-
-SET @Score = CASE WHEN @Indicators >= 2 THEN 3
-                  WHEN @Indicators = 1 THEN 2
-                  ELSE 1 END;
-
-SET @Result = CASE WHEN @Score = 3 THEN N'Pass' ELSE N'Fail' END;
-
-SET @Finding = CONCAT(
-      N'Engine edition ', @EngineEdition,
-      N'. Key-metric collection indicators detected: ', @Indicators, N' of 4.',
-      N' Query Store enabled on ', @QueryStoreDbCount, N' of ', @UserDbCount, N' online writable user database(s).',
-      N' Extended Events session(s) defined with wait/resource/CPU/IO events: ', @WaitXeSessions,
-      N' (non-default XE sessions currently running: ', @RunningXeSessions, N').',
-      CASE WHEN @IsAzureSqlDb = 1
-           THEN CONCAT(N' Platform resource telemetry (sys.dm_db_resource_stats: CPU, DTU/vCore, IO, memory) available: ',
-                       CASE WHEN @PlatformTelemetry > 0 THEN N'YES' ELSE N'NO' END, N'.')
-           ELSE CONCAT(N' Data Collector enabled: ', CASE WHEN @DataCollectorEnabled > 0 THEN N'YES' ELSE N'NO' END,
-                       N'; collection sets running: ', @RunningCollectionSets,
-                       N'; enabled Agent jobs named for performance/metric collection: ', @PerfMonitoringJobs, N'.')
-      END,
-      CASE WHEN @Score = 3 THEN N' Two or more independent mechanisms are actively capturing key resource metrics.'
-           WHEN @Score = 2 THEN N' Only one collection mechanism is active, so CPU, memory, IO, DTU/vCore and wait coverage is partial.'
-           ELSE N' No evidence of ongoing collection of CPU, memory, IO, DTU/vCore or wait statistics was found.'
-      END);
-
-SELECT
-    @Result AS Result,
-    @Score AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

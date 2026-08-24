@@ -1,154 +1,208 @@
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(50) = N'Fail';
-DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(500) = N'SERVER-WIDE';
-DECLARE @Finding NVARCHAR(MAX) = N'Storage autogrowth configuration could not be determined.';
+IF OBJECT_ID('tempdb..#FileGrowth') IS NOT NULL DROP TABLE #FileGrowth;
 
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-
-CREATE TABLE #FileGrowth
-(
-    DatabaseName    SYSNAME         NOT NULL,
-    LogicalFileName SYSNAME         NOT NULL,
-    FileCategory    NVARCHAR(10)    NOT NULL,
-    IsPercentGrowth BIT             NOT NULL,
-    GrowthValue     INT             NOT NULL,
-    GrowthMB        DECIMAL(18, 2)  NULL,
-    GrowthPercent   INT             NULL,
-    MaxSizeValue    INT             NOT NULL,
-    CurrentSizeMB   DECIMAL(18, 2)  NOT NULL
+CREATE TABLE #FileGrowth (
+    DatabaseName sysname NOT NULL,
+    FileName sysname NOT NULL,
+    FileType nvarchar(60) NOT NULL,
+    SizeMB decimal(18, 2) NOT NULL,
+    GrowthMode nvarchar(20) NOT NULL,
+    GrowthValue int NOT NULL,
+    GrowthMB decimal(18, 2) NULL,
+    IsPercentGrowth bit NOT NULL,
+    IsReadOnly bit NOT NULL,
+    IsIssue bit NOT NULL,
+    IssueReason nvarchar(200) NULL
 );
 
-BEGIN TRY
-    IF @EngineEdition = 5
-    BEGIN
-        INSERT INTO #FileGrowth
-            (DatabaseName, LogicalFileName, FileCategory, IsPercentGrowth, GrowthValue, GrowthMB, GrowthPercent, MaxSizeValue, CurrentSizeMB)
-        SELECT
-            DB_NAME(),
-            df.name,
-            CASE df.type WHEN 0 THEN N'DATA' WHEN 1 THEN N'LOG' ELSE N'OTHER' END,
-            df.is_percent_growth,
-            df.growth,
-            CASE WHEN df.is_percent_growth = 0 THEN CAST(df.growth * 8.0 / 1024.0 AS DECIMAL(18, 2)) END,
-            CASE WHEN df.is_percent_growth = 1 THEN df.growth END,
-            df.max_size,
-            CAST(df.size * 8.0 / 1024.0 AS DECIMAL(18, 2))
-        FROM sys.database_files AS df
-        WHERE df.type IN (0, 1);
+DECLARE @Result nvarchar(20);
+DECLARE @Score int;
+DECLARE @DatabaseQueried nvarchar(128);
+DECLARE @Finding nvarchar(max);
+DECLARE @IsAzure bit = 0;
+DECLARE @TotalFiles int = 0;
+DECLARE @IssueFiles int = 0;
+DECLARE @PercentGrowthFiles int = 0;
+DECLARE @TinyFixedFiles int = 0;
+DECLARE @DisabledGrowthFiles int = 0;
+DECLARE @SampleIssues nvarchar(max) = N'';
 
-        SET @DatabaseQueried = DB_NAME();
+IF SERVERPROPERTY('EngineEdition') = 5 SET @IsAzure = 1;
+SET @DatabaseQueried = CASE WHEN @IsAzure = 1 THEN DB_NAME() ELSE N'ALL' END;
+
+BEGIN TRY
+    IF @IsAzure = 1
+    BEGIN
+        ;WITH files AS (
+            SELECT
+                DB_NAME() AS DatabaseName,
+                mf.name AS FileName,
+                mf.type_desc AS FileType,
+                CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0 AS SizeMB,
+                CAST(mf.is_percent_growth AS bit) AS IsPercentGrowth,
+                mf.growth AS GrowthValue,
+                CASE WHEN mf.is_percent_growth = 1 THEN NULL
+                     ELSE CAST(mf.growth AS decimal(18, 2)) * 8.0 / 1024.0
+                END AS GrowthMB,
+                CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(60)) AS Updateability
+            FROM sys.database_files AS mf
+            WHERE mf.type IN (0, 1)
+        )
+        INSERT INTO #FileGrowth (
+            DatabaseName, FileName, FileType, SizeMB, GrowthMode, GrowthValue, GrowthMB,
+            IsPercentGrowth, IsReadOnly, IsIssue, IssueReason
+        )
+        SELECT
+            f.DatabaseName,
+            f.FileName,
+            f.FileType,
+            f.SizeMB,
+            CASE
+                WHEN f.GrowthValue = 0 THEN 'None'
+                WHEN f.IsPercentGrowth = 1 THEN 'Percent'
+                ELSE 'FixedMB'
+            END AS GrowthMode,
+            f.GrowthValue,
+            f.GrowthMB,
+            f.IsPercentGrowth,
+            CASE WHEN f.Updateability = 'READ_ONLY' THEN 1 ELSE 0 END AS IsReadOnly,
+            CASE
+                WHEN f.GrowthValue = 0 AND f.Updateability <> 'READ_ONLY' THEN 1
+                WHEN f.IsPercentGrowth = 1 AND f.SizeMB >= 100 THEN 1
+                WHEN f.IsPercentGrowth = 0 AND f.GrowthValue > 0
+                     AND (CAST(f.GrowthValue AS decimal(18, 2)) * 8.0 / 1024.0) < 64
+                     AND f.SizeMB >= 256 THEN 1
+                ELSE 0
+            END AS IsIssue,
+            CASE
+                WHEN f.GrowthValue = 0 AND f.Updateability <> 'READ_ONLY' THEN 'Autogrowth disabled'
+                WHEN f.IsPercentGrowth = 1 AND f.SizeMB >= 100 THEN 'Percent autogrowth on non-trivial file'
+                WHEN f.IsPercentGrowth = 0 AND f.GrowthValue > 0
+                     AND (CAST(f.GrowthValue AS decimal(18, 2)) * 8.0 / 1024.0) < 64
+                     AND f.SizeMB >= 256 THEN 'Fixed autogrowth increment under 64 MB on larger file'
+                ELSE NULL
+            END AS IssueReason
+        FROM files AS f;
     END
     ELSE
     BEGIN
-        INSERT INTO #FileGrowth
-            (DatabaseName, LogicalFileName, FileCategory, IsPercentGrowth, GrowthValue, GrowthMB, GrowthPercent, MaxSizeValue, CurrentSizeMB)
+        INSERT INTO #FileGrowth (
+            DatabaseName, FileName, FileType, SizeMB, GrowthMode, GrowthValue, GrowthMB,
+            IsPercentGrowth, IsReadOnly, IsIssue, IssueReason
+        )
         SELECT
-            d.name,
-            mf.name,
-            CASE mf.type WHEN 0 THEN N'DATA' WHEN 1 THEN N'LOG' ELSE N'OTHER' END,
-            mf.is_percent_growth,
-            mf.growth,
-            CASE WHEN mf.is_percent_growth = 0 THEN CAST(mf.growth * 8.0 / 1024.0 AS DECIMAL(18, 2)) END,
-            CASE WHEN mf.is_percent_growth = 1 THEN mf.growth END,
-            mf.max_size,
-            CAST(mf.size * 8.0 / 1024.0 AS DECIMAL(18, 2))
+            d.name AS DatabaseName,
+            mf.name AS FileName,
+            mf.type_desc AS FileType,
+            CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0 AS SizeMB,
+            CASE
+                WHEN mf.growth = 0 THEN 'None'
+                WHEN mf.is_percent_growth = 1 THEN 'Percent'
+                ELSE 'FixedMB'
+            END AS GrowthMode,
+            mf.growth AS GrowthValue,
+            CASE WHEN mf.is_percent_growth = 1 THEN NULL
+                 ELSE CAST(mf.growth AS decimal(18, 2)) * 8.0 / 1024.0
+            END AS GrowthMB,
+            CAST(mf.is_percent_growth AS bit) AS IsPercentGrowth,
+            CASE WHEN d.is_read_only = 1 OR d.is_in_standby = 1 THEN 1 ELSE 0 END AS IsReadOnly,
+            CASE
+                WHEN mf.growth = 0 AND d.is_read_only = 0 AND d.is_in_standby = 0
+                     AND d.state_desc = 'ONLINE' THEN 1
+                WHEN mf.is_percent_growth = 1
+                     AND (CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0) >= 100 THEN 1
+                WHEN mf.is_percent_growth = 0 AND mf.growth > 0
+                     AND (CAST(mf.growth AS decimal(18, 2)) * 8.0 / 1024.0) < 64
+                     AND (CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0) >= 256 THEN 1
+                ELSE 0
+            END AS IsIssue,
+            CASE
+                WHEN mf.growth = 0 AND d.is_read_only = 0 AND d.is_in_standby = 0
+                     AND d.state_desc = 'ONLINE' THEN 'Autogrowth disabled'
+                WHEN mf.is_percent_growth = 1
+                     AND (CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0) >= 100
+                    THEN 'Percent autogrowth on non-trivial file'
+                WHEN mf.is_percent_growth = 0 AND mf.growth > 0
+                     AND (CAST(mf.growth AS decimal(18, 2)) * 8.0 / 1024.0) < 64
+                     AND (CAST(mf.size AS decimal(18, 2)) * 8.0 / 1024.0) >= 256
+                    THEN 'Fixed autogrowth increment under 64 MB on larger file'
+                ELSE NULL
+            END AS IssueReason
         FROM sys.master_files AS mf
         INNER JOIN sys.databases AS d
             ON d.database_id = mf.database_id
         WHERE mf.type IN (0, 1)
-          AND d.state = 0
-          AND d.database_id <> 2;
+          AND d.state_desc = 'ONLINE'
+          AND HAS_DBACCESS(d.name) = 1;
     END
-END TRY
-BEGIN CATCH
-    SET @Finding = N'File metadata could not be read: ' + ERROR_MESSAGE();
-END CATCH;
 
-DECLARE @TotalFiles          INT = 0;
-DECLARE @DatabaseCount       INT = 0;
-DECLARE @PercentGrowthFiles  INT = 0;
-DECLARE @SmallFixedFiles     INT = 0;
-DECLARE @DisabledGrowthFiles INT = 0;
-DECLARE @CappedFiles         INT = 0;
-DECLARE @BadFiles            INT = 0;
-DECLARE @BadPercent          DECIMAL(9, 2) = 0;
+    SELECT
+        @TotalFiles = COUNT(*),
+        @IssueFiles = SUM(CASE WHEN IsIssue = 1 THEN 1 ELSE 0 END),
+        @PercentGrowthFiles = SUM(CASE WHEN IssueReason LIKE N'Percent%' THEN 1 ELSE 0 END),
+        @TinyFixedFiles = SUM(CASE WHEN IssueReason LIKE N'Fixed autogrowth%' THEN 1 ELSE 0 END),
+        @DisabledGrowthFiles = SUM(CASE WHEN IssueReason = N'Autogrowth disabled' THEN 1 ELSE 0 END)
+    FROM #FileGrowth;
 
-SELECT
-    @TotalFiles          = COUNT(*),
-    @DatabaseCount       = COUNT(DISTINCT f.DatabaseName),
-    @PercentGrowthFiles  = ISNULL(SUM(CASE WHEN f.IsPercentGrowth = 1 AND f.GrowthValue > 0 THEN 1 ELSE 0 END), 0),
-    @SmallFixedFiles     = ISNULL(SUM(CASE WHEN f.IsPercentGrowth = 0 AND f.GrowthValue > 0 AND f.GrowthMB < 64 THEN 1 ELSE 0 END), 0),
-    @DisabledGrowthFiles = ISNULL(SUM(CASE WHEN f.GrowthValue = 0 THEN 1 ELSE 0 END), 0),
-    @CappedFiles         = ISNULL(SUM(CASE WHEN f.MaxSizeValue > 0 AND f.MaxSizeValue <> 268435456 THEN 1 ELSE 0 END), 0)
-FROM #FileGrowth AS f;
+    ;WITH top_issues AS (
+        SELECT TOP (8)
+            DatabaseName + N'.' + FileName + N' (' + FileType + N', ' + ISNULL(IssueReason, N'') + N')' AS item
+        FROM #FileGrowth
+        WHERE IsIssue = 1
+        ORDER BY
+            CASE
+                WHEN IssueReason LIKE N'Percent%' THEN 1
+                WHEN IssueReason LIKE N'Fixed%' THEN 2
+                ELSE 3
+            END,
+            SizeMB DESC
+    )
+    SELECT @SampleIssues = STUFF((
+        SELECT N'; ' + item
+        FROM top_issues
+        FOR XML PATH(''), TYPE
+    ).value('.', 'nvarchar(max)'), 1, 2, N'');
 
-SET @BadFiles = @PercentGrowthFiles + @SmallFixedFiles + @DisabledGrowthFiles;
-
-DECLARE @Offenders NVARCHAR(MAX) = N'';
-
-IF @TotalFiles > 0 AND @BadFiles > 0
-BEGIN
-    SET @BadPercent = CAST(@BadFiles AS DECIMAL(9, 2)) * 100.0 / CAST(@TotalFiles AS DECIMAL(9, 2));
-
-    SELECT @Offenders = STUFF(
-        (
-            SELECT TOP (5)
-                N'; ' + f.DatabaseName + N'.' + f.LogicalFileName + N' [' + f.FileCategory + N'] '
-                + CASE
-                    WHEN f.GrowthValue = 0 THEN N'autogrowth disabled'
-                    WHEN f.IsPercentGrowth = 1 THEN N'percent growth ' + CAST(f.GrowthPercent AS NVARCHAR(10)) + N'%'
-                    ELSE N'fixed growth ' + CAST(f.GrowthMB AS NVARCHAR(20)) + N' MB'
-                  END
-            FROM #FileGrowth AS f
-            WHERE f.GrowthValue = 0
-               OR f.IsPercentGrowth = 1
-               OR (f.IsPercentGrowth = 0 AND f.GrowthMB < 64)
-            ORDER BY f.DatabaseName, f.LogicalFileName
-            FOR XML PATH(''), TYPE
-        ).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-    SET @Offenders = ISNULL(@Offenders, N'none listed');
-END
-
-IF @TotalFiles = 0
-BEGIN
-    SET @Score = 0;
-    SET @Finding = N'No data or log file metadata was returned. Autogrowth settings could not be assessed - verify permissions (VIEW ANY DEFINITION / VIEW DATABASE STATE) and that eligible online databases exist. Storage growth monitoring evidence requires manual review.';
-END
-ELSE
-BEGIN
-    IF @EngineEdition <> 5
-        SET @DatabaseQueried = N'SERVER-WIDE (' + CAST(@DatabaseCount AS NVARCHAR(10)) + N' online databases, tempdb excluded)';
-
-    IF @BadFiles = 0
+    IF @TotalFiles = 0
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = N'No database files could be enumerated to assess autogrowth settings.';
+    END
+    ELSE IF @IssueFiles = 0
     BEGIN
         SET @Score = 3;
-        SET @Finding = N'All ' + CAST(@TotalFiles AS NVARCHAR(10)) + N' data/log files across ' + CAST(@DatabaseCount AS NVARCHAR(10))
-            + N' database(s) use fixed-size autogrowth of at least 64 MB with autogrowth enabled. Percent-growth files: 0, sub-64 MB fixed-growth files: 0, autogrowth-disabled files: 0. '
-            + CAST(@CappedFiles AS NVARCHAR(10)) + N' file(s) have a non-default MAXSIZE cap (informational). Confirm that ongoing storage growth monitoring/alerting is documented.';
-    END
-    ELSE IF @BadPercent <= 25.00
-    BEGIN
-        SET @Score = 2;
-        SET @Finding = CAST(@BadFiles AS NVARCHAR(10)) + N' of ' + CAST(@TotalFiles AS NVARCHAR(10)) + N' data/log files ('
-            + CAST(@BadPercent AS NVARCHAR(10)) + N'%) have questionable autogrowth: ' + CAST(@PercentGrowthFiles AS NVARCHAR(10))
-            + N' percent-growth, ' + CAST(@SmallFixedFiles AS NVARCHAR(10)) + N' fixed growth under 64 MB, '
-            + CAST(@DisabledGrowthFiles AS NVARCHAR(10)) + N' with autogrowth disabled. Examples: ' + @Offenders + N'.';
+        SET @Finding = N'All ' + CAST(@TotalFiles AS nvarchar(20))
+            + N' online data/log file(s) use sane autogrowth settings (fixed-size growth, not tiny percent-based increments). Storage growth configuration appears appropriate.';
     END
     ELSE
     BEGIN
-        SET @Score = 1;
-        SET @Finding = CAST(@BadFiles AS NVARCHAR(10)) + N' of ' + CAST(@TotalFiles AS NVARCHAR(10)) + N' data/log files ('
-            + CAST(@BadPercent AS NVARCHAR(10)) + N'%) have unsafe autogrowth settings: ' + CAST(@PercentGrowthFiles AS NVARCHAR(10))
-            + N' percent-growth, ' + CAST(@SmallFixedFiles AS NVARCHAR(10)) + N' fixed growth under 64 MB, '
-            + CAST(@DisabledGrowthFiles AS NVARCHAR(10)) + N' with autogrowth disabled. Examples: ' + @Offenders + N'.';
+        IF @PercentGrowthFiles >= 5 OR (@IssueFiles * 1.0 / NULLIF(@TotalFiles, 0)) >= 0.5
+            OR (@PercentGrowthFiles >= 2 AND @TinyFixedFiles >= 2)
+            SET @Score = 0;
+        ELSE IF @PercentGrowthFiles >= 2 OR @IssueFiles >= 4
+            OR (@IssueFiles * 1.0 / NULLIF(@TotalFiles, 0)) >= 0.25
+            SET @Score = 1;
+        ELSE
+            SET @Score = 2;
+
+        SET @Finding = N'Found ' + CAST(@IssueFiles AS nvarchar(20)) + N' of ' + CAST(@TotalFiles AS nvarchar(20))
+            + N' file(s) with unsane autogrowth: '
+            + CAST(@PercentGrowthFiles AS nvarchar(20)) + N' percent-growth, '
+            + CAST(@TinyFixedFiles AS nvarchar(20)) + N' tiny fixed (<64MB on files >=256MB), '
+            + CAST(@DisabledGrowthFiles AS nvarchar(20)) + N' growth disabled. Examples: '
+            + ISNULL(@SampleIssues, N'n/a')
+            + N'. Prefer fixed increments (e.g. 256-1024 MB) and monitor free space/growth trends.';
     END
-END
+END TRY
+BEGIN CATCH
+    SET @Score = 0;
+    SET @DatabaseQueried = CASE WHEN @IsAzure = 1 THEN ISNULL(DB_NAME(), N'UNKNOWN') ELSE N'ALL' END;
+    SET @Finding = N'Error assessing autogrowth settings: ' + ERROR_MESSAGE();
+END CATCH
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-DROP TABLE #FileGrowth;
+IF OBJECT_ID('tempdb..#FileGrowth') IS NOT NULL DROP TABLE #FileGrowth;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

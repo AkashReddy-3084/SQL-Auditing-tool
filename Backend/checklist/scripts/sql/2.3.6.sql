@@ -1,154 +1,176 @@
-/*==============================================================================
- Checklist Item : 2.3.6 - Failures trigger notifications (email/alert/monitoring)
- Area           : Data Integration & ETL
- Scope          : SERVER (SQL Server Agent / msdb metadata)
- Mode           : READ-ONLY - catalog metadata SELECTs only, no DDL/DML
- Output         : Result, Score, DatabaseQueried, Finding
-==============================================================================*/
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition      INT            = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @Result             NVARCHAR(20)   = N'Fail';
-DECLARE @Score              INT            = 0;
-DECLARE @DatabaseQueried    NVARCHAR(256)  = N'msdb';
-DECLARE @Finding            NVARCHAR(4000) = N'';
-
-DECLARE @TotalJobs          INT = 0;
-DECLARE @EnabledJobs        INT = 0;
-DECLARE @JobsFailNotify     INT = 0;
-DECLARE @JobsEventLogOnly   INT = 0;
-DECLARE @EnabledOperators   INT = 0;
-DECLARE @OperatorsWithEmail INT = 0;
-DECLARE @AlertsWithNotify   INT = 0;
-DECLARE @MailProfiles       INT = 0;
-DECLARE @MailXpEnabled      INT = 0;
-DECLARE @Coverage           DECIMAL(5,1) = 0;
-DECLARE @ErrMsg             NVARCHAR(2000) = NULL;
-DECLARE @MailErr            NVARCHAR(2000) = NULL;
-DECLARE @sql                NVARCHAR(MAX);
-
-SELECT @MailXpEnabled = CONVERT(INT, ISNULL(c.value_in_use, 0))
-FROM sys.configurations AS c
-WHERE c.name = 'Database Mail XPs';
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
+DECLARE @DatabaseQueried NVARCHAR(128) = N'msdb';
 
 IF @EngineEdition = 5
 BEGIN
-    SET @DatabaseQueried = DB_NAME();
-    SET @Score   = 0;
-    SET @Finding = N'Azure SQL Database (EngineEdition 5) does not expose SQL Server Agent or msdb, so ETL failure notification cannot be evaluated from T-SQL. Failure alerting for data integration on this platform is configured outside the database engine (Azure Data Factory / Synapse pipeline alerts, Elastic Jobs, Azure Monitor action groups, Log Analytics rules) and must be verified manually.';
-END
-ELSE IF DB_ID('msdb') IS NULL
+    SELECT
+        CAST('Fail' AS NVARCHAR(20)) AS Result,
+        CAST(0 AS INT) AS Score,
+        CAST(N'N/A' AS NVARCHAR(128)) AS DatabaseQueried,
+        CAST('Azure SQL Database does not host SQL Agent jobs/operators; failure notification configuration cannot be verified from this engine. Check Azure Monitor/ADF/Fabric alerts externally.' AS NVARCHAR(4000)) AS Finding;
+    RETURN;
+END;
+
+IF DB_ID(N'msdb') IS NULL
 BEGIN
-    SET @Score   = 0;
-    SET @Finding = N'The msdb database is not present or not visible on this instance (EngineEdition ' + CONVERT(NVARCHAR(10), @EngineEdition) + N'), so SQL Server Agent job failure notification settings cannot be inspected. Verify the ETL orchestration platform''s alerting configuration manually.';
+    SELECT
+        CAST('Fail' AS NVARCHAR(20)) AS Result,
+        CAST(0 AS INT) AS Score,
+        CAST(N'None.' AS NVARCHAR(128)) AS DatabaseQueried,
+        CAST('msdb database not found; cannot verify SQL Agent failure notifications.' AS NVARCHAR(4000)) AS Finding;
+    RETURN;
+END;
+
+IF OBJECT_ID(N'msdb.dbo.sysjobs') IS NULL
+BEGIN
+    SELECT
+        CAST('Fail' AS NVARCHAR(20)) AS Result,
+        CAST(0 AS INT) AS Score,
+        CAST(@DatabaseQueried AS NVARCHAR(128)) AS DatabaseQueried,
+        CAST('SQL Agent job tables are unavailable; failure notification settings cannot be audited.' AS NVARCHAR(4000)) AS Finding;
+    RETURN;
+END;
+
+DECLARE @EnabledJobCount INT = 0;
+DECLARE @JobsWithFailureNotify INT = 0;
+DECLARE @EnabledOperatorCount INT = 0;
+DECLARE @MailProfileCount INT = 0;
+DECLARE @FailureAlertCount INT = 0;
+DECLARE @JobsMissingNotify INT = 0;
+DECLARE @CoveragePct DECIMAL(5, 2) = 0;
+DECLARE @HasNotifyInfra BIT = 0;
+DECLARE @Score INT = 0;
+DECLARE @Result NVARCHAR(20);
+DECLARE @Finding NVARCHAR(4000);
+
+SELECT @EnabledJobCount = COUNT(*)
+FROM msdb.dbo.sysjobs j
+WHERE j.enabled = 1;
+
+-- Failure notify when level is failure(2) or completion(3) with operator, or event log on failure/completion
+SELECT @JobsWithFailureNotify = COUNT(*)
+FROM msdb.dbo.sysjobs j
+WHERE j.enabled = 1
+  AND (
+        (j.notify_level_email IN (2, 3) AND j.notify_email_operator_id > 0)
+        OR (j.notify_level_page IN (2, 3) AND j.notify_page_operator_id > 0)
+        OR (j.notify_level_netsend IN (2, 3) AND j.notify_netsend_operator_id > 0)
+        OR j.notify_level_eventlog IN (2, 3)
+      );
+
+IF OBJECT_ID(N'msdb.dbo.sysoperators') IS NOT NULL
+BEGIN
+    SELECT @EnabledOperatorCount = COUNT(*)
+    FROM msdb.dbo.sysoperators
+    WHERE enabled = 1;
+END;
+
+IF OBJECT_ID(N'msdb.dbo.sysmail_profile') IS NOT NULL
+BEGIN
+    SELECT @MailProfileCount = COUNT(*)
+    FROM msdb.dbo.sysmail_profile;
+END;
+
+IF OBJECT_ID(N'msdb.dbo.sysalerts') IS NOT NULL
+   AND OBJECT_ID(N'msdb.dbo.sysnotifications') IS NOT NULL
+BEGIN
+    SELECT @FailureAlertCount = COUNT(*)
+    FROM msdb.dbo.sysalerts a
+    WHERE a.enabled = 1
+      AND (
+            a.has_notification = 1
+            OR EXISTS (
+                SELECT 1
+                FROM msdb.dbo.sysnotifications n
+                WHERE n.alert_id = a.id
+              )
+          );
+END
+ELSE IF OBJECT_ID(N'msdb.dbo.sysalerts') IS NOT NULL
+BEGIN
+    SELECT @FailureAlertCount = COUNT(*)
+    FROM msdb.dbo.sysalerts a
+    WHERE a.enabled = 1
+      AND a.has_notification = 1;
+END;
+
+SET @JobsMissingNotify = CASE WHEN @EnabledJobCount > @JobsWithFailureNotify THEN @EnabledJobCount - @JobsWithFailureNotify ELSE 0 END;
+SET @HasNotifyInfra = CASE
+    WHEN @EnabledOperatorCount > 0 OR @MailProfileCount > 0 OR @FailureAlertCount > 0 THEN 1
+    ELSE 0
+END;
+
+IF @EnabledJobCount > 0
+    SET @CoveragePct = CAST(@JobsWithFailureNotify AS DECIMAL(5, 2)) * 100.0 / CAST(@EnabledJobCount AS DECIMAL(5, 2));
+ELSE
+    SET @CoveragePct = 0;
+
+IF @EnabledJobCount = 0
+BEGIN
+    IF @FailureAlertCount > 0 AND @HasNotifyInfra = 1
+        SET @Score = 2;
+    ELSE
+        SET @Score = 0;
+
+    SET @Finding = CASE
+        WHEN @Score >= 2 THEN
+            N'No enabled SQL Agent jobs found; ' + CAST(@FailureAlertCount AS NVARCHAR(20))
+            + N' enabled alert(s) with notification present. Partial credit for alert-based monitoring only; confirm ETL orchestration notifications outside Agent if used.'
+        ELSE
+            N'No enabled SQL Agent jobs and no notified alerts/operators found. Cannot confirm that failures trigger notifications.'
+    END;
+END
+ELSE IF @JobsWithFailureNotify = @EnabledJobCount AND @HasNotifyInfra = 1
+BEGIN
+    SET @Score = 3;
+    SET @Finding = N'All ' + CAST(@EnabledJobCount AS NVARCHAR(20))
+        + N' enabled SQL Agent job(s) notify on failure (email/page/netsend/eventlog). Operators enabled: '
+        + CAST(@EnabledOperatorCount AS NVARCHAR(20))
+        + N'; Database Mail profiles: ' + CAST(@MailProfileCount AS NVARCHAR(20))
+        + N'; notified alerts: ' + CAST(@FailureAlertCount AS NVARCHAR(20)) + N'.';
+END
+ELSE IF @JobsWithFailureNotify = @EnabledJobCount AND @HasNotifyInfra = 0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'All ' + CAST(@EnabledJobCount AS NVARCHAR(20))
+        + N' enabled job(s) have failure notify levels set, but no enabled operators/Database Mail profiles/notified alerts were found. Notifications may not be deliverable.';
+END
+ELSE IF @HasNotifyInfra = 1 AND @CoveragePct >= 50.0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'Failure notification coverage is partial: '
+        + CAST(@JobsWithFailureNotify AS NVARCHAR(20)) + N'/'
+        + CAST(@EnabledJobCount AS NVARCHAR(20))
+        + N' enabled job(s) (' + CAST(CAST(@CoveragePct AS DECIMAL(5, 1)) AS NVARCHAR(20))
+        + N'%). Missing notify on ' + CAST(@JobsMissingNotify AS NVARCHAR(20))
+        + N' job(s). Enabled operators: ' + CAST(@EnabledOperatorCount AS NVARCHAR(20))
+        + N'; mail profiles: ' + CAST(@MailProfileCount AS NVARCHAR(20))
+        + N'; notified alerts: ' + CAST(@FailureAlertCount AS NVARCHAR(20)) + N'.';
+END
+ELSE IF @HasNotifyInfra = 1 OR @JobsWithFailureNotify > 0
+BEGIN
+    SET @Score = 1;
+    SET @Finding = N'Weak failure notification posture: '
+        + CAST(@JobsWithFailureNotify AS NVARCHAR(20)) + N'/'
+        + CAST(@EnabledJobCount AS NVARCHAR(20))
+        + N' enabled job(s) notify on failure. Enabled operators: '
+        + CAST(@EnabledOperatorCount AS NVARCHAR(20))
+        + N'; mail profiles: ' + CAST(@MailProfileCount AS NVARCHAR(20))
+        + N'; notified alerts: ' + CAST(@FailureAlertCount AS NVARCHAR(20)) + N'.';
 END
 ELSE
 BEGIN
-    /* Three-part msdb names stay inside dynamic SQL so the batch still parses where msdb is absent. */
-    BEGIN TRY
-        SET @sql = N'
-        SELECT @pTotal        = COUNT(*),
-               @pEnabled      = ISNULL(SUM(CASE WHEN j.enabled = 1 THEN 1 ELSE 0 END), 0),
-               @pFailNotify   = ISNULL(SUM(CASE WHEN j.enabled = 1
-                                                 AND (j.notify_level_email   IN (2,3)
-                                                   OR j.notify_level_page    IN (2,3)
-                                                   OR j.notify_level_netsend IN (2,3))
-                                                THEN 1 ELSE 0 END), 0),
-               @pEventLogOnly = ISNULL(SUM(CASE WHEN j.enabled = 1
-                                                 AND j.notify_level_eventlog IN (2,3)
-                                                 AND j.notify_level_email    NOT IN (2,3)
-                                                 AND j.notify_level_page     NOT IN (2,3)
-                                                 AND j.notify_level_netsend  NOT IN (2,3)
-                                                THEN 1 ELSE 0 END), 0)
-        FROM msdb.dbo.sysjobs AS j;
-
-        SELECT @pOps      = ISNULL(SUM(CASE WHEN o.enabled = 1 THEN 1 ELSE 0 END), 0),
-               @pOpsEmail = ISNULL(SUM(CASE WHEN o.enabled = 1
-                                             AND NULLIF(LTRIM(RTRIM(o.email_address)), N'''') IS NOT NULL
-                                            THEN 1 ELSE 0 END), 0)
-        FROM msdb.dbo.sysoperators AS o;
-
-        SELECT @pAlerts = ISNULL(SUM(CASE WHEN a.enabled = 1 AND a.has_notification > 0 THEN 1 ELSE 0 END), 0)
-        FROM msdb.dbo.sysalerts AS a;';
-
-        EXEC sys.sp_executesql
-             @sql,
-             N'@pTotal INT OUTPUT, @pEnabled INT OUTPUT, @pFailNotify INT OUTPUT, @pEventLogOnly INT OUTPUT, @pOps INT OUTPUT, @pOpsEmail INT OUTPUT, @pAlerts INT OUTPUT',
-             @pTotal        = @TotalJobs          OUTPUT,
-             @pEnabled      = @EnabledJobs        OUTPUT,
-             @pFailNotify   = @JobsFailNotify     OUTPUT,
-             @pEventLogOnly = @JobsEventLogOnly   OUTPUT,
-             @pOps          = @EnabledOperators   OUTPUT,
-             @pOpsEmail     = @OperatorsWithEmail OUTPUT,
-             @pAlerts       = @AlertsWithNotify   OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @ErrMsg = ERROR_MESSAGE();
-    END CATCH
-
-    /* Database Mail profile metadata is restricted to DatabaseMailUserRole; isolate it. */
-    BEGIN TRY
-        SET @sql = N'SELECT @pProfiles = COUNT(*) FROM msdb.dbo.sysmail_profile;';
-        EXEC sys.sp_executesql @sql, N'@pProfiles INT OUTPUT', @pProfiles = @MailProfiles OUTPUT;
-    END TRY
-    BEGIN CATCH
-        SET @MailProfiles = 0;
-        SET @MailErr = ERROR_MESSAGE();
-    END CATCH
-
-    IF @ErrMsg IS NOT NULL
-    BEGIN
-        SET @Score   = 0;
-        SET @Finding = N'SQL Server Agent notification metadata in msdb could not be read by the audit login. Error: ' + @ErrMsg + N' Grant SQLAgentReaderRole (or equivalent) in msdb and re-run, or verify job failure notifications manually.';
-    END
-    ELSE IF @TotalJobs = 0
-    BEGIN
-        SET @Score   = 0;
-        SET @Finding = N'No SQL Server Agent jobs are defined (or visible to this login) in msdb.dbo.sysjobs, so ETL failure notification cannot be assessed from Agent metadata. Database Mail XPs enabled = ' + CONVERT(NVARCHAR(10), @MailXpEnabled) + N', Database Mail profiles = ' + CONVERT(NVARCHAR(10), @MailProfiles) + N', enabled operators = ' + CONVERT(NVARCHAR(10), @EnabledOperators) + N', enabled alerts with notifications = ' + CONVERT(NVARCHAR(10), @AlertsWithNotify) + N'. If data integration is orchestrated externally (ADF, SSIS Catalog scheduler, third-party scheduler), verify its failure alerting manually.';
-    END
-    ELSE IF @EnabledJobs = 0
-    BEGIN
-        SET @Score   = 0;
-        SET @Finding = CONVERT(NVARCHAR(10), @TotalJobs) + N' SQL Server Agent job(s) exist but none are enabled, so no active data integration schedule could be evaluated for failure notification. Database Mail XPs enabled = ' + CONVERT(NVARCHAR(10), @MailXpEnabled) + N', Database Mail profiles = ' + CONVERT(NVARCHAR(10), @MailProfiles) + N', enabled operators with an email address = ' + CONVERT(NVARCHAR(10), @OperatorsWithEmail) + N'. Manual review required.';
-    END
-    ELSE
-    BEGIN
-        SET @Coverage = CAST((@JobsFailNotify * 100.0) / @EnabledJobs AS DECIMAL(5,1));
-
-        IF @Coverage >= 90.0
-           AND @MailXpEnabled = 1
-           AND @MailProfiles > 0
-           AND @OperatorsWithEmail > 0
-            SET @Score = 3;
-        ELSE IF @Coverage >= 50.0
-             OR (@JobsFailNotify > 0 AND @AlertsWithNotify > 0)
-            SET @Score = 2;
-        ELSE
-            SET @Score = 1;
-
-        SET @Finding =
-              CONVERT(NVARCHAR(10), @JobsFailNotify) + N' of ' + CONVERT(NVARCHAR(10), @EnabledJobs)
-            + N' enabled SQL Server Agent job(s) (' + CONVERT(NVARCHAR(10), @Coverage)
-            + N'%) are configured to notify an operator on failure via email/pager/net send; '
-            + CONVERT(NVARCHAR(10), @TotalJobs) + N' job(s) defined in total. '
-            + CONVERT(NVARCHAR(10), @JobsEventLogOnly) + N' enabled job(s) write to the Windows event log on failure but send no operator notification. '
-            + N'Database Mail XPs enabled = ' + CONVERT(NVARCHAR(10), @MailXpEnabled)
-            + N', Database Mail profiles = ' + CONVERT(NVARCHAR(10), @MailProfiles)
-            + N', enabled operators = ' + CONVERT(NVARCHAR(10), @EnabledOperators)
-            + N' (with email address = ' + CONVERT(NVARCHAR(10), @OperatorsWithEmail)
-            + N'), enabled alerts with notifications = ' + CONVERT(NVARCHAR(10), @AlertsWithNotify) + N'.'
-            + CASE WHEN @MailErr IS NOT NULL
-                   THEN N' Database Mail profile metadata was not readable by this login (' + @MailErr + N'), so the profile count may understate the configuration.'
-                   ELSE N'' END
-            + CASE WHEN @Score = 3 THEN N' Failure notification is configured end to end.'
-                   WHEN @Score = 2 THEN N' Failure notification is only partially configured across the job estate or the delivery chain (Database Mail profile / operator email) is incomplete.'
-                   ELSE N' Most enabled jobs fail silently - no operator notification and no compensating alert notification is configured.' END;
-    END
-END
+    SET @Score = 0;
+    SET @Finding = N'None of ' + CAST(@EnabledJobCount AS NVARCHAR(20))
+        + N' enabled SQL Agent job(s) notify on failure, and no enabled operators/Database Mail profiles/notified alerts were found.';
+END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result          AS Result,
-       @Score           AS Score,
-       @DatabaseQueried AS DatabaseQueried,
-       @Finding         AS Finding;
+SELECT
+    CAST(@Result AS NVARCHAR(20)) AS Result,
+    CAST(@Score AS INT) AS Score,
+    CAST(@DatabaseQueried AS NVARCHAR(128)) AS DatabaseQueried,
+    CAST(@Finding AS NVARCHAR(4000)) AS Finding;

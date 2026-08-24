@@ -1,164 +1,174 @@
 SET NOCOUNT ON;
 
-/* 6.1.2 - Principle of least privilege applied to logins/users (no broad db_owner/sysadmin)
-   Read-only: enumerates high-privilege role membership at server and database level. */
-
-DECLARE @EngineEdition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
-DECLARE @IsAzureSqlDb BIT = CASE WHEN CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
-DECLARE @DatabaseQueried NVARCHAR(256);
-DECLARE @Result NVARCHAR(20);
+DECLARE @Result VARCHAR(10);
 DECLARE @Score INT;
+DECLARE @DatabaseQueried NVARCHAR(MAX);
 DECLARE @Finding NVARCHAR(MAX);
-DECLARE @Detail NVARCHAR(MAX);
-DECLARE @ServerCount INT = 0;
-DECLARE @DbCount INT = 0;
-DECLARE @Total INT = 0;
-DECLARE @DbScanned INT = 0;
 
-IF OBJECT_ID('tempdb..#HighPriv') IS NOT NULL DROP TABLE #HighPriv;
-CREATE TABLE #HighPriv
-(
-    ScopeLevel    NVARCHAR(20)  NOT NULL,
-    DatabaseName  NVARCHAR(128) NOT NULL,
-    PrincipalName NVARCHAR(256) NOT NULL,
-    RoleName      NVARCHAR(128) NOT NULL
-);
+DECLARE @SysAdminCount INT = 0;
+DECLARE @SysAdminList NVARCHAR(MAX) = N'';
+DECLARE @DbOwnerCount INT = 0;
+DECLARE @DbOwnerList NVARCHAR(MAX) = N'';
+DECLARE @IsAzure BIT = 0;
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-IF @IsAzureSqlDb = 1
+IF @EngineEdition = 5
+    SET @IsAzure = 1;
+
+/* Non-system sysadmin members (server scope; skipped on Azure SQL DB) */
+IF @IsAzure = 0
 BEGIN
-    SET @DatabaseQueried = DB_NAME();
-    SET @DbScanned = 1;
+    SELECT
+        @SysAdminCount = COUNT(*),
+        @SysAdminList = STRING_AGG(CAST(sp.name AS NVARCHAR(MAX)), N', ')
+    FROM sys.server_role_members srm
+    INNER JOIN sys.server_principals sp
+        ON sp.principal_id = srm.member_principal_id
+    INNER JOIN sys.server_principals rp
+        ON rp.principal_id = srm.role_principal_id
+    WHERE rp.name = N'sysadmin'
+      AND sp.name NOT IN (N'sa')
+      AND sp.name NOT LIKE N'##MS_%'
+      AND sp.name NOT LIKE N'NT SERVICE\%'
+      AND sp.name NOT LIKE N'NT AUTHORITY\%'
+      AND sp.type IN ('S', 'U', 'G');
+END
 
-    BEGIN TRY
-        INSERT INTO #HighPriv (ScopeLevel, DatabaseName, PrincipalName, RoleName)
-        SELECT 'Database', DB_NAME(), dp.name, r.name
-        FROM sys.database_role_members AS drm
-        INNER JOIN sys.database_principals AS r ON r.principal_id = drm.role_principal_id
-        INNER JOIN sys.database_principals AS dp ON dp.principal_id = drm.member_principal_id
-        WHERE r.name IN (N'db_owner', N'db_securityadmin', N'db_accessadmin')
-          AND dp.name NOT IN (N'dbo', N'guest')
-          AND dp.name NOT LIKE N'##%'
-          AND dp.type <> 'R';
-    END TRY
-    BEGIN CATCH
-        /* insufficient permission to read database principals - leave set empty */
-        SET @Detail = NULL;
-    END CATCH
+SET @SysAdminCount = ISNULL(@SysAdminCount, 0);
+SET @SysAdminList = ISNULL(@SysAdminList, N'');
+
+/* Non-system db_owner members */
+IF @IsAzure = 1
+BEGIN
+    SELECT
+        @DbOwnerCount = COUNT(*),
+        @DbOwnerList = STRING_AGG(CAST(dp.name AS NVARCHAR(MAX)), N', ')
+    FROM sys.database_role_members drm
+    INNER JOIN sys.database_principals dp
+        ON dp.principal_id = drm.member_principal_id
+    INNER JOIN sys.database_principals rp
+        ON rp.principal_id = drm.role_principal_id
+    WHERE rp.name = N'db_owner'
+      AND dp.name NOT IN (N'dbo', N'INFORMATION_SCHEMA', N'sys')
+      AND dp.name NOT LIKE N'##MS_%'
+      AND dp.type IN ('S', 'U', 'G', 'C', 'E', 'X');
+
+    SET @DbOwnerCount = ISNULL(@DbOwnerCount, 0);
+    SET @DbOwnerList = ISNULL(@DbOwnerList, N'');
+    SET @DatabaseQueried = ISNULL(DB_NAME(), N'None');
 END
 ELSE
 BEGIN
-    SET @DatabaseQueried = CONVERT(NVARCHAR(128), SERVERPROPERTY('ServerName'));
-
-    BEGIN TRY
-        INSERT INTO #HighPriv (ScopeLevel, DatabaseName, PrincipalName, RoleName)
-        SELECT 'Server', N'(server)', sp.name, r.name
-        FROM sys.server_role_members AS srm
-        INNER JOIN sys.server_principals AS r ON r.principal_id = srm.role_principal_id
-        INNER JOIN sys.server_principals AS sp ON sp.principal_id = srm.member_principal_id
-        WHERE r.name IN (N'sysadmin', N'securityadmin', N'serveradmin')
-          AND sp.name <> N'sa'
-          AND sp.name NOT LIKE N'##%'
-          AND sp.name NOT LIKE N'NT SERVICE\%'
-          AND sp.name NOT LIKE N'NT AUTHORITY\%'
-          AND sp.is_disabled = 0
-          AND sp.type <> 'R';
-    END TRY
-    BEGIN CATCH
-        /* insufficient permission to read server principals */
-        SET @Detail = NULL;
-    END CATCH
-
-    DECLARE @db SYSNAME;
-    DECLARE @sql NVARCHAR(MAX);
+    DECLARE @DbName SYSNAME;
+    DECLARE @Sql NVARCHAR(MAX);
+    DECLARE @Cnt INT;
+    DECLARE @List NVARCHAR(MAX);
+    DECLARE @DbParts NVARCHAR(MAX) = N'';
+    DECLARE @QueriedParts NVARCHAR(MAX) = N'';
 
     DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
         SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.state = 0
+        FROM sys.databases d
+        WHERE d.state = 0
           AND d.is_read_only = 0
-          AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE'
+          AND d.name NOT IN (N'master', N'tempdb', N'model', N'msdb')
           AND HAS_DBACCESS(d.name) = 1
         ORDER BY d.name;
 
     OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @db;
+    FETCH NEXT FROM db_cursor INTO @DbName;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        SET @DbScanned = @DbScanned + 1;
-
-        SET @sql = N'SELECT ''Database'', @dbname, dp.name, r.name
-                     FROM ' + QUOTENAME(@db) + N'.sys.database_role_members AS drm
-                     INNER JOIN ' + QUOTENAME(@db) + N'.sys.database_principals AS r
-                         ON r.principal_id = drm.role_principal_id
-                     INNER JOIN ' + QUOTENAME(@db) + N'.sys.database_principals AS dp
-                         ON dp.principal_id = drm.member_principal_id
-                     WHERE r.name IN (N''db_owner'', N''db_securityadmin'', N''db_accessadmin'')
-                       AND dp.name NOT IN (N''dbo'', N''guest'')
-                       AND dp.name NOT LIKE N''##%''
-                       AND dp.type <> ''R'';';
+        SET @Cnt = 0;
+        SET @List = N'';
+        SET @Sql = N'
+SELECT
+    @CntOut = COUNT(*),
+    @ListOut = STRING_AGG(CAST(dp.name AS NVARCHAR(MAX)), N'', '')
+FROM ' + QUOTENAME(@DbName) + N'.sys.database_role_members drm
+INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.database_principals dp
+    ON dp.principal_id = drm.member_principal_id
+INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.database_principals rp
+    ON rp.principal_id = drm.role_principal_id
+WHERE rp.name = N''db_owner''
+  AND dp.name NOT IN (N''dbo'', N''INFORMATION_SCHEMA'', N''sys'')
+  AND dp.name NOT LIKE N''##MS_%''
+  AND dp.type IN (''S'', ''U'', ''G'', ''C'', ''E'', ''X'');';
 
         BEGIN TRY
-            INSERT INTO #HighPriv (ScopeLevel, DatabaseName, PrincipalName, RoleName)
-            EXEC sp_executesql @sql, N'@dbname SYSNAME', @dbname = @db;
+            EXEC sp_executesql
+                @Sql,
+                N'@CntOut INT OUTPUT, @ListOut NVARCHAR(MAX) OUTPUT',
+                @CntOut = @Cnt OUTPUT,
+                @ListOut = @List OUTPUT;
+
+            SET @Cnt = ISNULL(@Cnt, 0);
+            SET @List = ISNULL(@List, N'');
+            SET @DbOwnerCount = @DbOwnerCount + @Cnt;
+
+            IF @QueriedParts = N''
+                SET @QueriedParts = @DbName;
+            ELSE
+                SET @QueriedParts = @QueriedParts + N', ' + @DbName;
+
+            IF @Cnt > 0 AND ISNULL(@List, N'') <> N''
+            BEGIN
+                IF @DbParts = N''
+                    SET @DbParts = @DbName + N': ' + @List;
+                ELSE
+                    SET @DbParts = @DbParts + N'; ' + @DbName + N': ' + @List;
+            END
         END TRY
         BEGIN CATCH
-            /* database unreadable or offline mid-scan - skip it */
-            SET @Detail = NULL;
+            /* Skip databases that cannot be queried */
+            SET @Cnt = @Cnt;
         END CATCH
 
-        FETCH NEXT FROM db_cursor INTO @db;
+        FETCH NEXT FROM db_cursor INTO @DbName;
     END
 
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
+
+    SET @DbOwnerList = ISNULL(@DbParts, N'');
+    SET @DatabaseQueried = CASE
+        WHEN ISNULL(@QueriedParts, N'') = N'' THEN N'None'
+        ELSE @QueriedParts
+    END;
 END
 
-SELECT @ServerCount = SUM(CASE WHEN ScopeLevel = 'Server' THEN 1 ELSE 0 END),
-       @DbCount     = SUM(CASE WHEN ScopeLevel = 'Database' THEN 1 ELSE 0 END)
-FROM #HighPriv;
-
-SET @ServerCount = ISNULL(@ServerCount, 0);
-SET @DbCount = ISNULL(@DbCount, 0);
-SET @Total = @ServerCount + @DbCount;
-
-SELECT @Detail = STUFF((
-        SELECT N'; ' + x.DatabaseName + N' -> ' + x.PrincipalName + N' [' + x.RoleName + N']'
-        FROM (
-            SELECT TOP (15) h.ScopeLevel, h.DatabaseName, h.PrincipalName, h.RoleName
-            FROM #HighPriv AS h
-            ORDER BY h.ScopeLevel, h.DatabaseName, h.RoleName, h.PrincipalName
-        ) AS x
-        ORDER BY x.ScopeLevel, x.DatabaseName, x.RoleName, x.PrincipalName
-        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-SET @Detail = ISNULL(@Detail, N'none');
-
-SET @Score = CASE
-                WHEN @Total = 0 THEN 3
-                WHEN @Total BETWEEN 1 AND 3 THEN 2
-                WHEN @Total BETWEEN 4 AND 8 THEN 1
-                ELSE 0
-             END;
+/* Score */
+IF @SysAdminCount = 0 AND @DbOwnerCount = 0
+BEGIN
+    SET @Score = 3;
+    SET @Finding = N'Least privilege posture looks controlled: 0 non-system sysadmin members and 0 non-system db_owner members across accessible user databases.';
+END
+ELSE IF @SysAdminCount = 0 AND @DbOwnerCount BETWEEN 1 AND 5
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'No non-system sysadmin members, but ' + CAST(@DbOwnerCount AS NVARCHAR(11))
+        + N' non-system db_owner member(s) found (' + LEFT(@DbOwnerList, 300)
+        + N'). Review whether db_owner is required or can be replaced with narrower roles.';
+END
+ELSE
+BEGIN
+    SET @Score = 0;
+    SET @Finding = N'Broad privilege grants detected: non-system sysadmin count='
+        + CAST(@SysAdminCount AS NVARCHAR(11))
+        + CASE WHEN @SysAdminList <> N'' THEN N' [' + LEFT(@SysAdminList, 200) + N']' ELSE N'' END
+        + N'; non-system db_owner count='
+        + CAST(@DbOwnerCount AS NVARCHAR(11))
+        + CASE WHEN @DbOwnerList <> N'' THEN N' [' + LEFT(@DbOwnerList, 300) + N']' ELSE N'' END
+        + N'. Apply least privilege and remove unnecessary sysadmin/db_owner memberships.';
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SET @Finding =
-      N'Scope: ' + CASE WHEN @IsAzureSqlDb = 1 THEN N'Azure SQL Database (current database only)'
-                        ELSE N'server-wide (' + CONVERT(NVARCHAR(10), @DbScanned) + N' user database(s) scanned)' END
-    + N'. High-privilege principals found: ' + CONVERT(NVARCHAR(10), @Total)
-    + N' (server-level sysadmin/securityadmin/serveradmin: ' + CONVERT(NVARCHAR(10), @ServerCount)
-    + N', database-level db_owner/db_securityadmin/db_accessadmin: ' + CONVERT(NVARCHAR(10), @DbCount) + N')'
-    + N'. System principals (sa, ##MS_%, NT SERVICE\%, NT AUTHORITY\%, dbo, guest) and disabled logins are excluded. '
-    + CASE WHEN @Total = 0
-           THEN N'No non-system principal holds a broad administrative role; least privilege is applied.'
-           ELSE N'Members (first 15): ' + @Detail + N'.'
-      END;
+IF @DatabaseQueried IS NULL OR LTRIM(RTRIM(@DatabaseQueried)) = N''
+    SET @DatabaseQueried = CASE WHEN @IsAzure = 1 THEN ISNULL(DB_NAME(), N'None') ELSE N'n/a (server-level + user DBs)' END;
 
-IF OBJECT_ID('tempdb..#HighPriv') IS NOT NULL DROP TABLE #HighPriv;
+IF @Finding IS NULL
+    SET @Finding = N'Unable to evaluate least-privilege role membership.';
 
-SELECT @Result          AS Result,
-       @Score           AS Score,
-       @DatabaseQueried AS DatabaseQueried,
-       @Finding         AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

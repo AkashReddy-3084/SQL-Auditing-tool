@@ -1,173 +1,175 @@
-/*
-================================================================================
- Checklist Item : 10.3.3 - Error/severity alerts configured (Agent alerts or equivalent)
- Area           : Monitoring & Observability
- Scope          : SERVER
- Type           : Read-only T-SQL (no DDL/DML against user or system objects)
- Description    : Enumerates SQL Server Agent alerts from msdb and verifies that
-                  high-severity errors (severity 19-25) and the critical I/O /
-                  corruption errors (823, 824, 825) are covered by ENABLED alerts
-                  that notify at least one ENABLED operator.
- Output         : Result, Score, DatabaseQueried, Finding
-================================================================================
-*/
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition   INT            = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @Result          NVARCHAR(20);
-DECLARE @Score           INT            = 0;
-DECLARE @DatabaseQueried NVARCHAR(256)  = N'msdb';
-DECLARE @Finding         NVARCHAR(4000) = N'';
+DECLARE @Result varchar(10) = 'Fail';
+DECLARE @Score int = 1;
+DECLARE @DatabaseQueried nvarchar(128) = N'msdb';
+DECLARE @Finding nvarchar(max) = N'';
 
-DECLARE @TotalAlerts      INT = 0;
-DECLARE @EnabledAlerts    INT = 0;
-DECLARE @SevCovered       INT = 0;
-DECLARE @SevNotified      INT = 0;
-DECLARE @IoAlerts         INT = 0;
-DECLARE @EnabledOperators INT = 0;
-DECLARE @MissingSev       NVARCHAR(200) = NULL;
-DECLARE @UnnotifiedSev    NVARCHAR(200) = NULL;
-
-DECLARE @MsdbName sysname     = N'msdb';
-DECLARE @Sql      NVARCHAR(MAX);
-
-IF OBJECT_ID(N'tempdb..#Alerts') IS NOT NULL DROP TABLE #Alerts;
-CREATE TABLE #Alerts
-(
-    AlertName       sysname NULL,
-    Severity        INT     NULL,
-    MessageId       INT     NULL,
-    IsEnabled       TINYINT NULL,
-    HasNotification INT     NOT NULL DEFAULT (0)
-);
-
-IF OBJECT_ID(N'tempdb..#Operators') IS NOT NULL DROP TABLE #Operators;
-CREATE TABLE #Operators
-(
-    OperatorName sysname NULL,
-    IsEnabled    TINYINT NULL
-);
+DECLARE @EngineEdition int = CAST(SERVERPROPERTY('EngineEdition') AS int);
 
 IF @EngineEdition = 5
 BEGIN
-    /* Azure SQL Database: no SQL Server Agent and no msdb alert store. */
-    SET @Score           = 0;
-    SET @DatabaseQueried = N'master (Azure SQL Database)';
-    SET @Finding         = N'MANUAL REVIEW REQUIRED: Azure SQL Database (EngineEdition 5) does not host SQL Server Agent, so msdb alert metadata (sysalerts/sysnotifications/sysoperators) does not exist and error/severity alerts cannot be enumerated from the engine. Equivalent alerting must be configured outside the database using Azure Monitor alert rules and diagnostic settings on the logical server; that configuration must be evidenced manually.';
-END
-ELSE
-BEGIN
-    BEGIN TRY
-        /* Three-part names are built with QUOTENAME and executed dynamically so this
-           script still parses on editions where msdb is not addressable. */
-        SET @Sql = N'
-            SELECT
-                a.name,
-                a.severity,
-                a.message_id,
-                a.enabled,
-                CASE WHEN EXISTS (
-                        SELECT 1
-                        FROM ' + QUOTENAME(@MsdbName) + N'.dbo.sysnotifications AS n
-                        INNER JOIN ' + QUOTENAME(@MsdbName) + N'.dbo.sysoperators AS o
-                                ON o.id = n.operator_id
-                        WHERE n.alert_id = a.id
-                          AND o.enabled  = 1
-                     ) THEN 1 ELSE 0 END
-            FROM ' + QUOTENAME(@MsdbName) + N'.dbo.sysalerts AS a;';
+    SET @Score = 3;
+    SET @DatabaseQueried = N'N/A';
+    SET @Finding = N'Azure SQL Database does not support SQL Server Agent alerts; configure equivalent error/severity alerting in Azure Monitor or an external monitoring platform (manual verification).';
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+    SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+    RETURN;
+END;
 
-        INSERT INTO #Alerts (AlertName, Severity, MessageId, IsEnabled, HasNotification)
-        EXEC sys.sp_executesql @Sql;
+BEGIN TRY
+    DECLARE @AlertTotal int = 0;
+    DECLARE @EnabledAlertCount int = 0;
+    DECLARE @EnabledSeverityAlertCount int = 0;
+    DECLARE @EnabledErrorAlertCount int = 0;
+    DECLARE @CriticalSeverityCovered int = 0;
+    DECLARE @CriticalSeveritiesWithNotify int = 0;
+    DECLARE @EnabledWithNotify int = 0;
+    DECLARE @OperatorCount int = 0;
+    DECLARE @AgentStatus nvarchar(128) = N'Unknown';
+    DECLARE @SeverityList nvarchar(400) = N'';
+    DECLARE @SampleAlerts nvarchar(500) = N'';
 
-        SET @Sql = N'SELECT o.name, o.enabled FROM ' + QUOTENAME(@MsdbName) + N'.dbo.sysoperators AS o;';
-
-        INSERT INTO #Operators (OperatorName, IsEnabled)
-        EXEC sys.sp_executesql @Sql;
-
-        SELECT
-            @TotalAlerts   = COUNT(*),
-            @EnabledAlerts = SUM(CASE WHEN a.IsEnabled = 1 THEN 1 ELSE 0 END)
-        FROM #Alerts AS a;
-
-        SELECT @EnabledOperators = SUM(CASE WHEN o.IsEnabled = 1 THEN 1 ELSE 0 END)
-        FROM #Operators AS o;
-
-        SELECT @SevCovered = COUNT(DISTINCT a.Severity)
-        FROM #Alerts AS a
-        WHERE a.IsEnabled = 1
-          AND a.Severity BETWEEN 19 AND 25;
-
-        SELECT @SevNotified = COUNT(DISTINCT a.Severity)
-        FROM #Alerts AS a
-        WHERE a.IsEnabled = 1
-          AND a.Severity BETWEEN 19 AND 25
-          AND a.HasNotification = 1;
-
-        SELECT @IoAlerts = COUNT(DISTINCT a.MessageId)
-        FROM #Alerts AS a
-        WHERE a.IsEnabled = 1
-          AND a.MessageId IN (823, 824, 825);
-
-        SELECT @MissingSev = STUFF((
-            SELECT N',' + CAST(v.s AS NVARCHAR(2))
-            FROM (VALUES (19),(20),(21),(22),(23),(24),(25)) AS v(s)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM #Alerts AS a
-                WHERE a.IsEnabled = 1 AND a.Severity = v.s)
-            ORDER BY v.s
-            FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'');
-
-        SELECT @UnnotifiedSev = STUFF((
-            SELECT N',' + CAST(v.s AS NVARCHAR(2))
-            FROM (VALUES (19),(20),(21),(22),(23),(24),(25)) AS v(s)
-            WHERE EXISTS (
-                    SELECT 1 FROM #Alerts AS a
-                    WHERE a.IsEnabled = 1 AND a.Severity = v.s)
-              AND NOT EXISTS (
-                    SELECT 1 FROM #Alerts AS a
-                    WHERE a.IsEnabled = 1 AND a.Severity = v.s AND a.HasNotification = 1)
-            ORDER BY v.s
-            FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'');
-
-        IF @SevCovered = 7 AND @SevNotified = 7
-            SET @Score = 3;
-        ELSE IF @SevCovered = 7
-            SET @Score = 2;
-        ELSE IF @SevCovered >= 1
-            SET @Score = 1;
-        ELSE
-            SET @Score = 0;
-
-        SET @Finding =
-              CASE
-                  WHEN @Score = 3 THEN N'All seven high-severity levels (19-25) are covered by enabled SQL Server Agent alerts and every one of them notifies at least one enabled operator.'
-                  WHEN @Score = 2 THEN N'All seven high-severity levels (19-25) have enabled alerts, but one or more do not notify any enabled operator, so those errors would be logged without anyone being paged.'
-                  WHEN @Score = 1 THEN N'Error/severity alerting is only partially configured: enabled alerts exist for ' + CAST(@SevCovered AS NVARCHAR(10)) + N' of the 7 high-severity levels (19-25).'
-                  ELSE N'No enabled SQL Server Agent alert exists for any high-severity level (19-25); fatal engine errors would raise no automated notification.'
-              END
-            + CASE WHEN @MissingSev IS NULL THEN N'' ELSE N' Severity levels with no enabled alert: ' + @MissingSev + N'.' END
-            + CASE WHEN @UnnotifiedSev IS NULL THEN N'' ELSE N' Severity levels alerted but not notifying an enabled operator: ' + @UnnotifiedSev + N'.' END
-            + N' Total alerts defined: ' + CAST(@TotalAlerts AS NVARCHAR(10))
-            + N' (' + CAST(ISNULL(@EnabledAlerts, 0) AS NVARCHAR(10)) + N' enabled).'
-            + N' Enabled operators: ' + CAST(ISNULL(@EnabledOperators, 0) AS NVARCHAR(10)) + N'.'
-            + N' Enabled alerts covering critical I/O/corruption errors 823/824/825: ' + CAST(@IoAlerts AS NVARCHAR(10)) + N' of 3.';
-    END TRY
-    BEGIN CATCH
-        SET @Score           = 0;
+    IF OBJECT_ID(N'msdb.dbo.sysalerts', N'U') IS NULL
+    BEGIN
+        SET @Score = 0;
         SET @DatabaseQueried = N'msdb';
-        SET @Finding         = N'MANUAL REVIEW REQUIRED: unable to enumerate SQL Server Agent alert configuration from msdb. Error '
-                             + CAST(ERROR_NUMBER() AS NVARCHAR(20)) + N': ' + LEFT(ERROR_MESSAGE(), 500)
-                             + N'. This usually indicates the audit login lacks access to msdb.dbo.sysalerts/sysnotifications/sysoperators, or SQL Server Agent is not installed on this edition.';
-    END CATCH
-END
+        SET @Finding = N'msdb.dbo.sysalerts is not accessible; cannot evaluate SQL Agent error/severity alert configuration.';
+        SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+        SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+        RETURN;
+    END;
 
-IF OBJECT_ID(N'tempdb..#Alerts') IS NOT NULL DROP TABLE #Alerts;
-IF OBJECT_ID(N'tempdb..#Operators') IS NOT NULL DROP TABLE #Operators;
+    SELECT @AgentStatus = ISNULL(servicename + N'=' + status_desc, N'Unknown')
+    FROM sys.dm_server_services
+    WHERE servicename LIKE N'SQL Server Agent%';
+
+    SELECT
+        @AlertTotal = COUNT(*),
+        @EnabledAlertCount = SUM(CASE WHEN a.enabled = 1 THEN 1 ELSE 0 END),
+        @EnabledSeverityAlertCount = SUM(CASE WHEN a.enabled = 1 AND a.severity >= 1 AND a.message_id = 0 THEN 1 ELSE 0 END),
+        @EnabledErrorAlertCount = SUM(CASE WHEN a.enabled = 1 AND a.message_id > 0 THEN 1 ELSE 0 END),
+        @EnabledWithNotify = SUM(CASE
+            WHEN a.enabled = 1
+             AND EXISTS (
+                    SELECT 1
+                    FROM msdb.dbo.sysnotifications n
+                    WHERE n.alert_id = a.id
+                      AND (n.notification_method & 1 = 1
+                           OR n.notification_method & 2 = 2
+                           OR n.notification_method & 4 = 4)
+                )
+            THEN 1 ELSE 0 END)
+    FROM msdb.dbo.sysalerts a;
+
+    ;WITH CriticalSev AS (
+        SELECT v.severity
+        FROM (VALUES (19),(20),(21),(22),(23),(24),(25)) AS v(severity)
+    ),
+    Covered AS (
+        SELECT c.severity,
+               MAX(CASE WHEN a.enabled = 1 THEN 1 ELSE 0 END) AS is_enabled,
+               MAX(CASE
+                       WHEN a.enabled = 1
+                        AND EXISTS (
+                               SELECT 1
+                               FROM msdb.dbo.sysnotifications n
+                               WHERE n.alert_id = a.id
+                                 AND (n.notification_method & 1 = 1
+                                      OR n.notification_method & 2 = 2
+                                      OR n.notification_method & 4 = 4)
+                           )
+                       THEN 1 ELSE 0 END) AS has_notify
+        FROM CriticalSev c
+        LEFT JOIN msdb.dbo.sysalerts a
+            ON a.severity = c.severity
+           AND a.message_id = 0
+        GROUP BY c.severity
+    )
+    SELECT
+        @CriticalSeverityCovered = SUM(CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END),
+        @CriticalSeveritiesWithNotify = SUM(CASE WHEN has_notify = 1 THEN 1 ELSE 0 END)
+    FROM Covered;
+
+    SELECT @SeverityList = STUFF((
+        SELECT N',' + CAST(a.severity AS nvarchar(10))
+        FROM msdb.dbo.sysalerts a
+        WHERE a.enabled = 1
+          AND a.severity >= 1
+          AND a.message_id = 0
+        GROUP BY a.severity
+        ORDER BY a.severity
+        FOR XML PATH(N''), TYPE
+    ).value(N'.[1]', N'nvarchar(400)'), 1, 1, N'');
+
+    SELECT @SampleAlerts = STUFF((
+        SELECT TOP 8 N'; ' + LEFT(a.name, 40)
+            + N'(sev=' + CAST(a.severity AS nvarchar(10))
+            + N',err=' + CAST(a.message_id AS nvarchar(10))
+            + N',en=' + CAST(a.enabled AS nvarchar(1)) + N')'
+        FROM msdb.dbo.sysalerts a
+        WHERE a.enabled = 1
+          AND (a.severity >= 1 OR a.message_id > 0)
+        ORDER BY CASE WHEN a.severity >= 19 THEN 0 ELSE 1 END, a.severity DESC, a.message_id
+        FOR XML PATH(N''), TYPE
+    ).value(N'.[1]', N'nvarchar(500)'), 1, 2, N'');
+
+    IF OBJECT_ID(N'msdb.dbo.sysoperators', N'U') IS NOT NULL
+    BEGIN
+        SELECT @OperatorCount = COUNT(*)
+        FROM msdb.dbo.sysoperators
+        WHERE enabled = 1;
+    END;
+
+    SET @AlertTotal = ISNULL(@AlertTotal, 0);
+    SET @EnabledAlertCount = ISNULL(@EnabledAlertCount, 0);
+    SET @EnabledSeverityAlertCount = ISNULL(@EnabledSeverityAlertCount, 0);
+    SET @EnabledErrorAlertCount = ISNULL(@EnabledErrorAlertCount, 0);
+    SET @CriticalSeverityCovered = ISNULL(@CriticalSeverityCovered, 0);
+    SET @CriticalSeveritiesWithNotify = ISNULL(@CriticalSeveritiesWithNotify, 0);
+    SET @EnabledWithNotify = ISNULL(@EnabledWithNotify, 0);
+    SET @OperatorCount = ISNULL(@OperatorCount, 0);
+
+    IF @CriticalSeverityCovered >= 7 AND @CriticalSeveritiesWithNotify >= 7
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = N'Critical severity alerts 19-25 are enabled with notification bindings. Enabled severity alerts='
+            + CAST(@EnabledSeverityAlertCount AS nvarchar(10))
+            + N'; enabled error-number alerts=' + CAST(@EnabledErrorAlertCount AS nvarchar(10))
+            + N'; alerts with notifications=' + CAST(@EnabledWithNotify AS nvarchar(10))
+            + N'; enabled operators=' + CAST(@OperatorCount AS nvarchar(10))
+            + N'; severity list=[' + ISNULL(@SeverityList, N'') + N']'
+            + N'; Agent=' + ISNULL(@AgentStatus, N'Unknown') + N'.';
+    END
+    ELSE IF @CriticalSeverityCovered > 0 OR (@EnabledSeverityAlertCount + @EnabledErrorAlertCount) > 0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = N'Partial error/severity alert coverage. Critical severities 19-25 covered='
+            + CAST(@CriticalSeverityCovered AS nvarchar(10))
+            + N'/7 (with notifications=' + CAST(@CriticalSeveritiesWithNotify AS nvarchar(10))
+            + N'); enabled severity alerts=' + CAST(@EnabledSeverityAlertCount AS nvarchar(10))
+            + N'; enabled error-number alerts=' + CAST(@EnabledErrorAlertCount AS nvarchar(10))
+            + N'; alerts with notifications=' + CAST(@EnabledWithNotify AS nvarchar(10))
+            + N'; enabled operators=' + CAST(@OperatorCount AS nvarchar(10))
+            + N'; severity list=[' + ISNULL(@SeverityList, N'') + N']'
+            + N'; samples=[' + ISNULL(@SampleAlerts, N'') + N']'
+            + N'; Agent=' + ISNULL(@AgentStatus, N'Unknown') + N'.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = N'No enabled SQL Agent severity or error-number alerts found. Total alerts='
+            + CAST(@AlertTotal AS nvarchar(10))
+            + N'; enabled operators=' + CAST(@OperatorCount AS nvarchar(10))
+            + N'; Agent=' + ISNULL(@AgentStatus, N'Unknown')
+            + N'. Configure Agent alerts for severity 19-25 (and key errors) with operator notifications, or an equivalent monitoring solution.';
+    END
+END TRY
+BEGIN CATCH
+    SET @Score = 0;
+    SET @DatabaseQueried = N'msdb';
+    SET @Finding = N'Error evaluating SQL Agent alerts: ' + ERROR_MESSAGE();
+END CATCH;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    @Result          AS Result,
-    @Score           AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding         AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

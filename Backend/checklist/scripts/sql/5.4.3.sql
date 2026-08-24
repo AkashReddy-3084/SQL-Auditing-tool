@@ -1,218 +1,283 @@
-/* 5.4.3 - String / Text: encoding/collation consistency, bounded lengths, silent-truncation protection.
-   Read-only: catalog views only. Temp tables are used to collect per-database results. */
 SET NOCOUNT ON;
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-IF OBJECT_ID('tempdb..#StringQuality') IS NOT NULL
-    DROP TABLE #StringQuality;
-IF OBJECT_ID('tempdb..#Scored') IS NOT NULL
-    DROP TABLE #Scored;
+DECLARE @Result VARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = N'None';
+DECLARE @Finding NVARCHAR(MAX) = N'No database found to be queried';
 
-CREATE TABLE #StringQuality
-(
-    DatabaseName        SYSNAME        NOT NULL,
-    DatabaseCollation   NVARCHAR(128)  NULL,
-    AnsiWarningsOn      BIT            NULL,
-    StringColumns       INT            NULL,
-    CollationMismatches INT            NULL,
-    MaxLengthColumns    INT            NULL,
-    DeprecatedTypes     INT            NULL,
-    ErrorText           NVARCHAR(400)  NULL
-);
-
-CREATE TABLE #Scored
-(
-    DatabaseName SYSNAME        NOT NULL,
-    DbScore      INT            NOT NULL,
-    NotInspected BIT            NOT NULL,
-    DbFinding    NVARCHAR(1000) NOT NULL
-);
-
-DECLARE @IsAzureSqlDb BIT = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 5 THEN 1 ELSE 0 END;
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
-DECLARE @Result VARCHAR(20);
-DECLARE @Score INT;
-DECLARE @DatabaseQueried NVARCHAR(MAX);
-DECLARE @Finding NVARCHAR(MAX);
-DECLARE @DbCount INT;
-DECLARE @PassCount INT;
-DECLARE @PartialCount INT;
-DECLARE @FailCount INT;
-DECLARE @ReviewCount INT;
-DECLARE @Detail NVARCHAR(MAX);
-
-IF @IsAzureSqlDb = 1
+IF SERVERPROPERTY('EngineEdition') = 5
 BEGIN
-    /* Azure SQL Database: cross-database catalog access is not permitted; evaluate the current database only. */
-    BEGIN TRY
-        INSERT INTO #StringQuality
-            (DatabaseName, DatabaseCollation, AnsiWarningsOn, StringColumns,
-             CollationMismatches, MaxLengthColumns, DeprecatedTypes)
-        SELECT
-            DB_NAME(),
-            CONVERT(NVARCHAR(128), DATABASEPROPERTYEX(DB_NAME(), 'Collation')),
-            (SELECT CONVERT(BIT, d.is_ansi_warnings_on) FROM sys.databases AS d WHERE d.database_id = DB_ID()),
-            COUNT(*),
-            SUM(CASE WHEN c.collation_name IS NOT NULL
-                      AND c.collation_name <> CONVERT(NVARCHAR(128), DATABASEPROPERTYEX(DB_NAME(), 'Collation'))
-                     THEN 1 ELSE 0 END),
-            SUM(CASE WHEN c.max_length = -1 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN t.name IN ('text', 'ntext') THEN 1 ELSE 0 END)
-        FROM sys.columns AS c
-        INNER JOIN sys.objects AS o
-            ON o.object_id = c.object_id
-        INNER JOIN sys.types AS t
-            ON t.user_type_id = c.user_type_id
-        WHERE o.type = 'U'
-          AND o.is_ms_shipped = 0
-          AND t.name IN ('char', 'varchar', 'nchar', 'nvarchar', 'text', 'ntext');
-    END TRY
-    BEGIN CATCH
-        INSERT INTO #StringQuality (DatabaseName, ErrorText)
-        VALUES (DB_NAME(), LEFT(ERROR_MESSAGE(), 400));
-    END CATCH
+    DECLARE @DbName_A NVARCHAR(128) = DB_NAME();
+    DECLARE @DbCollation_A NVARCHAR(128) = CONVERT(NVARCHAR(128), DATABASEPROPERTYEX(@DbName_A, 'Collation'));
+    DECLARE @AnsiWarnings_A BIT;
+    DECLARE @StringCols_A INT = 0;
+    DECLARE @MixedColl_A INT = 0;
+    DECLARE @DistinctColl_A INT = 0;
+    DECLARE @Unbounded_A INT = 0;
+    DECLARE @MixedPct_A DECIMAL(5, 2) = 0;
+    DECLARE @Issues_A INT = 0;
+
+    SELECT @AnsiWarnings_A = is_ansi_warnings_on
+    FROM sys.databases
+    WHERE database_id = DB_ID();
+
+    SELECT
+        @StringCols_A = COUNT(*),
+        @MixedColl_A = SUM(CASE WHEN c.collation_name IS NOT NULL AND c.collation_name <> @DbCollation_A THEN 1 ELSE 0 END),
+        @DistinctColl_A = COUNT(DISTINCT c.collation_name),
+        @Unbounded_A = SUM(CASE WHEN c.max_length = -1 THEN 1 ELSE 0 END)
+    FROM sys.columns AS c
+    INNER JOIN sys.types AS t ON c.user_type_id = t.user_type_id
+    INNER JOIN sys.tables AS tb ON c.object_id = tb.object_id
+    WHERE tb.is_ms_shipped = 0
+      AND t.name IN (N'char', N'varchar', N'nchar', N'nvarchar', N'text', N'ntext');
+
+    SET @StringCols_A = ISNULL(@StringCols_A, 0);
+    SET @MixedColl_A = ISNULL(@MixedColl_A, 0);
+    SET @DistinctColl_A = ISNULL(@DistinctColl_A, 0);
+    SET @Unbounded_A = ISNULL(@Unbounded_A, 0);
+    SET @AnsiWarnings_A = ISNULL(@AnsiWarnings_A, 1);
+    SET @DatabaseQueried = @DbName_A;
+
+    IF @StringCols_A = 0
+    BEGIN
+        SET @Score = 3;
+        SET @Result = 'Pass';
+        SET @Finding = N'Database ' + @DbName_A + N': no user-table string columns found; nothing to evaluate for collation or length consistency.';
+    END
+    ELSE
+    BEGIN
+        SET @MixedPct_A = (100.0 * @MixedColl_A) / @StringCols_A;
+        SET @Issues_A = 0;
+
+        IF @MixedPct_A > 25 OR @DistinctColl_A > 3
+            SET @Issues_A = 3;
+        ELSE IF @MixedPct_A >= 5 OR @DistinctColl_A > 1
+            SET @Issues_A = 2;
+        ELSE IF @MixedColl_A > 0
+            SET @Issues_A = 1;
+
+        IF @AnsiWarnings_A = 0
+            SET @Issues_A = @Issues_A + 2;
+
+        IF @Issues_A = 0
+            SET @Score = 3;
+        ELSE IF @Issues_A = 1
+            SET @Score = 2;
+        ELSE IF @Issues_A <= 3
+            SET @Score = 1;
+        ELSE
+            SET @Score = 0;
+
+        SET @Result = CASE WHEN @Score = 3 THEN 'Pass' WHEN @Score = 0 THEN 'Fail' ELSE 'Partial' END;
+        SET @Finding = N'Database ' + @DbName_A
+            + N': string_cols=' + CONVERT(NVARCHAR(20), @StringCols_A)
+            + N'; mixed_collation_cols=' + CONVERT(NVARCHAR(20), @MixedColl_A)
+            + N' (' + CONVERT(NVARCHAR(20), CONVERT(DECIMAL(5, 1), @MixedPct_A)) + N'%)'
+            + N'; distinct_collations=' + CONVERT(NVARCHAR(20), @DistinctColl_A)
+            + N'; db_collation=' + ISNULL(@DbCollation_A, N'n/a')
+            + N'; ANSI_WARNINGS=' + CASE WHEN @AnsiWarnings_A = 1 THEN N'ON' ELSE N'OFF' END
+            + N'; max_length_MAX_cols=' + CONVERT(NVARCHAR(20), @Unbounded_A)
+            + N'.';
+    END
 END
 ELSE
 BEGIN
-    DECLARE DbCursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.state = 0
-          AND d.is_in_standby = 0
-          AND d.source_database_id IS NULL
-          AND HAS_DBACCESS(d.name) = 1
-        ORDER BY d.name;
+    CREATE TABLE #DbResults (
+        DbName NVARCHAR(128) NOT NULL,
+        StringCols INT NOT NULL,
+        MixedColl INT NOT NULL,
+        DistinctColl INT NOT NULL,
+        UnboundedCols INT NOT NULL,
+        AnsiWarnings BIT NOT NULL,
+        DbCollation NVARCHAR(128) NULL,
+        DbScore INT NOT NULL,
+        Detail NVARCHAR(500) NOT NULL
+    );
 
-    OPEN DbCursor;
-    FETCH NEXT FROM DbCursor INTO @DbName;
+    DECLARE @DbName NVARCHAR(128);
+    DECLARE @DbCollation NVARCHAR(128);
+    DECLARE @Sql NVARCHAR(MAX);
+    DECLARE @StringCols INT;
+    DECLARE @MixedColl INT;
+    DECLARE @DistinctColl INT;
+    DECLARE @Unbounded INT;
+    DECLARE @AnsiWarnings BIT;
+    DECLARE @MixedPct DECIMAL(5, 2);
+    DECLARE @Issues INT;
+    DECLARE @DbScore INT;
+    DECLARE @DbCount INT;
+    DECLARE @PassDbs INT;
+    DECLARE @PartialDbs INT;
+    DECLARE @FailDbs INT;
+    DECLARE @TotalString INT;
+    DECLARE @TotalMixed INT;
+    DECLARE @AnsiOff INT;
+    DECLARE @DetailAgg NVARCHAR(MAX);
+
+    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name, collation_name
+        FROM sys.databases
+        WHERE database_id > 4
+          AND state_desc = N'ONLINE'
+          AND is_read_only = 0
+          AND name NOT IN (N'master', N'tempdb', N'model', N'msdb');
+
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DbName, @DbCollation;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        BEGIN TRY
-            SET @Sql = N'
-SELECT
-    @dbn AS DatabaseName,
-    CONVERT(NVARCHAR(128), DATABASEPROPERTYEX(@dbn, ''Collation'')) AS DatabaseCollation,
-    (SELECT CONVERT(BIT, d.is_ansi_warnings_on) FROM sys.databases AS d WHERE d.name = @dbn) AS AnsiWarningsOn,
-    COUNT(*) AS StringColumns,
-    SUM(CASE WHEN c.collation_name IS NOT NULL
-              AND c.collation_name <> CONVERT(NVARCHAR(128), DATABASEPROPERTYEX(@dbn, ''Collation''))
-             THEN 1 ELSE 0 END) AS CollationMismatches,
-    SUM(CASE WHEN c.max_length = -1 THEN 1 ELSE 0 END) AS MaxLengthColumns,
-    SUM(CASE WHEN t.name IN (''text'', ''ntext'') THEN 1 ELSE 0 END) AS DeprecatedTypes
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns AS c
-INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS o
-    ON o.object_id = c.object_id
-INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.types AS t
-    ON t.user_type_id = c.user_type_id
-WHERE o.type = ''U''
-  AND o.is_ms_shipped = 0
-  AND t.name IN (''char'', ''varchar'', ''nchar'', ''nvarchar'', ''text'', ''ntext'');';
+        SET @StringCols = 0;
+        SET @MixedColl = 0;
+        SET @DistinctColl = 0;
+        SET @Unbounded = 0;
+        SET @AnsiWarnings = 1;
+        SET @MixedPct = 0;
+        SET @Issues = 0;
+        SET @DbScore = 3;
 
-            INSERT INTO #StringQuality
-                (DatabaseName, DatabaseCollation, AnsiWarningsOn, StringColumns,
-                 CollationMismatches, MaxLengthColumns, DeprecatedTypes)
-            EXEC sp_executesql @Sql, N'@dbn SYSNAME', @dbn = @DbName;
+        SET @Sql = N'
+SELECT
+    @StringColsOut = COUNT(*),
+    @MixedCollOut = SUM(CASE WHEN c.collation_name IS NOT NULL AND c.collation_name <> @DbCollIn THEN 1 ELSE 0 END),
+    @DistinctCollOut = COUNT(DISTINCT c.collation_name),
+    @UnboundedOut = SUM(CASE WHEN c.max_length = -1 THEN 1 ELSE 0 END),
+    @AnsiOut = d.is_ansi_warnings_on
+FROM ' + QUOTENAME(@DbName) + N'.sys.columns AS c
+INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.types AS t ON c.user_type_id = t.user_type_id
+INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.tables AS tb ON c.object_id = tb.object_id
+CROSS JOIN sys.databases AS d
+WHERE tb.is_ms_shipped = 0
+  AND d.name = @DbNameIn
+  AND t.name IN (N''char'', N''varchar'', N''nchar'', N''nvarchar'', N''text'', N''ntext'');';
+
+        BEGIN TRY
+            EXEC sp_executesql
+                @Sql,
+                N'@DbCollIn NVARCHAR(128), @DbNameIn NVARCHAR(128),
+                  @StringColsOut INT OUTPUT, @MixedCollOut INT OUTPUT,
+                  @DistinctCollOut INT OUTPUT, @UnboundedOut INT OUTPUT,
+                  @AnsiOut BIT OUTPUT',
+                @DbCollIn = @DbCollation,
+                @DbNameIn = @DbName,
+                @StringColsOut = @StringCols OUTPUT,
+                @MixedCollOut = @MixedColl OUTPUT,
+                @DistinctCollOut = @DistinctColl OUTPUT,
+                @UnboundedOut = @Unbounded OUTPUT,
+                @AnsiOut = @AnsiWarnings OUTPUT;
+
+            SET @StringCols = ISNULL(@StringCols, 0);
+            SET @MixedColl = ISNULL(@MixedColl, 0);
+            SET @DistinctColl = ISNULL(@DistinctColl, 0);
+            SET @Unbounded = ISNULL(@Unbounded, 0);
+            SET @AnsiWarnings = ISNULL(@AnsiWarnings, 1);
+
+            IF @StringCols = 0
+            BEGIN
+                SET @DbScore = 3;
+                SET @MixedPct = 0;
+            END
+            ELSE
+            BEGIN
+                SET @MixedPct = (100.0 * @MixedColl) / @StringCols;
+                SET @Issues = 0;
+
+                IF @MixedPct > 25 OR @DistinctColl > 3
+                    SET @Issues = 3;
+                ELSE IF @MixedPct >= 5 OR @DistinctColl > 1
+                    SET @Issues = 2;
+                ELSE IF @MixedColl > 0
+                    SET @Issues = 1;
+
+                IF @AnsiWarnings = 0
+                    SET @Issues = @Issues + 2;
+
+                IF @Issues = 0
+                    SET @DbScore = 3;
+                ELSE IF @Issues = 1
+                    SET @DbScore = 2;
+                ELSE IF @Issues <= 3
+                    SET @DbScore = 1;
+                ELSE
+                    SET @DbScore = 0;
+            END
+
+            INSERT INTO #DbResults (DbName, StringCols, MixedColl, DistinctColl, UnboundedCols, AnsiWarnings, DbCollation, DbScore, Detail)
+            VALUES (
+                @DbName,
+                @StringCols,
+                @MixedColl,
+                @DistinctColl,
+                @Unbounded,
+                @AnsiWarnings,
+                @DbCollation,
+                @DbScore,
+                N'str=' + CONVERT(NVARCHAR(20), @StringCols)
+                    + N'; mix=' + CONVERT(NVARCHAR(20), @MixedColl)
+                    + N' (' + CONVERT(NVARCHAR(20), CONVERT(DECIMAL(5, 1), @MixedPct)) + N'%)'
+                    + N' colls=' + CONVERT(NVARCHAR(20), @DistinctColl)
+                    + N' ANSI_W=' + CASE WHEN @AnsiWarnings = 1 THEN N'ON' ELSE N'OFF' END
+                    + N' MAX_cols=' + CONVERT(NVARCHAR(20), @Unbounded)
+            );
         END TRY
         BEGIN CATCH
-            INSERT INTO #StringQuality (DatabaseName, ErrorText)
-            VALUES (@DbName, LEFT(ERROR_MESSAGE(), 400));
-        END CATCH
+            INSERT INTO #DbResults (DbName, StringCols, MixedColl, DistinctColl, UnboundedCols, AnsiWarnings, DbCollation, DbScore, Detail)
+            VALUES (
+                @DbName, 0, 0, 0, 0, 1, @DbCollation, 0,
+                N'Evaluation failed: ' + LEFT(ERROR_MESSAGE(), 200)
+            );
+        END CATCH;
 
-        FETCH NEXT FROM DbCursor INTO @DbName;
+        FETCH NEXT FROM db_cursor INTO @DbName, @DbCollation;
     END
 
-    CLOSE DbCursor;
-    DEALLOCATE DbCursor;
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+
+    IF NOT EXISTS (SELECT 1 FROM #DbResults)
+    BEGIN
+        SET @DatabaseQueried = N'None';
+        SET @Finding = N'No database found to be queried';
+        SET @Score = 0;
+        SET @Result = 'Fail';
+    END
+    ELSE
+    BEGIN
+        SELECT @DatabaseQueried = ISNULL(STUFF((
+            SELECT N',' + r.DbName
+            FROM #DbResults AS r
+            ORDER BY r.DbName
+            FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N''), N'None');
+
+        SELECT @Score = ISNULL(MIN(DbScore), 0) FROM #DbResults;
+
+        SELECT @DbCount = COUNT(*) FROM #DbResults;
+        SELECT @PassDbs = COUNT(*) FROM #DbResults WHERE DbScore = 3;
+        SELECT @PartialDbs = COUNT(*) FROM #DbResults WHERE DbScore IN (1, 2);
+        SELECT @FailDbs = COUNT(*) FROM #DbResults WHERE DbScore = 0;
+        SELECT @TotalString = ISNULL(SUM(StringCols), 0) FROM #DbResults;
+        SELECT @TotalMixed = ISNULL(SUM(MixedColl), 0) FROM #DbResults;
+        SELECT @AnsiOff = COUNT(*) FROM #DbResults WHERE AnsiWarnings = 0;
+
+        SELECT @DetailAgg = ISNULL(STUFF((
+            SELECT N' | ' + r.DbName + N': ' + r.Detail
+            FROM #DbResults AS r
+            ORDER BY r.DbScore ASC, r.DbName
+            FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 3, N''), N'');
+
+        SET @Result = CASE WHEN @Score = 3 THEN 'Pass' WHEN @Score = 0 THEN 'Fail' ELSE 'Partial' END;
+        SET @Finding = N'Evaluated ' + CONVERT(NVARCHAR(20), @DbCount)
+            + N' database(s); Pass=' + CONVERT(NVARCHAR(20), @PassDbs)
+            + N', Partial=' + CONVERT(NVARCHAR(20), @PartialDbs)
+            + N', Fail=' + CONVERT(NVARCHAR(20), @FailDbs)
+            + N'; total_string_cols=' + CONVERT(NVARCHAR(20), @TotalString)
+            + N', mixed_collation_cols=' + CONVERT(NVARCHAR(20), @TotalMixed)
+            + N', ANSI_WARNINGS_OFF_dbs=' + CONVERT(NVARCHAR(20), @AnsiOff)
+            + N'. ' + @DetailAgg;
+    END
+
+    DROP TABLE #DbResults;
 END
 
-IF NOT EXISTS (SELECT 1 FROM #StringQuality)
-BEGIN
-    SET @Score = 0;
-    SET @DatabaseQueried = 'None';
-    SET @Finding = 'No database found to be queried';
-END
-ELSE
-BEGIN
-    INSERT INTO #Scored (DatabaseName, DbScore, NotInspected, DbFinding)
-    SELECT
-        q.DatabaseName,
-        CASE
-            WHEN q.ErrorText IS NOT NULL THEN 1
-            WHEN ISNULL(q.StringColumns, 0) = 0 THEN 3
-            WHEN q.AnsiWarningsOn = 0
-                 OR (ISNULL(q.CollationMismatches, 0) * 100.0 / q.StringColumns) > 5.0 THEN 1
-            WHEN ISNULL(q.CollationMismatches, 0) > 0
-                 OR ISNULL(q.DeprecatedTypes, 0) > 0
-                 OR (ISNULL(q.MaxLengthColumns, 0) * 100.0 / q.StringColumns) > 5.0 THEN 2
-            ELSE 3
-        END,
-        CASE WHEN q.ErrorText IS NOT NULL THEN 1 ELSE 0 END,
-        LEFT(CASE
-            WHEN q.ErrorText IS NOT NULL
-                THEN CONCAT('[', q.DatabaseName, '] not inspectable: ', q.ErrorText)
-            WHEN ISNULL(q.StringColumns, 0) = 0
-                THEN CONCAT('[', q.DatabaseName, '] no user-table string columns; collation ',
-                            ISNULL(q.DatabaseCollation, 'unknown'), ', ANSI_WARNINGS ',
-                            CASE WHEN q.AnsiWarningsOn = 1 THEN 'ON' WHEN q.AnsiWarningsOn = 0 THEN 'OFF' ELSE 'unknown' END)
-            ELSE CONCAT('[', q.DatabaseName, '] collation ', ISNULL(q.DatabaseCollation, 'unknown'),
-                        ', string columns ', q.StringColumns,
-                        ', collation mismatches ', ISNULL(q.CollationMismatches, 0),
-                        ' (', CONVERT(DECIMAL(5, 1), ISNULL(q.CollationMismatches, 0) * 100.0 / q.StringColumns), '%)',
-                        ', unbounded (n)varchar(max) columns ', ISNULL(q.MaxLengthColumns, 0),
-                        ' (', CONVERT(DECIMAL(5, 1), ISNULL(q.MaxLengthColumns, 0) * 100.0 / q.StringColumns), '%)',
-                        ', deprecated text/ntext columns ', ISNULL(q.DeprecatedTypes, 0),
-                        ', ANSI_WARNINGS ',
-                        CASE WHEN q.AnsiWarningsOn = 1 THEN 'ON (over-length writes raise an error)'
-                             WHEN q.AnsiWarningsOn = 0 THEN 'OFF (string data can be silently truncated)'
-                             ELSE 'unknown' END)
-        END, 1000)
-    FROM #StringQuality AS q;
-
-    SELECT
-        @DbCount      = COUNT(*),
-        @PassCount    = SUM(CASE WHEN s.DbScore = 3 THEN 1 ELSE 0 END),
-        @PartialCount = SUM(CASE WHEN s.DbScore = 2 THEN 1 ELSE 0 END),
-        @FailCount    = SUM(CASE WHEN s.DbScore = 1 AND s.NotInspected = 0 THEN 1 ELSE 0 END),
-        @ReviewCount  = SUM(CASE WHEN s.NotInspected = 1 THEN 1 ELSE 0 END),
-        @Score        = MIN(s.DbScore)
-    FROM #Scored AS s;
-
-    SELECT @DatabaseQueried = STUFF(
-        (SELECT N', ' + s.DatabaseName
-         FROM #Scored AS s
-         ORDER BY s.DatabaseName
-         FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-    SELECT @Detail = STUFF(
-        (SELECT N' | ' + s.DbFinding
-         FROM #Scored AS s
-         WHERE s.DbScore < 3
-         ORDER BY s.DbScore, s.DatabaseName
-         FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 3, N'');
-
-    SET @Finding = CONCAT(
-        'Databases evaluated: ', ISNULL(@DbCount, 0),
-        '; fully consistent: ', ISNULL(@PassCount, 0),
-        '; partially compliant: ', ISNULL(@PartialCount, 0),
-        '; non-compliant: ', ISNULL(@FailCount, 0),
-        '; not inspectable: ', ISNULL(@ReviewCount, 0), '. ',
-        ISNULL(LEFT(@Detail, 3500),
-               'All evaluated databases use column collations matching the database collation, have no deprecated text/ntext columns, keep unbounded (n)varchar(max) columns at or below 5% of string columns, and run with ANSI_WARNINGS ON so over-length string writes raise an error instead of being silently truncated.'));
-
-    SET @DatabaseQueried = ISNULL(@DatabaseQueried, 'None');
-    SET @Score = ISNULL(@Score, 0);
-END
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    @Result           AS Result,
-    @Score            AS Score,
-    @DatabaseQueried  AS DatabaseQueried,
-    @Finding          AS Finding;
-
-DROP TABLE #Scored;
-DROP TABLE #StringQuality;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

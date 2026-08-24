@@ -1,139 +1,132 @@
-/*
-    Checklist Item : 14.4.2 - tempdb contention monitored and mitigated
-    Scope          : SERVER
-    Description    : Read-only assessment of tempdb allocation-contention mitigation
-                     (data file count, uniform sizing, uniform fixed growth, uniform
-                     allocation behaviour) plus a point-in-time check for live
-                     PAGELATCH waits on tempdb pages.
-    Safety         : Strictly read-only. No DDL/DML against user or system objects.
-                     A local temporary table is used only to capture DBCC TRACESTATUS output.
-*/
 SET NOCOUNT ON;
 
-DECLARE @Result           NVARCHAR(50);
-DECLARE @Score            INT            = 1;
-DECLARE @DatabaseQueried  NVARCHAR(128)  = N'tempdb';
-DECLARE @Finding          NVARCHAR(MAX)  = N'';
+DECLARE @DatabaseQueried nvarchar(128) = N'tempdb';
+DECLARE @CpuCount int = 0;
+DECLARE @SchedulerCount int = 0;
+DECLARE @TempdbDataFiles int = 0;
+DECLARE @DistinctSizes int = 0;
+DECLARE @MinSizeMb bigint = 0;
+DECLARE @MaxSizeMb bigint = 0;
+DECLARE @RecommendedFiles int = 0;
+DECLARE @PagelatchWaits bigint = 0;
+DECLARE @PagelatchWaitMs bigint = 0;
+DECLARE @TotalWaits bigint = 0;
+DECLARE @ContentionPct decimal(10, 4) = 0;
+DECLARE @Result nvarchar(20);
+DECLARE @Score int;
+DECLARE @Finding nvarchar(max);
 
-DECLARE @EngineEdition    INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @MajorVersion     INT = TRY_CAST(PARSENAME(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)), 4) AS INT);
-
-IF @MajorVersion IS NULL
-    SET @MajorVersion = 0;
-
-IF @EngineEdition = 5
-BEGIN
-    /* Azure SQL Database - tempdb layout is fixed by the service objective and not queryable. */
-    SET @Score = 2;
-    SET @Finding = N'Azure SQL Database (EngineEdition 5) detected. tempdb file count, sizing, growth and allocation behaviour are managed by the platform and are not exposed through T-SQL, so contention mitigation cannot be verified by script. Confirm from monitoring tooling/documentation that tempdb PAGELATCH and resource-governance waits are tracked, and that the service objective provides sufficient tempdb throughput.';
-END
-ELSE
-BEGIN
-    DECLARE @CpuCount          INT = NULL;
-    DECLARE @DataFileCount     INT = 0;
-    DECLARE @DistinctSize      INT = 0;
-    DECLARE @DistinctGrowth    INT = 0;
-    DECLARE @PercentGrowthFile INT = 0;
-    DECLARE @Recommended       INT = 8;
-    DECLARE @TF1117            INT = 0;
-    DECLARE @TF1118            INT = 0;
-    DECLARE @MemOptTempdb      INT = 0;
-    DECLARE @ContendedTasks    INT = 0;
-
-    SELECT @CpuCount = cpu_count
+BEGIN TRY
+    SELECT
+        @CpuCount = cpu_count,
+        @SchedulerCount = scheduler_count
     FROM sys.dm_os_sys_info;
 
-    SELECT @DataFileCount     = COUNT(*),
-           @DistinctSize      = COUNT(DISTINCT CAST(size AS BIGINT)),
-           @DistinctGrowth    = COUNT(DISTINCT CAST(growth AS NVARCHAR(20)) + N'|' + CAST(is_percent_growth AS NVARCHAR(3))),
-           @PercentGrowthFile = SUM(CASE WHEN is_percent_growth = 1 THEN 1 ELSE 0 END)
+    SET @RecommendedFiles = CASE
+        WHEN ISNULL(@SchedulerCount, @CpuCount) <= 0 THEN 1
+        WHEN ISNULL(@SchedulerCount, @CpuCount) >= 8 THEN 8
+        ELSE ISNULL(@SchedulerCount, @CpuCount)
+    END;
+
+    SELECT
+        @TempdbDataFiles = COUNT(*),
+        @DistinctSizes = COUNT(DISTINCT size),
+        @MinSizeMb = MIN(CONVERT(bigint, size)) * 8 / 1024,
+        @MaxSizeMb = MAX(CONVERT(bigint, size)) * 8 / 1024
     FROM sys.master_files
     WHERE database_id = 2
-      AND type = 0;
+      AND type_desc = N'ROWS';
 
-    /* TF 1117/1118 only matter before SQL Server 2016; DBCC TRACESTATUS is unsupported on Azure surfaces. */
-    IF @MajorVersion > 0 AND @MajorVersion < 13 AND @EngineEdition IN (2, 3, 4)
+    SELECT
+        @PagelatchWaits = SUM(CAST(waiting_tasks_count AS bigint)),
+        @PagelatchWaitMs = SUM(CAST(wait_time_ms AS bigint))
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type IN (
+        N'PAGELATCH_UP',
+        N'PAGELATCH_SH',
+        N'PAGELATCH_EX',
+        N'PAGELATCH_KP',
+        N'PAGELATCH_DT'
+    );
+
+    SELECT @TotalWaits = SUM(CAST(waiting_tasks_count AS bigint))
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type NOT IN (
+        N'BROKER_EVENTHANDLER', N'BROKER_RECEIVE_WAITFOR', N'BROKER_TASK_STOP',
+        N'BROKER_TO_FLUSH', N'BROKER_TRANSMITTER', N'CHECKPOINT_QUEUE',
+        N'CHKPT', N'CLR_AUTO_EVENT', N'CLR_MANUAL_EVENT', N'CLR_SEMAPHORE',
+        N'DBMIRROR_DBM_EVENT', N'DBMIRROR_EVENTS_QUEUE', N'DBMIRROR_WORKER_QUEUE',
+        N'DBMIRRORING_CMD', N'DIRTY_PAGE_POLL', N'DISPATCHER_QUEUE_SEMAPHORE',
+        N'EXECSYNC', N'FSAGENT', N'FT_IFTS_SCHEDULER_IDLE_WAIT', N'FT_IFTSHC_MUTEX',
+        N'HADR_CLUSAPI_CALL', N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', N'HADR_LOGCAPTURE_WAIT',
+        N'HADR_NOTIFICATION_DEQUEUE', N'HADR_TIMER_TASK', N'HADR_WORK_QUEUE',
+        N'KSOURCE_WAKEUP', N'LAZYWRITER_SLEEP', N'LOGMGR_QUEUE', N'MEMORY_ALLOCATION_EXT',
+        N'ONDEMAND_TASK_QUEUE', N'PARALLEL_REDO_DRAIN_WORKER', N'PARALLEL_REDO_LOG_CACHE',
+        N'PARALLEL_REDO_TRAN_LIST', N'PARALLEL_REDO_WORKER_SYNC', N'PARALLEL_REDO_WORKER_WAIT_WORK',
+        N'PREEMPTIVE_OS_FLUSHFILEBUFFERS', N'PREEMPTIVE_XE_GETTARGETSTATE',
+        N'PWAIT_ALL_COMPONENTS_INITIALIZED', N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+        N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', N'QDS_ASYNC_QUEUE',
+        N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', N'QDS_SHUTDOWN_QUEUE',
+        N'REDO_THREAD_PENDING_WORK', N'REQUEST_FOR_DEADLOCK_SEARCH', N'RESOURCE_QUEUE',
+        N'SERVER_IDLE_CHECK', N'SLEEP_BPOOL_FLUSH', N'SLEEP_DBSTARTUP', N'SLEEP_DCOMSTARTUP',
+        N'SLEEP_MASTERDBREADY', N'SLEEP_MASTERMDREADY', N'SLEEP_MASTERUPGRADED',
+        N'SLEEP_MSDBSTARTUP', N'SLEEP_SYSTEMTASK', N'SLEEP_TASK', N'SLEEP_TEMPDBSTARTUP',
+        N'SNI_HTTP_ACCEPT', N'SP_SERVER_DIAGNOSTICS_SLEEP', N'SQLTRACE_BUFFER_FLUSH',
+        N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SQLTRACE_WAIT_ENTRIES', N'WAIT_FOR_RESULTS',
+        N'WAITFOR', N'WAITFOR_TASKSHUTDOWN', N'WAIT_XTP_HOST_WAIT',
+        N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', N'WAIT_XTP_CKPT_CLOSE', N'XE_DISPATCHER_JOIN',
+        N'XE_DISPATCHER_WAIT', N'XE_TIMER_EVENT'
+    );
+
+    IF ISNULL(@TotalWaits, 0) > 0
+        SET @ContentionPct = CONVERT(decimal(10, 4), (100.0 * ISNULL(@PagelatchWaits, 0)) / @TotalWaits);
+
+    IF @TempdbDataFiles = 0
     BEGIN
-        CREATE TABLE #TraceStatus
-        (
-            TraceFlag INT NULL,
-            [Status]  INT NULL,
-            [Global]  INT NULL,
-            [Session] INT NULL
-        );
-
-        BEGIN TRY
-            INSERT INTO #TraceStatus (TraceFlag, [Status], [Global], [Session])
-            EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS');
-
-            SELECT @TF1117 = MAX(CASE WHEN TraceFlag = 1117 AND [Status] = 1 AND [Global] = 1 THEN 1 ELSE 0 END),
-                   @TF1118 = MAX(CASE WHEN TraceFlag = 1118 AND [Status] = 1 AND [Global] = 1 THEN 1 ELSE 0 END)
-            FROM #TraceStatus;
-        END TRY
-        BEGIN CATCH
-            SET @TF1117 = 0;
-            SET @TF1118 = 0;
-        END CATCH
-
-        IF OBJECT_ID('tempdb..#TraceStatus') IS NOT NULL
-            DROP TABLE #TraceStatus;
+        SET @Score = 0;
+        SET @Finding = N'Unable to read tempdb data files from sys.master_files.';
     END
-
-    IF @MajorVersion >= 15
-        SET @MemOptTempdb = ISNULL(TRY_CAST(SERVERPROPERTY('IsTempdbMetadataMemoryOptimized') AS INT), 0);
-
-    BEGIN TRY
-        SELECT @ContendedTasks = COUNT(*)
-        FROM sys.dm_os_waiting_tasks
-        WHERE wait_type LIKE 'PAGELATCH%'
-          AND resource_description LIKE '2:%';
-    END TRY
-    BEGIN CATCH
-        SET @ContendedTasks = 0;
-    END CATCH
-
-    SET @Recommended = CASE
-                          WHEN @CpuCount IS NULL THEN 8
-                          WHEN @CpuCount < 8 THEN @CpuCount
-                          ELSE 8
-                       END;
-
-    DECLARE @FileCountOk INT = CASE WHEN @DataFileCount >= @Recommended THEN 1 ELSE 0 END;
-    DECLARE @SizeOk      INT = CASE WHEN @DataFileCount > 0 AND @DistinctSize = 1 THEN 1 ELSE 0 END;
-    DECLARE @GrowthOk    INT = CASE WHEN @DataFileCount > 0 AND @PercentGrowthFile = 0 AND @DistinctGrowth = 1 THEN 1 ELSE 0 END;
-    DECLARE @UniformOk   INT = CASE WHEN @MajorVersion >= 13 OR (@TF1117 = 1 AND @TF1118 = 1) THEN 1 ELSE 0 END;
-    DECLARE @Passed      INT = @FileCountOk + @SizeOk + @GrowthOk + @UniformOk;
-
-    IF @Passed = 4 AND @ContendedTasks = 0
-        SET @Score = 3;
-    ELSE IF @Passed >= 2
-        SET @Score = 2;
-    ELSE
+    ELSE IF @TempdbDataFiles = 1
+    BEGIN
         SET @Score = 1;
-
-    SET @Finding =
-          N'tempdb data files: ' + CAST(@DataFileCount AS NVARCHAR(10))
-        + N' (recommended minimum ' + CAST(@Recommended AS NVARCHAR(10))
-        + N' for ' + ISNULL(CAST(@CpuCount AS NVARCHAR(10)), N'unknown') + N' logical CPUs) - '
-        + CASE WHEN @FileCountOk = 1 THEN N'OK' ELSE N'INSUFFICIENT' END
-        + N'. Distinct file sizes: ' + CAST(@DistinctSize AS NVARCHAR(10))
-        + N' - ' + CASE WHEN @SizeOk = 1 THEN N'uniformly sized' ELSE N'NOT uniformly sized' END
-        + N'. Percent-growth data files: ' + CAST(ISNULL(@PercentGrowthFile, 0) AS NVARCHAR(10))
-        + N', distinct growth settings: ' + CAST(@DistinctGrowth AS NVARCHAR(10))
-        + N' - ' + CASE WHEN @GrowthOk = 1 THEN N'uniform fixed growth' ELSE N'NON-uniform or percent growth' END
-        + N'. Uniform allocation: '
-        + CASE WHEN @MajorVersion >= 13 THEN N'default behaviour on SQL Server 2016+ (major version ' + CAST(@MajorVersion AS NVARCHAR(10)) + N')'
-               WHEN @UniformOk = 1 THEN N'trace flags 1117 and 1118 enabled globally'
-               ELSE N'NOT guaranteed - trace flags 1117/1118 are not both enabled globally on this pre-2016 instance' END
-        + N'. Memory-optimized tempdb metadata: ' + CASE WHEN @MemOptTempdb = 1 THEN N'enabled' ELSE N'not enabled/not applicable' END
-        + N'. Live PAGELATCH waits on tempdb pages at execution time: ' + CAST(@ContendedTasks AS NVARCHAR(10))
-        + N'. Mitigation conditions met: ' + CAST(@Passed AS NVARCHAR(10)) + N' of 4.'
-        + N' Note: continuous monitoring of tempdb contention (alerting on PAGELATCH_UP/PAGELATCH_EX waits) cannot be verified from SQL Server metadata and must be confirmed against monitoring documentation.';
-END
+        SET @Finding = N'tempdb has only 1 data file; recommended near ' + CAST(@RecommendedFiles AS nvarchar(11))
+            + N' (scheduler_count=' + CAST(ISNULL(@SchedulerCount, 0) AS nvarchar(11))
+            + N'). PAGELATCH waits=' + CAST(ISNULL(@PagelatchWaits, 0) AS nvarchar(20))
+            + N' (' + CAST(@ContentionPct AS nvarchar(20)) + N'% of non-idle waits). Single-file layout increases allocation-page contention risk.';
+    END
+    ELSE IF @TempdbDataFiles < @RecommendedFiles
+         OR @DistinctSizes > 1
+         OR @ContentionPct >= 5.0
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = N'tempdb data files=' + CAST(@TempdbDataFiles AS nvarchar(11))
+            + N' (recommended ~' + CAST(@RecommendedFiles AS nvarchar(11))
+            + N'), size range MB=' + CAST(@MinSizeMb AS nvarchar(20)) + N'-' + CAST(@MaxSizeMb AS nvarchar(20))
+            + N' (distinct sizes=' + CAST(@DistinctSizes AS nvarchar(11))
+            + N'), PAGELATCH waits=' + CAST(ISNULL(@PagelatchWaits, 0) AS nvarchar(20))
+            + N' (' + CAST(@ContentionPct AS nvarchar(20))
+            + N'% of non-idle waits). Partial mitigation present; equalize file sizes and/or increase file count, and continue monitoring allocation waits.';
+    END
+    ELSE
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = N'tempdb data files=' + CAST(@TempdbDataFiles AS nvarchar(11))
+            + N' meeting ~' + CAST(@RecommendedFiles AS nvarchar(11))
+            + N' scheduler guidance; all data files equal size (' + CAST(@MinSizeMb AS nvarchar(20))
+            + N' MB). PAGELATCH waits=' + CAST(ISNULL(@PagelatchWaits, 0) AS nvarchar(20))
+            + N' (' + CAST(@ContentionPct AS nvarchar(20))
+            + N'% of non-idle waits). Technical mitigation controls look healthy; keep monitoring tempdb contention.';
+    END
+END TRY
+BEGIN CATCH
+    SET @Score = 0;
+    SET @Finding = N'Error assessing tempdb contention controls: ' + ERROR_MESSAGE();
+END CATCH;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result          AS Result,
-       @Score           AS Score,
-       @DatabaseQueried AS DatabaseQueried,
-       @Finding         AS Finding;
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;

@@ -1,223 +1,265 @@
-/* Checklist 4.4.2 - Partition alignment supports fast load/switch and purge (sliding window). Read-only. */
 SET NOCOUNT ON;
 
-IF OBJECT_ID(N'tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
-CREATE TABLE #DbList (DatabaseName sysname NOT NULL PRIMARY KEY);
-
-IF OBJECT_ID(N'tempdb..#PartitionAudit') IS NOT NULL DROP TABLE #PartitionAudit;
-CREATE TABLE #PartitionAudit
-(
-    DatabaseName        sysname NOT NULL,
-    PartitionedTables   int     NOT NULL,
-    MisalignedIndexes   int     NOT NULL,
-    TablesMisaligned    int     NOT NULL,
-    SlidingWindowReady  int     NOT NULL,
-    LargeUnpartitioned  int     NOT NULL
+IF OBJECT_ID('tempdb..#Results') IS NOT NULL DROP TABLE #Results;
+CREATE TABLE #Results (
+    DatabaseName SYSNAME NOT NULL,
+    PartitionedTableCount INT NOT NULL,
+    FullyAlignedTableCount INT NOT NULL,
+    MisalignedIndexCount INT NOT NULL,
+    SlidingWindowCandidateCount INT NOT NULL,
+    Detail NVARCHAR(MAX) NULL
 );
 
-DECLARE @EngineEdition int = CAST(SERVERPROPERTY(N'EngineEdition') AS int);
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DbName SYSNAME;
+DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
 
-IF @EngineEdition = 5
-BEGIN
-    INSERT INTO #DbList (DatabaseName)
-    SELECT DB_NAME();
-END
-ELSE
-BEGIN
-    INSERT INTO #DbList (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state_desc = N'ONLINE'
-      AND d.is_read_only = 0
-      AND d.source_database_id IS NULL
-      AND d.name NOT IN (N'distribution', N'SSISDB', N'ReportServer', N'ReportServerTempDB')
-      AND HAS_DBACCESS(d.name) = 1
-      AND DATABASEPROPERTYEX(d.name, N'Updateability') = N'READ_WRITE';
-END
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+SELECT d.name
+FROM sys.databases d
+WHERE d.state = 0
+  AND d.database_id > 4
+  AND HAS_DBACCESS(d.name) = 1
+  AND (@EngineEdition = 5 OR d.name NOT IN ('master', 'model', 'msdb', 'tempdb'))
+ORDER BY d.name;
 
-DECLARE @DbName    sysname,
-        @Exec      nvarchar(300),
-        @Sql       nvarchar(max),
-        @FailedDbs int = 0;
-
-SET @Sql = N'
-WITH PT AS (
-    SELECT t.object_id AS ObjectId, i.data_space_id AS SchemeId
-    FROM sys.tables AS t
-    INNER JOIN sys.indexes AS i
-        ON i.object_id = t.object_id AND i.index_id IN (0, 1)
-    INNER JOIN sys.partition_schemes AS ps
-        ON ps.data_space_id = i.data_space_id
-    WHERE t.is_ms_shipped = 0
-),
-MIS AS (
-    SELECT i.object_id AS ObjectId, i.index_id AS IndexId
-    FROM sys.indexes AS i
-    INNER JOIN PT ON PT.ObjectId = i.object_id
-    WHERE i.index_id > 1
-      AND i.type IN (2, 6)
-      AND ISNULL(i.data_space_id, 0) <> PT.SchemeId
-),
-PROWS AS (
-    SELECT p.object_id AS ObjectId, p.partition_number AS PartitionNumber, SUM(p.rows) AS RowsInPartition
-    FROM sys.partitions AS p
-    INNER JOIN PT ON PT.ObjectId = p.object_id
-    WHERE p.index_id IN (0, 1)
-    GROUP BY p.object_id, p.partition_number
-),
-PMAX AS (
-    SELECT ObjectId, MAX(PartitionNumber) AS MaxPart
-    FROM PROWS
-    GROUP BY ObjectId
-),
-BOUND AS (
-    SELECT r.ObjectId,
-           MAX(m.MaxPart) AS MaxPart,
-           MAX(CASE WHEN r.PartitionNumber = 1 AND r.RowsInPartition = 0 THEN 1 ELSE 0 END) AS FirstEmpty,
-           MAX(CASE WHEN r.PartitionNumber = m.MaxPart AND r.RowsInPartition = 0 THEN 1 ELSE 0 END) AS LastEmpty
-    FROM PROWS AS r
-    INNER JOIN PMAX AS m ON m.ObjectId = r.ObjectId
-    GROUP BY r.ObjectId
-),
-BIG AS (
-    SELECT t.object_id AS ObjectId
-    FROM sys.tables AS t
-    INNER JOIN sys.indexes AS i
-        ON i.object_id = t.object_id AND i.index_id IN (0, 1)
-    INNER JOIN sys.partitions AS p
-        ON p.object_id = i.object_id AND p.index_id = i.index_id
-    WHERE t.is_ms_shipped = 0
-      AND NOT EXISTS (SELECT 1 FROM sys.partition_schemes AS ps2 WHERE ps2.data_space_id = i.data_space_id)
-    GROUP BY t.object_id
-    HAVING SUM(p.rows) >= 50000000
-)
-SELECT DB_NAME(),
-       (SELECT COUNT(*) FROM PT),
-       (SELECT COUNT(*) FROM MIS),
-       (SELECT COUNT(DISTINCT ObjectId) FROM MIS),
-       (SELECT COUNT(*) FROM BOUND WHERE MaxPart > 1 AND (FirstEmpty = 1 OR LastEmpty = 1)),
-       (SELECT COUNT(*) FROM BIG);';
-
-DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT DatabaseName FROM #DbList ORDER BY DatabaseName;
-
-OPEN db_cur;
-FETCH NEXT FROM db_cur INTO @DbName;
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DbName;
 
 WHILE @@FETCH_STATUS = 0
 BEGIN
-    BEGIN TRY
-        SET @Exec = CASE WHEN @EngineEdition = 5
-                         THEN N'sys.sp_executesql'
-                         ELSE QUOTENAME(@DbName) + N'.sys.sp_executesql'
-                    END;
+    SET @Sql = N'
+    USE ' + QUOTENAME(@DbName) + N';
+    SET NOCOUNT ON;
 
-        INSERT INTO #PartitionAudit
-            (DatabaseName, PartitionedTables, MisalignedIndexes, TablesMisaligned, SlidingWindowReady, LargeUnpartitioned)
-        EXEC @Exec @Sql;
+    DECLARE @PartitionedTableCount INT = 0;
+    DECLARE @FullyAlignedTableCount INT = 0;
+    DECLARE @MisalignedIndexCount INT = 0;
+    DECLARE @SlidingWindowCandidateCount INT = 0;
+    DECLARE @Detail NVARCHAR(MAX) = N'''';
+
+    ;WITH PartitionedTables AS (
+        SELECT DISTINCT
+            s.name AS SchemaName,
+            t.name AS TableName,
+            t.object_id,
+            ps.name AS PartitionSchemeName,
+            pf.name AS PartitionFunctionName,
+            pf.fanout AS PartitionCount,
+            CASE WHEN pf.fanout >= 3 THEN 1 ELSE 0 END AS IsSlidingCandidate
+        FROM sys.tables t
+        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+        INNER JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN (0, 1)
+        INNER JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+        INNER JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+        WHERE t.is_ms_shipped = 0
+    ),
+    IndexAlignment AS (
+        SELECT
+            pt.object_id,
+            pt.SchemaName,
+            pt.TableName,
+            pt.PartitionSchemeName,
+            pt.PartitionFunctionName,
+            pt.PartitionCount,
+            pt.IsSlidingCandidate,
+            SUM(CASE
+                    WHEN ix.index_id > 1
+                     AND (
+                            ix.data_space_id <> ps_base.data_space_id
+                            OR ISNULL(ds.type, '''') <> ''PS''
+                         )
+                    THEN 1 ELSE 0
+                END) AS MisalignedSecondaryIndexes,
+            COUNT(CASE WHEN ix.index_id > 1 THEN 1 END) AS SecondaryIndexCount
+        FROM PartitionedTables pt
+        INNER JOIN sys.indexes ix_base
+            ON ix_base.object_id = pt.object_id
+           AND ix_base.index_id IN (0, 1)
+        INNER JOIN sys.partition_schemes ps_base
+            ON ps_base.data_space_id = ix_base.data_space_id
+        LEFT JOIN sys.indexes ix
+            ON ix.object_id = pt.object_id
+        LEFT JOIN sys.data_spaces ds
+            ON ds.data_space_id = ix.data_space_id
+        GROUP BY
+            pt.object_id,
+            pt.SchemaName,
+            pt.TableName,
+            pt.PartitionSchemeName,
+            pt.PartitionFunctionName,
+            pt.PartitionCount,
+            pt.IsSlidingCandidate
+    )
+    SELECT
+        @PartitionedTableCount = COUNT(*),
+        @FullyAlignedTableCount = SUM(CASE WHEN MisalignedSecondaryIndexes = 0 THEN 1 ELSE 0 END),
+        @MisalignedIndexCount = SUM(MisalignedSecondaryIndexes),
+        @SlidingWindowCandidateCount = SUM(CASE WHEN IsSlidingCandidate = 1 THEN 1 ELSE 0 END)
+    FROM IndexAlignment;
+
+    IF @PartitionedTableCount = 0
+    BEGIN
+        SET @Detail = N''No partitioned user tables found'';
+    END
+    ELSE
+    BEGIN
+        ;WITH PartitionedTables AS (
+            SELECT DISTINCT
+                s.name AS SchemaName,
+                t.name AS TableName,
+                t.object_id,
+                ps.name AS PartitionSchemeName,
+                pf.name AS PartitionFunctionName,
+                pf.fanout AS PartitionCount
+            FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            INNER JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN (0, 1)
+            INNER JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+            INNER JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+            WHERE t.is_ms_shipped = 0
+        ),
+        IndexAlignment AS (
+            SELECT
+                pt.SchemaName,
+                pt.TableName,
+                pt.PartitionSchemeName,
+                pt.PartitionFunctionName,
+                pt.PartitionCount,
+                SUM(CASE
+                        WHEN ix.index_id > 1
+                         AND (
+                                ix.data_space_id <> ps_base.data_space_id
+                                OR ISNULL(ds.type, '''') <> ''PS''
+                             )
+                        THEN 1 ELSE 0
+                    END) AS MisalignedSecondaryIndexes
+            FROM PartitionedTables pt
+            INNER JOIN sys.indexes ix_base
+                ON ix_base.object_id = pt.object_id
+               AND ix_base.index_id IN (0, 1)
+            INNER JOIN sys.partition_schemes ps_base
+                ON ps_base.data_space_id = ix_base.data_space_id
+            LEFT JOIN sys.indexes ix
+                ON ix.object_id = pt.object_id
+            LEFT JOIN sys.data_spaces ds
+                ON ds.data_space_id = ix.data_space_id
+            GROUP BY
+                pt.SchemaName,
+                pt.TableName,
+                pt.PartitionSchemeName,
+                pt.PartitionFunctionName,
+                pt.PartitionCount
+        )
+        SELECT @Detail = STUFF((
+            SELECT TOP (15) ''; '' +
+                ia.SchemaName + ''.'' + ia.TableName +
+                '' [pf='' + ia.PartitionFunctionName +
+                '', ps='' + ia.PartitionSchemeName +
+                '', partitions='' + CAST(ia.PartitionCount AS NVARCHAR(20)) +
+                '', misaligned_nc='' + CAST(ia.MisalignedSecondaryIndexes AS NVARCHAR(20)) + '']''
+            FROM IndexAlignment ia
+            ORDER BY ia.MisalignedSecondaryIndexes DESC, ia.PartitionCount ASC, ia.SchemaName, ia.TableName
+            FOR XML PATH(''''), TYPE
+        ).value(''.'', ''NVARCHAR(MAX)''), 1, 2, '''');
+    END
+
+    INSERT INTO #Results (DatabaseName, PartitionedTableCount, FullyAlignedTableCount, MisalignedIndexCount, SlidingWindowCandidateCount, Detail)
+    VALUES (
+        N''' + REPLACE(@DbName, '''', '''''') + N''',
+        @PartitionedTableCount,
+        ISNULL(@FullyAlignedTableCount, 0),
+        ISNULL(@MisalignedIndexCount, 0),
+        ISNULL(@SlidingWindowCandidateCount, 0),
+        @Detail
+    );
+    ';
+
+    BEGIN TRY
+        EXEC sys.sp_executesql @Sql;
     END TRY
     BEGIN CATCH
-        SET @FailedDbs = @FailedDbs + 1;
-    END CATCH
+        INSERT INTO #Results (DatabaseName, PartitionedTableCount, FullyAlignedTableCount, MisalignedIndexCount, SlidingWindowCandidateCount, Detail)
+        VALUES (@DbName, -1, 0, 0, 0, LEFT(ERROR_MESSAGE(), 400));
+    END CATCH;
 
-    FETCH NEXT FROM db_cur INTO @DbName;
+    FETCH NEXT FROM db_cursor INTO @DbName;
 END
 
-CLOSE db_cur;
-DEALLOCATE db_cur;
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
 
-DECLARE @DbCount     int,
-        @PartTables  int,
-        @MisIdx      int,
-        @MisTables   int,
-        @Sliding     int,
-        @LargeUnpart int;
+DECLARE @DatabasesQueried INT = (SELECT COUNT(*) FROM #Results WHERE PartitionedTableCount >= 0);
+DECLARE @ErrorCount INT = (SELECT COUNT(*) FROM #Results WHERE PartitionedTableCount < 0);
+DECLARE @DbWithPartitions INT = (SELECT COUNT(*) FROM #Results WHERE PartitionedTableCount > 0);
+DECLARE @TotalPartitionedTables INT = (SELECT ISNULL(SUM(CASE WHEN PartitionedTableCount > 0 THEN PartitionedTableCount ELSE 0 END), 0) FROM #Results);
+DECLARE @TotalFullyAligned INT = (SELECT ISNULL(SUM(CASE WHEN PartitionedTableCount > 0 THEN FullyAlignedTableCount ELSE 0 END), 0) FROM #Results);
+DECLARE @TotalMisaligned INT = (SELECT ISNULL(SUM(CASE WHEN PartitionedTableCount > 0 THEN MisalignedIndexCount ELSE 0 END), 0) FROM #Results);
+DECLARE @TotalSliding INT = (SELECT ISNULL(SUM(CASE WHEN PartitionedTableCount > 0 THEN SlidingWindowCandidateCount ELSE 0 END), 0) FROM #Results);
 
-SELECT @DbCount = COUNT(*) FROM #DbList;
+DECLARE @Result NVARCHAR(20);
+DECLARE @Score INT;
+DECLARE @Finding NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(MAX);
 
-SELECT @PartTables  = ISNULL(SUM(PartitionedTables), 0),
-       @MisIdx      = ISNULL(SUM(MisalignedIndexes), 0),
-       @MisTables   = ISNULL(SUM(TablesMisaligned), 0),
-       @Sliding     = ISNULL(SUM(SlidingWindowReady), 0),
-       @LargeUnpart = ISNULL(SUM(LargeUnpartitioned), 0)
-FROM #PartitionAudit;
-
-DECLARE @DatabaseQueried nvarchar(max) =
-    STUFF((SELECT N', ' + DatabaseName
-           FROM #DbList
-           ORDER BY DatabaseName
-           FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 2, N'');
-
-IF @DatabaseQueried IS NULL SET @DatabaseQueried = N'None';
-
-DECLARE @TopOffenders nvarchar(max) =
-    STUFF((SELECT TOP (5) N', ' + DatabaseName + N' (' + CAST(MisalignedIndexes AS nvarchar(20)) + N')'
-           FROM #PartitionAudit
-           WHERE MisalignedIndexes > 0
-           ORDER BY MisalignedIndexes DESC, DatabaseName
-           FOR XML PATH(N''), TYPE).value(N'.', N'nvarchar(max)'), 1, 2, N'');
-
-DECLARE @Score   int,
-        @Result  nvarchar(20),
-        @Finding nvarchar(max);
-
-IF @DbCount = 0
+IF @DatabasesQueried = 0 AND @ErrorCount > 0
 BEGIN
     SET @Score = 0;
-    SET @Finding = N'No accessible, online, read-write user database was found, so partition alignment could not be assessed.';
+    SET @Finding = N'Unable to evaluate partition alignment; all accessible database checks failed.';
+    SET @DatabaseQueried = N'none';
 END
-ELSE IF @PartTables = 0 AND @LargeUnpart = 0
+ELSE IF @TotalPartitionedTables = 0
 BEGIN
     SET @Score = 3;
-    SET @Finding = N'No partitioned user tables exist across ' + CAST(@DbCount AS nvarchar(20))
-                 + N' database(s), and no unpartitioned table reaches 50,000,000 rows, so sliding-window partitioning is not required at the current data volume.';
+    SET @Finding = N'No partitioned user tables found in accessible databases; partition alignment / sliding-window SWITCH pattern is not applicable (N/A pass). Databases checked: ' + CAST(@DatabasesQueried AS NVARCHAR(20)) + N'.';
+    SET @DatabaseQueried = CASE WHEN @DatabasesQueried = 0 THEN N'none' ELSE N'all_accessible' END;
 END
-ELSE IF @PartTables = 0
+ELSE IF @TotalMisaligned = 0 AND @TotalSliding = @TotalPartitionedTables AND @TotalFullyAligned = @TotalPartitionedTables
 BEGIN
-    SET @Score = 0;
-    SET @Finding = N'No partitioned user tables exist across ' + CAST(@DbCount AS nvarchar(20))
-                 + N' database(s), yet ' + CAST(@LargeUnpart AS nvarchar(20))
-                 + N' table(s) hold 50,000,000 rows or more; load, SWITCH and purge must run as fully logged row-by-row operations.';
+    SET @Score = 3;
+    SET @Finding = N'All ' + CAST(@TotalPartitionedTables AS NVARCHAR(20)) + N' partitioned table(s) across ' + CAST(@DbWithPartitions AS NVARCHAR(20)) + N' database(s) have aligned secondary indexes and multi-partition (>=3) schemes suitable for SWITCH-based sliding-window load/purge.';
+    SET @DatabaseQueried = N'all_accessible';
 END
-ELSE IF @MisIdx > 0
-BEGIN
-    SET @Score = 1;
-    SET @Finding = CAST(@PartTables AS nvarchar(20)) + N' partitioned table(s) found across '
-                 + CAST(@DbCount AS nvarchar(20)) + N' database(s), but ' + CAST(@MisIdx AS nvarchar(20))
-                 + N' index(es) on ' + CAST(@MisTables AS nvarchar(20))
-                 + N' table(s) are not aligned to the base partition scheme, which blocks ALTER TABLE ... SWITCH. Worst databases (misaligned index count): '
-                 + ISNULL(@TopOffenders, N'n/a') + N'. Tables with an empty boundary partition: '
-                 + CAST(@Sliding AS nvarchar(20)) + N'. Large unpartitioned tables: ' + CAST(@LargeUnpart AS nvarchar(20)) + N'.';
-END
-ELSE IF @Sliding = 0
+ELSE IF @TotalMisaligned = 0 AND @TotalSliding > 0
 BEGIN
     SET @Score = 2;
-    SET @Finding = N'All indexes on the ' + CAST(@PartTables AS nvarchar(20))
-                 + N' partitioned table(s) across ' + CAST(@DbCount AS nvarchar(20))
-                 + N' database(s) are aligned, but no table keeps an empty first or last partition, so the sliding window has no pre-staged partition for metadata-only load or purge. Large unpartitioned tables: '
-                 + CAST(@LargeUnpart AS nvarchar(20)) + N'.';
+    SET @Finding = N'Partitioned tables are index-aligned, but only ' + CAST(@TotalSliding AS NVARCHAR(20)) + N' of ' + CAST(@TotalPartitionedTables AS NVARCHAR(20)) + N' have >=3 partitions for a practical sliding window. Review boundary management for SWITCH load/purge.';
+    SET @DatabaseQueried = N'all_accessible';
+END
+ELSE IF @TotalMisaligned > 0 AND @TotalFullyAligned > 0
+BEGIN
+    SET @Score = 2;
+    SET @Finding = N'Partial alignment: ' + CAST(@TotalFullyAligned AS NVARCHAR(20)) + N'/' + CAST(@TotalPartitionedTables AS NVARCHAR(20)) + N' partitioned tables fully aligned; misaligned nonclustered index references=' + CAST(@TotalMisaligned AS NVARCHAR(20)) + N'; sliding-window candidates=' + CAST(@TotalSliding AS NVARCHAR(20)) + N'. Misalignment blocks efficient partition SWITCH.';
+    SET @DatabaseQueried = N'all_accessible';
 END
 ELSE
 BEGIN
-    SET @Score = 3;
-    SET @Finding = N'All indexes on the ' + CAST(@PartTables AS nvarchar(20))
-                 + N' partitioned table(s) across ' + CAST(@DbCount AS nvarchar(20))
-                 + N' database(s) are aligned to their partition scheme, and ' + CAST(@Sliding AS nvarchar(20))
-                 + N' table(s) keep an empty first or last partition, supporting metadata-only SWITCH for load and purge. Large unpartitioned tables: '
-                 + CAST(@LargeUnpart AS nvarchar(20)) + N'.';
+    SET @Score = 1;
+    SET @Finding = N'Partition alignment does not support reliable SWITCH load/purge. Partitioned tables=' + CAST(@TotalPartitionedTables AS NVARCHAR(20)) + N', fully aligned=' + CAST(@TotalFullyAligned AS NVARCHAR(20)) + N', misaligned NC index refs=' + CAST(@TotalMisaligned AS NVARCHAR(20)) + N', sliding-window candidates (>=3 partitions)=' + CAST(@TotalSliding AS NVARCHAR(20)) + N'.';
+    SET @DatabaseQueried = N'all_accessible';
 END
-
-IF @FailedDbs > 0
-    SET @Finding = @Finding + N' Note: ' + CAST(@FailedDbs AS nvarchar(20))
-                 + N' database(s) could not be inspected due to access or state errors.';
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
-SELECT @Result          AS Result,
-       @Score           AS Score,
-       @DatabaseQueried AS DatabaseQueried,
-       @Finding         AS Finding;
+IF EXISTS (SELECT 1 FROM #Results WHERE PartitionedTableCount > 0 AND Detail IS NOT NULL)
+BEGIN
+    DECLARE @Samples NVARCHAR(MAX);
+    SELECT @Samples = STUFF((
+        SELECT TOP (8) N' | ' + r.DatabaseName + N': ' + r.Detail
+        FROM #Results r
+        WHERE r.PartitionedTableCount > 0 AND r.Detail IS NOT NULL
+        ORDER BY r.MisalignedIndexCount DESC, r.DatabaseName
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 3, '');
 
-IF OBJECT_ID(N'tempdb..#PartitionAudit') IS NOT NULL DROP TABLE #PartitionAudit;
-IF OBJECT_ID(N'tempdb..#DbList') IS NOT NULL DROP TABLE #DbList;
+    IF @Samples IS NOT NULL AND LEN(@Samples) > 0
+        SET @Finding = @Finding + N' Samples: ' + @Samples;
+END
+
+SELECT
+    @Result AS Result,
+    @Score AS Score,
+    @DatabaseQueried AS DatabaseQueried,
+    @Finding AS Finding;
+
+DROP TABLE #Results;
