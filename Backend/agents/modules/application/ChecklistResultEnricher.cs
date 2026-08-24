@@ -57,13 +57,7 @@ public static class ChecklistResultEnricher
         var score = result.Score;
         if (score is null && !isNotApplicable)
         {
-            score = result.Outcome?.Trim().ToLowerInvariant() switch
-            {
-                "pass" => 3,
-                "fail" => 0,
-                "needsreview" or "needs review" => 1,
-                _ => 2,
-            };
+            score = DeriveScore(result.Outcome);
         }
 
         // Script-evaluated items carry facts produced by the SQL script and wording
@@ -88,15 +82,7 @@ public static class ChecklistResultEnricher
             : result.Severity;
 
         var finding = string.IsNullOrWhiteSpace(result.Finding)
-            ? (isNotApplicable
-                ? $"Not applicable: {result.Description}."
-                : score switch
-                {
-                    0 => $"Gap identified: '{result.Description}' is not implemented.",
-                    1 => $"Partial implementation: '{result.Description}' is in place but has notable gaps.",
-                    2 => $"Implemented with minor improvement opportunities: {result.Description}.",
-                    _ => $"Control satisfied: {result.Description}.",
-                })
+            ? DefaultFinding(score, result.Description, isNotApplicable)
             : result.Finding;
 
         // Recommendation: preserve any engine-supplied (e.g. MCP) value; otherwise
@@ -105,13 +91,7 @@ public static class ChecklistResultEnricher
         var recommendation = string.IsNullOrWhiteSpace(result.Recommendation) ? null : result.Recommendation;
         if (recommendation is null && !isNotApplicable)
         {
-            recommendation = score switch
-            {
-                0 => $"Implement the control '{result.Description}', which is currently absent, and capture documented evidence of the change.",
-                1 => $"Close the remaining gaps in '{result.Description}' to move it from partial to full implementation.",
-                2 => $"Optimize '{result.Description}' toward best practice and document the supporting configuration.",
-                _ => null,
-            };
+            recommendation = DefaultRecommendation(score, result.Description);
         }
 
         // Effort aligns with the recommendation: when no action is required, no
@@ -123,12 +103,7 @@ public static class ChecklistResultEnricher
         }
 
         var riskImpact = string.IsNullOrWhiteSpace(result.RiskImpact)
-            ? score switch
-            {
-                0 => "High \u2014 control absent",
-                1 => "Medium \u2014 partial coverage",
-                _ => "Low \u2014 control in place",
-            }
+            ? DefaultRiskImpact(score)
             : result.RiskImpact;
 
         var evidence = string.IsNullOrWhiteSpace(result.Evidence)
@@ -151,10 +126,44 @@ public static class ChecklistResultEnricher
         };
     }
 
+    // Rubric section 1: the 0-3 score an outcome maps to when the engine did not supply one.
+    public static int DeriveScore(string? outcome) => outcome?.Trim().ToLowerInvariant() switch
+    {
+        "pass" => 3,
+        "fail" => 0,
+        "needsreview" or "needs review" => 1,
+        _ => 2,
+    };
+
+    public static string DefaultRiskImpact(int? score) => score switch
+    {
+        0 => "High \u2014 control absent",
+        1 => "Medium \u2014 partial coverage",
+        _ => "Low \u2014 control in place",
+    };
+
+    public static string DefaultFinding(int? score, string? description, bool isNotApplicable) => isNotApplicable
+        ? $"Not applicable: {description}."
+        : score switch
+        {
+            0 => $"Gap identified: '{description}' is not implemented.",
+            1 => $"Partial implementation: '{description}' is in place but has notable gaps.",
+            2 => $"Implemented with minor improvement opportunities: {description}.",
+            _ => $"Control satisfied: {description}.",
+        };
+
+    public static string? DefaultRecommendation(int? score, string? description) => score switch
+    {
+        0 => $"Implement the control '{description}', which is currently absent, and capture documented evidence of the change.",
+        1 => $"Close the remaining gaps in '{description}' to move it from partial to full implementation.",
+        2 => $"Optimize '{description}' toward best practice and document the supporting configuration.",
+        _ => null,
+    };
+
     // Rubric section 6: severity tracks the score, escalating to Critical for a total
     // gap in the security (area 6) and compliance (area 7) areas, where the exposure
     // is active rather than latent.
-    private static string DeriveSeverity(string id, int? score, bool isNotApplicable)
+    public static string DeriveSeverity(string id, int? score, bool isNotApplicable)
     {
         if (isNotApplicable) return "Informational";
 
