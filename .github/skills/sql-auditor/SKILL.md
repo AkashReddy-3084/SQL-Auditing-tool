@@ -104,10 +104,14 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    - ...
    ```
 4. Only **after** the full steps for all items have been shown, ask the user for their
-   finding/evidence and decide Pass or Fail together, one item at a time or all at once.
-5. Record the decision by running **resolve_review** with `--id`, `--decision`
-   (`pass` or `fail`), and `--notes`.
-6. Do not write a final summary until every review item is resolved and every script item
+   **Pass/Fail decision first** — one item at a time or all at once. The verdict is the
+   reviewer's to make: never infer it, assume it, announce it, or challenge it.
+5. Ask **one** follow-up question: what they inspected and what they found. Accept the
+   answer as given — do not judge whether it is sufficient, do not ask for more detail, and
+   do not argue for a different outcome. Re-ask only if they gave no observation at all.
+6. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
+   (`pass` or `fail`), and `--notes` containing the user's own words.
+7. Do not write a final summary until every review item is resolved and every script item
    is enriched. Then run **show_reports** to display `results/final_report.md`.
 
 ## Generating scripts (separate from evaluation)

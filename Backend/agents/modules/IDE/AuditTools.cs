@@ -175,14 +175,16 @@ public static class AuditTools
             sb.AppendLine("       ## Recommended Actions (if failed)");
             sb.AppendLine("       - ...");
             sb.AppendLine("     Do NOT add extra sections or headings outside this format.");
-            sb.AppendLine("  2. Ask the user for their finding / evidence, and WAIT for it. Their own words are the evidence of record.");
-            sb.AppendLine("     If the user replies only 'pass' or 'fail' with no observation, ask again for what they inspected and what they found");
-            sb.AppendLine("     (document names, settings, values, counts). 'resolve_review' rejects a decision that has no evidence.");
-            sb.AppendLine("  3. Decide Pass or Fail together with the user, then call the 'resolve_review' tool with their evidence in 'notes'.");
-            sb.AppendLine("  4. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
+            sb.AppendLine("  2. Ask the user for their DECISION: Pass or Fail. The verdict is the reviewer's to make — never infer,");
+            sb.AppendLine("     assume, announce, question or challenge it, and never propose a different outcome.");
+            sb.AppendLine("  3. Ask ONE follow-up question: what they inspected and what they found. Accept their answer as given.");
+            sb.AppendLine("     Do NOT assess whether the evidence is sufficient, do NOT ask for extra detail, and do NOT argue that");
+            sb.AppendLine("     the item should stay NeedsReview. Re-ask ONLY if they supplied no observation at all.");
+            sb.AppendLine("  4. Immediately call 'resolve_review' with the user's decision and their exact words in 'notes'.");
+            sb.AppendLine("  5. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
             sb.AppendLine("     finding (the actual state they observed), evidence (why it supports the outcome), riskImpact (the specific");
             sb.AppendLine("     consequence) and recommendation (targeted remediation). Use ONLY facts the user stated — invent nothing.");
-            sb.AppendLine("Do NOT write a final summary until every item has been resolved.");
+            sb.AppendLine("Two questions per item — decision, then evidence. Do NOT write a final summary until every item is resolved.");
             foreach (var r in manualPending)
             {
                 sb.AppendLine();
@@ -197,7 +199,7 @@ public static class AuditTools
                     sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
                     sb.AppendLine(r.Evidence.Trim());
                 }
-                sb.AppendLine($"After the user decides, call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
+                sb.AppendLine($"Ask for the Pass/Fail decision first, then the evidence, then call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
                 sb.AppendLine($"Then call: enrich_result(id=\"{r.Id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\") derived from that evidence.");
             }
         }
@@ -647,7 +649,7 @@ public static class AuditTools
         if (isDecision && !IsUsableEvidence(notes))
             return Task.FromResult(
                 $"Error: 'notes' must contain the reviewer's actual observation for [{id}] — what they checked and what they found. "
-                + "Ask the user for their finding/evidence and call resolve_review again with it.");
+                + "Ask the user for the evidence behind their decision and call resolve_review again with it.");
 
         var auditor = new Auditor(string.Empty);
         if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
