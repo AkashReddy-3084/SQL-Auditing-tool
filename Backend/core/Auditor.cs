@@ -741,9 +741,11 @@ namespace SQLAuditor.Lib
                 // The script's final SELECT (Result/Score/DatabaseQueried/Finding) is the
                 // factual source. Preserve the verdict and score it returned; only fall back
                 // to scraping the console text when the script exposed no structured result.
+                // Either way the verdict is Pass or Fail - a script item is never deferred to
+                // a reviewer; only the N/A check below can move it off that verdict.
                 var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
                 var outcome = scriptOutcome.Result
-                    ?? EvaluationDecisionService.EvaluateEvidenceOutcome(textLog.ToString());
+                    ?? EvaluationDecisionService.EvaluateScriptEvidenceOutcome(textLog.ToString());
                 var score = scriptOutcome.Score;
 
                 // Turn the structured SQL result into audit-report wording (Finding, Evidence,
@@ -979,7 +981,7 @@ namespace SQLAuditor.Lib
                         }
                         catch (Exception ex)
                         {
-                            var err = new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", "Error: " + ex.Message, it.ScriptFile, isScriptPipeline ? "Script" : "AI-Manual");
+                            var err = new ChecklistResult(it.Id, it.Description, it.Verification, isScriptPipeline ? "Fail" : "NeedsReview", "Error: " + ex.Message, it.ScriptFile, isScriptPipeline ? "Script" : "AI-Manual");
                             results.Add(err);
                             progress?.Report(err);
                         }

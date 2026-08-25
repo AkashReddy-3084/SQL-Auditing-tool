@@ -16,6 +16,17 @@ internal static class EvaluationDecisionService
         return "NeedsReview";
     }
 
+    /// <summary>
+    /// Evidence outcome for the deterministic script pipeline, which owns its verdict and
+    /// never defers to a reviewer: evidence that is absent or unreadable means the control
+    /// could not be shown to be in place, which is a Fail.
+    /// </summary>
+    public static string EvaluateScriptEvidenceOutcome(string evidence)
+    {
+        var outcome = EvaluateEvidenceOutcome(evidence);
+        return outcome == "NeedsReview" ? "Fail" : outcome;
+    }
+
     public static Task<string> BuildManualInstructionsAsync(ChecklistItem item)
         => Task.FromResult(BuildManualInstructions(item));
 

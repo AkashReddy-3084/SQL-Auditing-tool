@@ -213,6 +213,26 @@ namespace SQLAuditor.Agents
                     "SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;");
             }
 
+            // Matched on the raw script because Tokenize strips literals out of Code.
+            var resultCase = Regex.Match(script, @"@Result\s*=\s*CASE\b[\s\S]{0,400}?\bEND\b", Opts);
+
+            if (resultCase.Success)
+            {
+                foreach (Match verdict in Regex.Matches(resultCase.Value, @"\b(?:THEN|ELSE)\s*N?'([^']*)'", Opts))
+                {
+                    var value = verdict.Groups[1].Value.Trim();
+
+                    if (!value.Equals("Pass", StringComparison.OrdinalIgnoreCase) &&
+                        !value.Equals("Fail", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Invalid(
+                            $"@Result may only be 'Pass' or 'Fail' but the script can return '{value}', " +
+                            "which leaves the checklist item without a verdict. Use exactly: " +
+                            "SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;");
+                    }
+                }
+            }
+
             var lastSelect =
                 code.LastIndexOf("SELECT", StringComparison.OrdinalIgnoreCase);
 

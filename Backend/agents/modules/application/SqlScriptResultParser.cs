@@ -12,6 +12,9 @@ namespace SQLAuditor.Lib;
 /// </summary>
 internal static class SqlScriptResultParser
 {
+    // The generator contract derives Result as CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail'.
+    private const int PassScore = 2;
+
     private static readonly string[] ResultAliases = { "Result", "Outcome", "Status", "PassFail" };
     private static readonly string[] ScoreAliases = { "Score", "DbScore", "ItemScore" };
     private static readonly string[] DatabaseAliases = { "DatabaseQueried", "DatabasesQueried", "DatabasesVerified", "DbName", "DatabaseName", "Database" };
@@ -29,9 +32,7 @@ internal static class SqlScriptResultParser
             .ToList();
 
         var scores = verdictRows
-            .Select(r => r.Get(ScoreAliases))
-            .Where(v => v != null)
-            .Select(v => int.TryParse(v, out var n) ? n : (int?)null)
+            .Select(TryGetScore)
             .Where(n => n.HasValue)
             .Select(n => n!.Value)
             .ToList();
@@ -40,14 +41,13 @@ internal static class SqlScriptResultParser
         int? score = scores.Count == 0 ? null : scores.Min();
 
         var results = verdictRows
-            .Select(r => r.Get(ResultAliases))
-            .Where(v => !string.IsNullOrWhiteSpace(v))
-            .Select(NormalizeOutcome)
+            .Select(ResolveRowOutcome)
+            .Where(v => v != null)
             .ToList();
 
         string? result = null;
         if (results.Count > 0)
-            result = results.Contains("Fail") ? "Fail" : results.Contains("NeedsReview") ? "NeedsReview" : "Pass";
+            result = results.Contains("Fail") ? "Fail" : "Pass";
 
         var databases = rows
             .Select(r => r.Get(DatabaseAliases))
@@ -73,11 +73,26 @@ internal static class SqlScriptResultParser
         };
     }
 
-    private static string NormalizeOutcome(string? raw)
+    private static int? TryGetScore(SqlScriptRow row)
+        => int.TryParse(row.Get(ScoreAliases), out var n) ? n : null;
+
+    // A script-evaluated row must settle on Pass or Fail. Only 'Pass' and 'Fail' are
+    // honoured from the Result column; any other wording a script emits ('Review',
+    // 'Warning', 'Unknown') is resolved from that row's Score instead, so a
+    // non-conforming script can never leave the item without a verdict. A row that
+    // carries neither returns null and does not contribute to the aggregate.
+    private static string? ResolveRowOutcome(SqlScriptRow row)
     {
-        var v = raw?.Trim() ?? string.Empty;
-        if (v.StartsWith("pass", StringComparison.OrdinalIgnoreCase)) return "Pass";
-        if (v.StartsWith("fail", StringComparison.OrdinalIgnoreCase)) return "Fail";
-        return "NeedsReview";
+        var raw = row.Get(ResultAliases)?.Trim();
+        if (raw != null)
+        {
+            if (raw.StartsWith("pass", StringComparison.OrdinalIgnoreCase)) return "Pass";
+            if (raw.StartsWith("fail", StringComparison.OrdinalIgnoreCase)) return "Fail";
+        }
+
+        var score = TryGetScore(row);
+        if (score.HasValue) return score.Value >= PassScore ? "Pass" : "Fail";
+
+        return raw == null ? null : "Fail";
     }
 }
