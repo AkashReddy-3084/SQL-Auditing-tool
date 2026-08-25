@@ -11,7 +11,7 @@ Evaluation rules:
 1. First determine feasibility from available snapshot signals.
 2. If snapshot includes relevant object/code indicators (for example module counts, TRY/CATCH usage counts, THROW/RAISERROR usage, NOCOUNT usage, cursor/while usage, deprecated type counts), treat as potentially feasible.
 3. Use feasible=false only when key required signals are absent.
-4. When feasible=true but confidence is limited, use outcome=NeedsReview with specific evidence.
+4. When feasible=true, commit to a verdict that matches the score: outcome=Pass when score >= 2, outcome=Fail when score < 2. If confidence is too limited to score the item, set feasible=false rather than hedging the outcome.
 5. Never copy these instructions in the response.
 
 Report fields (fill all of them so the summary report renders correctly):

@@ -16,6 +16,9 @@ internal sealed class SqlServerMcpEvaluator
 {
     private sealed record ProviderCallResult(string Content);
 
+    // Matches the score-to-verdict rule the audit scripts use.
+    private const int PassScore = 2;
+
     private readonly string _baseUrl;
     private readonly string _apiKey;
     private readonly string _model;
@@ -94,12 +97,18 @@ internal sealed class SqlServerMcpEvaluator
             return null;
         }
 
+        var outcome = ResolveOutcome(parsed);
+        if (outcome == null)
+        {
+            return null;
+        }
+
         var evidence = string.IsNullOrWhiteSpace(parsed.Evidence)
             ? provider.Content
             : parsed.Evidence;
 
         stopwatch.Stop();
-        return new ChecklistResult(item.Id, item.Description, item.Verification, parsed.Outcome, evidence, item.ScriptFile, "AI-MCP")
+        return new ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-MCP")
         {
             RawAttribute = parsed.RawAttribute,
             // RawOutput = provider.RawOutput,
@@ -145,12 +154,18 @@ internal sealed class SqlServerMcpEvaluator
             return null;
         }
 
+        var outcome = ResolveOutcome(parsed);
+        if (outcome == null)
+        {
+            return null;
+        }
+
         var evidence = string.IsNullOrWhiteSpace(parsed.Evidence)
             ? provider.Content
             : parsed.Evidence;
 
         stopwatch.Stop();
-        return new ChecklistResult(item.Id, item.Description, item.Verification, parsed.Outcome, evidence, item.ScriptFile, "AI-MCP")
+        return new ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-MCP")
         {
             RawAttribute = parsed.RawAttribute,
             // RawOutput = provider.RawOutput,
@@ -167,6 +182,20 @@ internal sealed class SqlServerMcpEvaluator
             RiskImpact = parsed.RiskImpact ?? string.Empty,
             // ScoreImpact = parsed.ScoreImpact
         };
+    }
+
+    /// <summary>
+    /// The verdict for a feasible MCP evaluation. 'Pass' and 'Fail' are honoured as given;
+    /// a hedged 'NeedsReview' is resolved from the score the same response already carries,
+    /// because no workflow can resolve a NeedsReview on an AI-MCP item. Returns null when
+    /// there is no score to fall back on, which hands the item to the manual pipeline where
+    /// a human can actually decide it.
+    /// </summary>
+    private static string? ResolveOutcome(ParsedMcpResponse parsed)
+    {
+        if (parsed.Outcome is "Pass" or "Fail") return parsed.Outcome;
+        if (parsed.Score.HasValue) return parsed.Score.Value >= PassScore ? "Pass" : "Fail";
+        return null;
     }
 
     private async Task<ProviderCallResult?> CallProviderAsync(string prompt, CancellationToken cancellationToken)
