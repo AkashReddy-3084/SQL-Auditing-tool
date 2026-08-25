@@ -52,6 +52,13 @@ namespace SQLAuditor
                 return RunShowReportsCommand(args);
             }
 
+            // Refresh results/historical_last_run.json and render final_report.md + audit_report.xlsx.
+            // Evaluation never does this automatically here: the user is asked first.
+            if (args.Length > 0 && string.Equals(args[0], "generate_report", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunGenerateReportCommand(args);
+            }
+
             Console.WriteLine("SQL Auditor — lightweight console interface");
 
             // special debug flag: dump parsed checklist structure and exit
@@ -182,6 +189,23 @@ namespace SQLAuditor
             // so the Copilot CLI skill can generate guidance and record decisions.
             bool copilotMode = opts.ContainsKey("copilot");
 
+            // --- Step 1: how manual checklist items are handled ---
+            // The choice is always the user's; it is never inferred by the CLI or by Copilot.
+            bool? useHistoricalManualResults = ResolveManualResultsMode(opts);
+            if (useHistoricalManualResults is null)
+            {
+                if (copilotMode)
+                {
+                    PrintManualResultsModeQuestion();
+                    return 2;
+                }
+                useHistoricalManualResults = PromptManualResultsMode();
+            }
+
+            Console.WriteLine(useHistoricalManualResults.Value
+                ? "Manual items: reusing results from previous runs where available (results/historical_last_run.json)."
+                : "Manual items: fresh evaluation (previous manual results are not copied).");
+
             // Values come from flags/env first; anything missing is prompted for,
             // one detail at a time. Secrets are never hardcoded.
 
@@ -305,7 +329,11 @@ namespace SQLAuditor
             try
             {
                 // Non-interactive: no user prompts. Manual-only items resolve to NeedsReview.
-                results = await auditor.RunChecklistAsync(progress, null, validIds, cts.Token);
+                // Reports are NOT generated here; the user is asked for them after the run.
+                results = await auditor.RunChecklistAsync(
+                    progress, null, validIds, cts.Token,
+                    useHistoricalManualResults.Value,
+                    generateReports: false);
             }
             finally
             {
@@ -420,8 +448,49 @@ namespace SQLAuditor
             var jsonDefault = Path.Combine(resultsDir, "checklist_results.json");
             Console.WriteLine();
             Console.WriteLine($"Results JSON : {jsonDefault}");
-            Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
-            Console.WriteLine($"Excel        : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+
+            // The summary/report is never produced automatically: the user decides, and only
+            // then is results/historical_last_run.json refreshed from the new manual results.
+            if (copilotMode)
+            {
+                Console.WriteLine();
+                Console.WriteLine("=== REPORT GENERATION DECISION REQUIRED ===");
+                Console.WriteLine("Evaluation completed and results/checklist_results.json has been updated.");
+                Console.WriteLine("No report has been generated. After every item is enriched and reviewed, ask the user:");
+                Console.WriteLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
+                Console.WriteLine("If the user says YES, run: sql-auditor generate_report");
+                Console.WriteLine("  -> refreshes results/historical_last_run.json with the newly evaluated manual results,");
+                Console.WriteLine("     then writes results/final_report.md and results/audit_report.xlsx.");
+                Console.WriteLine("If the user says NO, stop here: keep checklist_results.json, do not refresh the historical file,");
+                Console.WriteLine("and do not generate final_report.md or the Excel workbook. Never decide this yourself.");
+                Console.WriteLine("=== END REPORT GENERATION DECISION REQUIRED ===");
+            }
+            else
+            {
+                Console.WriteLine();
+                Console.WriteLine("Evaluation completed. Do you want to generate the summary/report?");
+                var generate = false;
+                if (!Console.IsInputRedirected)
+                {
+                    var ans = Prompt("Generate final_report.md and the Excel report now? (y/n) [y]:").Trim().ToLowerInvariant();
+                    generate = ans.Length == 0 || ans is "y" or "yes";
+                }
+                else
+                {
+                    Console.WriteLine("(Non-interactive session: skipped. Run 'sqlauditor generate_report' when you want the reports.)");
+                }
+
+                if (generate)
+                {
+                    Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports());
+                    Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
+                    Console.WriteLine($"Excel        : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+                }
+                else
+                {
+                    Console.WriteLine("No report generated. results/checklist_results.json is up to date; run 'sqlauditor generate_report' later.");
+                }
+            }
 
             var jsonOut = GetOption(opts, "json");
             if (!string.IsNullOrWhiteSpace(jsonOut))
@@ -449,10 +518,14 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("Usage: sqlauditor evaluate [options]");
             Console.WriteLine();
-            Console.WriteLine("Any option not supplied is prompted for interactively (server, then");
-            Console.WriteLine("login details, then checklist IDs).");
+            Console.WriteLine("Any option not supplied is prompted for interactively (manual-results");
+            Console.WriteLine("source, then server, then login details, then checklist IDs).");
             Console.WriteLine();
             Console.WriteLine("Options:");
+            Console.WriteLine("  --manual-results <last-runs|fresh>");
+            Console.WriteLine("                      How manual/AI-Manual items are handled: reuse the results");
+            Console.WriteLine("                      recorded in results/historical_last_run.json, or evaluate");
+            Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
             Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
             Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
@@ -471,7 +544,86 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
-            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost");
+            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --fresh");
+        }
+
+        // ---------------------------------------------------------------------
+        // Manual-results source: reuse the last runs, or evaluate fresh.
+        // The user always decides; neither the CLI nor Copilot may pick for them.
+        // ---------------------------------------------------------------------
+        static bool? ResolveManualResultsMode(System.Collections.Generic.Dictionary<string, string> opts)
+        {
+            var mode = GetOption(opts, "manual-results") ?? GetOption(opts, "manualresults");
+            if (!string.IsNullOrWhiteSpace(mode))
+            {
+                switch (mode.Trim().ToLowerInvariant())
+                {
+                    case "1":
+                    case "last":
+                    case "last-runs":
+                    case "lastruns":
+                    case "historical":
+                    case "reuse":
+                        return true;
+                    case "2":
+                    case "fresh":
+                    case "new":
+                    case "none":
+                        return false;
+                }
+            }
+
+            if (opts.ContainsKey("use-last-runs") || opts.ContainsKey("use-historical")) return true;
+            if (opts.ContainsKey("fresh")) return false;
+            return null;
+        }
+
+        static bool PromptManualResultsMode()
+        {
+            var available = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds().Count;
+
+            Console.WriteLine();
+            Console.WriteLine("How should manual checklist items be handled?");
+            Console.WriteLine("  1) Use the Last Runs  — Do you want me to use the last runs results for the manual steps?");
+            Console.WriteLine("  2) Fresh Evaluation   — Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?");
+            Console.WriteLine(available > 0
+                ? $"     ({available} manual result(s) available in results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName})"
+                : $"     (no results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} yet — option 1 falls back to a fresh manual evaluation)");
+
+            if (Console.IsInputRedirected)
+            {
+                Console.WriteLine("Non-interactive session: defaulting to a fresh evaluation. Pass --manual-results last-runs to reuse.");
+                return false;
+            }
+
+            while (true)
+            {
+                var ans = Prompt("Choose [1/2]:").Trim().ToLowerInvariant();
+                if (ans is "1" or "last" or "last-runs") return true;
+                if (ans is "2" or "fresh") return false;
+                Console.WriteLine("Enter 1 (use the last runs) or 2 (fresh evaluation).");
+            }
+        }
+
+        static void PrintManualResultsModeQuestion()
+        {
+            var available = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds().Count;
+
+            Console.WriteLine();
+            Console.WriteLine("=== MANUAL RESULTS SOURCE REQUIRED ===");
+            Console.WriteLine("Before any evaluation starts, the user must choose how manual checklist items are handled.");
+            Console.WriteLine("Ask the user these two options and wait for their answer — never decide this yourself:");
+            Console.WriteLine("  Option 1 — Use the Last Runs:");
+            Console.WriteLine("      \"Do you want me to use the last runs results for the manual steps?\"");
+            Console.WriteLine("  Option 2 — Fresh Evaluation:");
+            Console.WriteLine("      \"Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?\"");
+            Console.WriteLine(available > 0
+                ? $"results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} currently holds {available} reusable manual result(s)."
+                : $"results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} does not exist yet, so Option 1 falls back safely to a fresh manual evaluation.");
+            Console.WriteLine("Then run evaluate again, adding EXACTLY ONE of:");
+            Console.WriteLine("  --manual-results last-runs     (Option 1)");
+            Console.WriteLine("  --manual-results fresh         (Option 2)");
+            Console.WriteLine("=== END MANUAL RESULTS SOURCE REQUIRED ===");
         }
 
         // Emits NeedsReview items in a clearly delimited block so the Copilot CLI skill
@@ -765,6 +917,43 @@ namespace SQLAuditor
                 Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
                 return 3;
             }
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `generate_report` subcommand
+        // Runs only when the user has explicitly asked for the summary/report. Refreshes
+        // results/historical_last_run.json from the newly evaluated manual results, then
+        // renders results/final_report.md and results/audit_report.xlsx.
+        // ---------------------------------------------------------------------
+        static int RunGenerateReportCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor generate_report [--no-historical-refresh]");
+                Console.WriteLine("  Refreshes results/historical_last_run.json with the manual results in");
+                Console.WriteLine("  results/checklist_results.json, then writes results/final_report.md and");
+                Console.WriteLine("  results/audit_report.xlsx.");
+                return 0;
+            }
+
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath))
+            {
+                Console.Error.WriteLine($"No results found at {jsonPath}. Run 'evaluate' first.");
+                return 2;
+            }
+
+            Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports(!opts.ContainsKey("no-historical-refresh")));
+            Console.WriteLine($"Report : {Path.Combine(resultsDir, "final_report.md")}");
+            Console.WriteLine($"Excel  : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+
+            var tally = SQLAuditor.Lib.Auditor.BuildOutcomeTally();
+            if (!string.IsNullOrEmpty(tally))
+                Console.WriteLine($"Final outcome counts: {tally}");
+
+            return 0;
         }
 
         // ---------------------------------------------------------------------

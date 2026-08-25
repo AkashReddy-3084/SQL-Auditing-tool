@@ -31,9 +31,10 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 
 | Tool | Purpose |
 |------|---------|
-| `evaluate` | Gathers server + auth, runs the engine, returns the work you must do |
+| `evaluate` | Gathers the manual-results choice, server + auth, runs the engine, returns the work you must do |
 | `enrich_result` | Records the wording **you** author for one item |
 | `resolve_review` | Records the user's Pass/Fail decision for one review item |
+| `generate_report` | Refreshes the historical manual results and writes the report + workbook |
 | `show_reports` | The final report and the authoritative outcome counts |
 | `load_checklist` | Look up valid IDs when the user's input cannot be resolved |
 
@@ -45,12 +46,23 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 evaluate(items="<user input verbatim>")
 ```
 
-It walks five steps and returns the **exact next question** whenever an input is missing. Ask
+It walks six steps and returns the **exact next question** whenever an input is missing. Ask
 that question, then call `evaluate` again with the answer plus everything gathered so far.
 
+- **The first question is always the manual-results choice.** Present both options verbatim and
+  wait for the user's answer, then pass `manualResults="last-runs"` or `manualResults="fresh"`.
+  **Never decide this yourself** and never infer it from context:
+  - *Option 1 — Use the Last Runs:* "Do you want me to use the last runs results for the manual steps?"
+  - *Option 2 — Fresh Evaluation:* "Do you want to evaluate the checklist items fresh (do not copy
+    manual results from previous runs)?"
 - **Never guess the server name** or use a default such as `localhost`.
 - **Never ask for a password in chat.** For SQL Login the tool needs only the username; the
   password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched VS Code.
+
+With Option 1, manual items that already have a result in `results/historical_last_run.json` are
+copied forward and listed as `Copied from last runs (N item(s))`. Those items are **done**: do not
+generate manual steps for them, do not review them, and do not enrich them. Manual items without a
+historical result still go through the normal review flow below.
 
 ### 2. Enrich every script-evaluated item
 
@@ -92,14 +104,24 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 
 ### 4. Report
 
-The counts `evaluate` prints are **provisional** — Not Applicable is decided during enrichment.
-Once every item is enriched and reviewed, call `show_reports` and report the counts it returns.
+`evaluate` does **not** generate any report. Once every item is enriched and reviewed, ask the
+user exactly: **"Evaluation completed. Do you want to generate the summary/report?"**
+
+- **Yes** → call `generate_report()`. It merges the newly evaluated manual results into
+  `results/historical_last_run.json` (existing entries are preserved), then writes
+  `final_report.md` and `audit_report.xlsx`. Then call `show_reports` and report **its** counts —
+  the counts `evaluate` printed are provisional, because Not Applicable is decided during enrichment.
+- **No** → stop. `results/checklist_results.json` stays as it is, the historical file is not
+  refreshed, and no report or workbook is written.
+
+Never make this decision on the user's behalf.
 
 ## What gets written
 
 | Path | Content |
 |------|---------|
 | `results/checklist_results.json` | Per-item outcome, score, severity and your wording |
+| `results/historical_last_run.json` | Manual/AI-Manual results keyed by checklist ID, reusable by later runs (refreshed only by `generate_report`) |
 | `results/final_report.md` | Scored Markdown audit report |
 | `results/audit_report.xlsx` | 5-tab workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items |
 

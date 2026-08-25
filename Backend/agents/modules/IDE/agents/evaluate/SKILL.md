@@ -14,6 +14,7 @@ CLI `evaluate` command and reuses the same evaluation engine.
 ## Inputs
 | Name    | Required | Description                                              |
 |---------|----------|----------------------------------------------------------|
+| manualResults | Yes | `last-runs` or `fresh`. Must come from the user; decides whether manual/AI-Manual results in `results/historical_last_run.json` are copied forward. |
 | items   | Yes      | Comma-separated checklist IDs (e.g. `1.1.2,3.1.2`).      |
 | server  | Yes*     | SQL Server host[,port]. From arg/env `SQLAUDITOR_SERVER`.|
 | user    | No       | SQL login user. Omit for Windows Integrated auth.        |
@@ -22,11 +23,16 @@ CLI `evaluate` command and reuses the same evaluation engine.
 \* May be supplied via environment/VS Code settings rather than per-call.
 
 ## Behavior
-1. Load the checklist structure and validate requested IDs (warn + skip unknown IDs).
-2. Run only the selected items through the existing engine
-   (`Auditor.RunChecklistAsync(selectedIds: ...)`).
-3. Non-interactive: no operator prompts; manual-only items resolve to `NeedsReview`.
-4. Write `results/checklist_results.json` and `results/final_report.md` (engine does this).
+1. Ask the user how manual items are handled (last runs vs fresh) before anything else.
+2. Load the checklist structure and validate requested IDs (warn + skip unknown IDs).
+3. Run only the selected items through the existing engine
+   (`Auditor.RunChecklistAsync(selectedIds: ...)`). With `last-runs`, manual items that already
+   have a completed result in `results/historical_last_run.json` are copied forward and skip
+   manual-step generation and manual review entirely.
+4. Non-interactive: no operator prompts; manual-only items resolve to `NeedsReview`.
+5. Write `results/checklist_results.json` (engine does this). Reports are **not** generated here:
+   the user is asked afterwards, and `generate_report` refreshes
+   `results/historical_last_run.json` and writes `final_report.md` + `audit_report.xlsx`.
 
 ## Output
 - Per-item lines: `[<id>] <Outcome> (<Technique>) - <Description>`
@@ -41,7 +47,9 @@ CLI `evaluate` command and reuses the same evaluation engine.
   `PROVIDER_API_KEY`, and `MODEL` are ignored here.
 
 ## Reuses
-- `SQLAuditor.Lib.Auditor.RunChecklistAsync(progress, requestUserInput: null, selectedIds, ct)`
+- `SQLAuditor.Lib.Auditor.RunChecklistAsync(progress, requestUserInput: null, selectedIds, ct, useHistoricalManualResults, generateReports: false)`
+- `SQLAuditor.Lib.Auditor.GenerateReports(refreshHistoricalManualResults)` (via the `generate_report` tool)
+- `SQLAuditor.Lib.HistoricalManualResultsStore` (load / reuse / refresh)
 - `SQLAuditor.Lib.Auditor.GetChecklistStructureAsync()` (for ID validation)
 
 ## Out of scope

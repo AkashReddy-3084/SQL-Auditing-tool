@@ -292,6 +292,10 @@
                                     <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
                                         <CheckBox x:Name="SelectAllChecklistCb" DockPanel.Dock="Right" Content="Select All" VerticalAlignment="Center" Margin="12,0,0,0"
                                                   Checked="SelectAllChecklistCb_Checked" Unchecked="SelectAllChecklistCb_Unchecked" />
+                                        <CheckBox x:Name="CopyManualResultsCb" DockPanel.Dock="Right" Content="Copy Manual Results (Last Runs)" VerticalAlignment="Center" Margin="12,0,0,0"
+                                                  IsEnabled="False"
+                                                  ToolTip="Reuse manual/AI-Manual results recorded in results/historical_last_run.json instead of re-verifying those items."
+                                                  Checked="CopyManualResultsCb_Changed" Unchecked="CopyManualResultsCb_Changed" />
                                         <TextBlock Text="Checklist (select items to evaluate)" FontWeight="Bold" FontSize="16" VerticalAlignment="Center" />
                                     </DockPanel>
                                     <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->

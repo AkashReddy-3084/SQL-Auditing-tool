@@ -76,6 +76,13 @@ namespace SQLAuditor.Wpf
         private readonly System.Threading.SemaphoreSlim _manualPersistLock = new(1, 1);
         // Selected checklist IDs are kept in-memory for the current session only
         private System.Collections.Generic.List<string>? _selectedIds;
+        // Checklist IDs that already have a reusable manual result in results/historical_last_run.json
+        private System.Collections.Generic.HashSet<string> _historicalManualIds = new(StringComparer.OrdinalIgnoreCase);
+        // Manual IDs the current run copied from those historical results: they arrive decided, so
+        // they have no ManualEvaluationState and must not be treated as an unfinished review.
+        private System.Collections.Generic.HashSet<string> _copiedManualIds = new(StringComparer.OrdinalIgnoreCase);
+        // guards the mapping-preview rebuild triggered by the Copy Manual Results checkbox
+        private bool _suppressCopyManualReload = false;
 
         public MainWindow()
         {
@@ -98,6 +105,7 @@ namespace SQLAuditor.Wpf
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
+            RefreshHistoricalManualAvailability();
             LoadChecklistBtn.IsEnabled = true;
             Log("Opened on Login view.");
             UpdateStageIndicators();
@@ -167,6 +175,44 @@ namespace SQLAuditor.Wpf
             catch { }
         }
 
+        // The first run has no results/historical_last_run.json, so there is nothing to copy and
+        // the checkbox stays disabled (and unchecked).
+        private void RefreshHistoricalManualAvailability()
+        {
+            try
+            {
+                _historicalManualIds = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds();
+            }
+            catch
+            {
+                _historicalManualIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (CopyManualResultsCb == null) return;
+
+            var available = _historicalManualIds.Count > 0;
+            CopyManualResultsCb.IsEnabled = available;
+            if (!available && CopyManualResultsCb.IsChecked == true)
+            {
+                _suppressCopyManualReload = true;
+                try { CopyManualResultsCb.IsChecked = false; }
+                finally { _suppressCopyManualReload = false; }
+            }
+        }
+
+        private bool UseHistoricalManualResults =>
+            CopyManualResultsCb?.IsChecked == true && _historicalManualIds.Count > 0;
+
+        private void CopyManualResultsCb_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_suppressCopyManualReload) return;
+            Log(UseHistoricalManualResults
+                ? $"Copy Manual Results enabled — {_historicalManualIds.Count} manual result(s) available from last runs."
+                : "Copy Manual Results disabled — every manual item will be evaluated normally.");
+            // Mapping Preview classifies items by how they will be evaluated, so it is rebuilt.
+            if (_checklistLoaded) LoadChecklistBtn_Click(sender, e);
+        }
+
         private async void LoadChecklistBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_auditor == null)
@@ -175,6 +221,7 @@ namespace SQLAuditor.Wpf
                 _auditor = new Auditor("");
                 Log("No DB connection provided — using offline auditor for checklist load.");
             }
+            RefreshHistoricalManualAvailability();
             Log("Loading checklist structure...");
             try
             {
@@ -308,6 +355,7 @@ namespace SQLAuditor.Wpf
                 }
 
                 var mappingRows = new System.Collections.Generic.List<dynamic>();
+                var copyManual = UseHistoricalManualResults;
                 // Use in-memory selected IDs (if any) to determine which items to show/process
                 var itemsToProcess = (_selectedIds != null && _selectedIds.Count > 0) ? (_loadedItems?.Where(i => _selectedIds.Contains(i.Id)).ToList() ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : (selectedItems.Count == 0 ? (_loadedItems ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : selectedItems);
                 foreach (var it in itemsToProcess)
@@ -328,8 +376,11 @@ namespace SQLAuditor.Wpf
                         if (_itemScriptMap != null) _itemScriptMap[it.Id] = scripts;
                     }
 
+                    // Only non-script items can be served from a previous run's manual results.
+                    var copied = copyManual && type != "Script" && _historicalManualIds.Contains(it.Id);
+
                     var area = _loadedStructure?.FirstOrDefault(x => x.Item.Id == it.Id).Area ?? string.Empty;
-                    mappingRows.Add(new { Type = type, Area = area, Category = it.Category, Id = it.Id, Description = it.Description, Verification = it.Verification, ScriptFiles = string.Join(';', scripts) });
+                    mappingRows.Add(new { Type = type, Copied = copied, Area = area, Category = it.Category, Id = it.Id, Description = it.Description, Verification = it.Verification, ScriptFiles = string.Join(';', scripts) });
                 }
 
                 // Populate TreeView grouped by Area -> Category -> Item
@@ -345,7 +396,7 @@ namespace SQLAuditor.Wpf
 
                     // populate mapping tree hierarchically: DisplayType -> Area -> Category -> Item (with counts)
                     MappingTree.Items.Clear();
-                    var normalized = mappingRows.Select(r => new { DisplayType = ((string)r.Type) == "Script" ? "Script" : "AI (MCP/Manual)", Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
+                    var normalized = mappingRows.Select(r => new { DisplayType = (bool)r.Copied ? "Copied from last runs" : (((string)r.Type) == "Script" ? "Script" : "AI (MCP/Manual)"), Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
                     var byType = normalized.GroupBy(r => r.DisplayType).OrderBy(t => t.Key);
                     foreach (var typeGrp in byType)
                     {
@@ -434,6 +485,21 @@ namespace SQLAuditor.Wpf
             _evalStatusMap = new System.Collections.Generic.Dictionary<string, (string Status, string Technique)>();
 
             var selectedLookup = new System.Collections.Generic.HashSet<string>(selected);
+
+            // Mirrors the engine's reuse predicate: a non-script item with a completed manual
+            // result recorded by an earlier run is copied forward instead of being reviewed.
+            _copiedManualIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (UseHistoricalManualResults)
+            {
+                foreach (var id in selected)
+                {
+                    if (!_historicalManualIds.Contains(id)) continue;
+                    if (_itemTypeMap != null && _itemTypeMap.TryGetValue(id, out var t)
+                        && string.Equals(t, "Script", StringComparison.OrdinalIgnoreCase)) continue;
+                    _copiedManualIds.Add(id);
+                }
+            }
+
             if (_loadedStructure != null)
             {
                 foreach (var pair in _loadedStructure)
@@ -539,13 +605,18 @@ namespace SQLAuditor.Wpf
                 _isEvaluating = true;
                 var token = _evaluationCts.Token;
                 var idsForRun = selected.Count == 0 ? null : selected;
+                var useHistorical = UseHistoricalManualResults;
+                if (useHistorical)
+                {
+                    Log($"Reusing manual results from last runs for {_copiedManualIds.Count} selected item(s); manual review is skipped for them.");
+                }
                 // The engine must not run on the dispatcher. Awaiting it directly kept every SQL
                 // and LLM continuation on the UI thread, so a manual Pass/Fail click (file I/O +
                 // full tree rebuild) stalled the in-flight script pipeline; the aborted command
                 // then left the shared connection broken and every remaining script item came
                 // back as a SQL error, which the outcome mapper scores as Fail.
                 var results = await Task.Run(
-                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token),
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical),
                     token);
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
@@ -1259,37 +1330,17 @@ namespace SQLAuditor.Wpf
 
         // Regenerates final_report.md and audit_report.xlsx from the current
         // checklist_results.json so both reports reflect re-applied manual decisions
-        // instead of the engine's placeholder write.
+        // instead of the engine's placeholder write. Report generation is also when
+        // historical_last_run.json is refreshed with newly evaluated manual results.
         private void RegenerateReportFromPersisted()
         {
             try
             {
-                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
-                var path = System.IO.Path.Combine(dir, "checklist_results.json");
-                if (!System.IO.File.Exists(path)) return;
-                var arr = JsonSerializer.Deserialize<ChecklistResult[]>(System.IO.File.ReadAllText(path)) ?? Array.Empty<ChecklistResult>();
-                var metadata = new SqlAuditor.Reporting.ReportMetadata
-                {
-                    ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                    Auditors = "SQL Auditor Tool (automated)",
-                    TotalChecklistItems = arr.Length,
-                };
-
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    path,
-                    System.IO.Path.Combine(dir, "final_report.md"),
-                    metadata);
-
-                try
-                {
-                    new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
-                        path,
-                        System.IO.Path.Combine(dir, "audit_report.xlsx"),
-                        metadata);
-                }
-                catch (Exception ex) { Log("Failed to refresh audit_report.xlsx: " + ex.Message); }
+                var message = SQLAuditor.Lib.Auditor.GenerateReports();
+                if (!string.IsNullOrWhiteSpace(message)) Log(message.Replace(Environment.NewLine, " | "));
+                RefreshHistoricalManualAvailability();
             }
-            catch { }
+            catch (Exception ex) { Log("Failed to regenerate reports: " + ex.Message); }
         }
 
         private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)
@@ -1368,7 +1419,8 @@ namespace SQLAuditor.Wpf
 
                 var technique = statusEntry.Technique;
                 var status = statusEntry.Status;
-                if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
+                    && !_copiedManualIds.Contains(item.Id))
                 {
                     ManualEvaluationState? manualState = null;
                     if (_manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out manualState) || manualState == null)

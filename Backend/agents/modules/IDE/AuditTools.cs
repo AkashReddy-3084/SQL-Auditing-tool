@@ -46,39 +46,63 @@ public static class AuditTools
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     [McpServerTool(Name = "evaluate")]
-    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (a 5-tab Excel workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items).")]
+    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json only — the reports are NOT generated automatically; ask the user afterwards and call 'generate_report' if they say yes.")]
     public static async Task<string> EvaluateAsync(
-        [Description("STEP 1: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
-        [Description("STEP 2: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
-        [Description("STEP 2b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
-        [Description("STEP 3: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
+        [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
+        [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
+        [Description("STEP 3: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
+        [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
+        [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         CancellationToken cancellationToken = default)
     {
-        // STEP 1 — SQL Server name (always required, always from the user first).
+        // STEP 1 — manual-results source. Asked first, and always answered by the user.
+        var manualMode = manualResults?.Trim().ToLowerInvariant();
+        bool? useHistoricalManualResults = manualMode switch
+        {
+            "last-runs" or "lastruns" or "last" or "historical" or "reuse" or "1" => true,
+            "fresh" or "new" or "none" or "2" => false,
+            _ => null,
+        };
+        if (useHistoricalManualResults is null)
+        {
+            var available = HistoricalManualResultsStore.AvailableIds().Count;
+            return "STEP 1 of 6 — MANUAL RESULTS SOURCE REQUIRED.\n"
+                 + "Before any evaluation starts, ask the user how manual checklist items should be handled. "
+                 + "Present BOTH options and wait for their answer — never decide this yourself:\n"
+                 + "  Option 1 — Use the Last Runs: \"Do you want me to use the last runs results for the manual steps?\"\n"
+                 + "  Option 2 — Fresh Evaluation: \"Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?\"\n"
+                 + (available > 0
+                        ? $"results/{HistoricalManualResultsStore.FileName} currently holds {available} reusable manual result(s).\n"
+                        : $"results/{HistoricalManualResultsStore.FileName} does not exist yet, so Option 1 falls back safely to a fresh manual evaluation.\n")
+                 + "Then call evaluate again with manualResults='last-runs' (Option 1) or manualResults='fresh' (Option 2), "
+                 + "plus everything else already gathered.";
+        }
+
+        // STEP 2 — SQL Server name (always required, always from the user first).
         if (string.IsNullOrWhiteSpace(server))
-            return "STEP 1 of 5 — SQL SERVER NAME REQUIRED.\n"
+            return "STEP 2 of 6 — SQL SERVER NAME REQUIRED.\n"
                  + "Ask the user: \"Please provide the SQL Server name (host or host,port).\"\n"
                  + "Do not guess or use a default such as localhost. When the user answers, call evaluate again with 'server' set. "
                  + "Retain any checklist IDs the user already mentioned and pass them as 'items' later.";
 
-        // STEP 2 — Authentication method.
+        // STEP 3 — Authentication method.
         var method = authMethod?.Trim().ToLowerInvariant();
         if (method != "windows" && method != "sql")
-            return $"STEP 2 of 5 — AUTHENTICATION METHOD REQUIRED for server '{server}'.\n"
+            return $"STEP 3 of 6 — AUTHENTICATION METHOD REQUIRED for server '{server}'.\n"
                  + "Ask the user: \"Which authentication method should I use — 'windows' (Windows Integrated) or 'sql' (SQL Login)?\"\n"
                  + "Then call evaluate again with 'server' and 'authMethod' set.";
 
-        // STEP 2b — SQL login username (password stays in the session environment, never in chat).
+        // STEP 3b — SQL login username (password stays in the session environment, never in chat).
         if (method == "sql" && string.IsNullOrWhiteSpace(sqlUser))
-            return $"STEP 2b — SQL LOGIN USERNAME REQUIRED for server '{server}'.\n"
+            return $"STEP 3b — SQL LOGIN USERNAME REQUIRED for server '{server}'.\n"
                  + "Ask the user for the SQL login username. For security, the password must NOT be typed in chat: "
                  + "the user sets it once in their terminal session before launching VS Code "
                  + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), and the server reads it at runtime.\n"
                  + "Then call evaluate again with 'server', authMethod='sql', and 'sqlUser' set.";
 
-        // STEP 3 — Checklist items.
+        // STEP 4 — Checklist items.
         if (string.IsNullOrWhiteSpace(items))
-            return $"STEP 3 of 5 — CHECKLIST ITEMS REQUIRED.\n"
+            return $"STEP 4 of 6 — CHECKLIST ITEMS REQUIRED.\n"
                  + $"Server '{server}' and authentication are set. Ask the user which checklist items to evaluate — a single ID ('1.2.1'), "
                  + "a list ('1.2.1,3.1.2'), an inclusive range ('1.1.1 - 2.1.4') or 'all'. "
                  + "If the user already provided items earlier in the conversation, use those instead of asking again.\n"
@@ -91,7 +115,7 @@ public static class AuditTools
         {
             var pass = Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
             if (string.IsNullOrEmpty(pass))
-                return $"STEP 2b — SQL PASSWORD NOT AVAILABLE for user '{sqlUser}' on server '{server}'.\n"
+                return $"STEP 3b \u2014 SQL PASSWORD NOT AVAILABLE for user '{sqlUser}' on server '{server}'.\n"
                      + "The SQLAUDITOR_SQL_PASSWORD session environment variable is not set, so no SQL login can be made. "
                      + "Do NOT ask for the password in chat. Ask the user to set it in the terminal session that launched VS Code "
                      + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), restart the MCP server, then run evaluate again. "
@@ -127,12 +151,30 @@ public static class AuditTools
                  + (unknown.Length > 0 ? ". Unknown: " + string.Join(", ", unknown) : $": '{spec}' matched no checklist ID.")
                  + " Call load_checklist to look up valid IDs.";
 
-        // STEP 4 — run automated evaluation (manual-only items resolve to NeedsReview).
-        var results = await auditor.RunChecklistAsync(null, null, valid, cancellationToken);
+        // STEP 5 — run automated evaluation (manual-only items resolve to NeedsReview).
+        // Manual items with a reusable historical result are copied forward inside the engine
+        // when the user chose Option 1, so they never reach the review queue below.
+        // Reports are NOT generated here: the user is asked for them after the run.
+        var results = await auditor.RunChecklistAsync(
+            null, null, valid, cancellationToken,
+            useHistoricalManualResults.Value,
+            generateReports: false);
 
         var sb = new StringBuilder();
         if (unknown.Length > 0)
             sb.AppendLine("Skipped unknown IDs: " + string.Join(", ", unknown));
+
+        if (useHistoricalManualResults.Value)
+        {
+            var historicalIds = HistoricalManualResultsStore.AvailableIds();
+            var copied = results.Where(r => historicalIds.Contains(r.Id)
+                                         && HistoricalManualResultsStore.IsManualTechnique(r.Technique)).ToList();
+            sb.AppendLine(copied.Count > 0
+                ? $"Copied from last runs ({copied.Count} item(s)): " + string.Join(", ", copied.Select(r => r.Id).OrderBy(i => i, StringComparer.OrdinalIgnoreCase))
+                : "Copied from last runs (0 items): no reusable manual results were found, so every manual item was evaluated normally.");
+            sb.AppendLine("Copied items already carry the reviewer's decision \u2014 do NOT generate manual steps, review them or enrich them again.");
+        }
+
         sb.AppendLine($"Evaluated {results.Length} item(s):");
         foreach (var r in results.OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase))
             sb.AppendLine($"- [{r.Id}] {r.Outcome} ({r.Technique}) - {r.Description}");
@@ -218,8 +260,34 @@ public static class AuditTools
         }
 
         sb.AppendLine();
-        sb.AppendLine("Reports written to results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (5-tab Excel workbook).");
+        sb.AppendLine("Results written to results/checklist_results.json.");
+        sb.AppendLine();
+        sb.AppendLine("=== REPORT GENERATION DECISION REQUIRED ===");
+        sb.AppendLine("NO report has been generated. Once every item above is enriched and reviewed, ask the user:");
+        sb.AppendLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
+        sb.AppendLine("If YES: call generate_report() \u2014 it refreshes results/historical_last_run.json with the newly evaluated");
+        sb.AppendLine("manual results, then writes results/final_report.md and results/audit_report.xlsx.");
+        sb.AppendLine("If NO: stop. Keep results/checklist_results.json, do not refresh the historical file, and do not generate");
+        sb.AppendLine("the report or the workbook. Never make this decision yourself.");
+        sb.AppendLine("=== END REPORT GENERATION DECISION REQUIRED ===");
         return sb.ToString();
+    }
+
+    [McpServerTool(Name = "generate_report")]
+    [Description("Generate the final audit outputs after the user has explicitly asked for them: refreshes results/historical_last_run.json with the newly evaluated manual/AI-Manual results from results/checklist_results.json (existing historical entries are preserved), then writes results/final_report.md and results/audit_report.xlsx. Call ONLY after the user answers yes to 'Evaluation completed. Do you want to generate the summary/report?'. Never call it on your own initiative.")]
+    public static Task<string> GenerateReportAsync(
+        [Description("Set to false to render the reports without recording the new manual results in results/historical_last_run.json. Defaults to true.")] bool refreshHistoricalManualResults = true)
+    {
+        var jsonPath = Path.Combine(Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+        if (!File.Exists(jsonPath))
+            return Task.FromResult($"No results found at {jsonPath}. Run 'evaluate' first.");
+
+        var message = Auditor.GenerateReports(refreshHistoricalManualResults);
+        var tally = Auditor.BuildOutcomeTally();
+        return Task.FromResult(
+            message
+            + (string.IsNullOrEmpty(tally) ? string.Empty : $"\nFinal outcome counts: {tally}")
+            + "\nCall 'show_reports' to display results/final_report.md and report ITS counts.");
     }
 
     [McpServerTool(Name = "load_checklist")]

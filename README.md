@@ -128,14 +128,20 @@ prints the latest report; `--dump-checklist` lists the checklist structure.
 Examples:
 
 ```powershell
-# Fully interactive (prompts for server, auth, and items)
+# Fully interactive (prompts for the manual-results source, server, auth, and items)
 Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate
 
 # Non-interactive with flags
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+
+# Reuse the manual results recorded by the previous audit
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results last-runs
 
 # Copilot CLI mode: surface Needs Review items for Copilot to review
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+
+# Render the reports once the evaluation is complete
+Backend\core\bin\Debug\net10.0\SQLAuditor.exe generate_report
 
 # List the checklist structure without running an evaluation
 Backend\core\bin\Debug\net10.0\SQLAuditor.exe --dump-checklist
@@ -143,11 +149,17 @@ Backend\core\bin\Debug\net10.0\SQLAuditor.exe --dump-checklist
 
 ### Manual review and output
 
-Script-based controls are decided automatically. Controls needing human judgement come back
-as **Needs Review**; in an interactive terminal (or with `--interactive`) the CLI shows the
-verification guidance and prompts you to mark each **Pass**, **Fail**, or **Skip** (with
-optional notes). Results are written to `results/checklist_results.json` and
-`results/final_report.md` (see [Output](#output)).
+Every run starts by asking how manual checklist items should be handled: **use the last runs**
+(copy the results recorded in `results/historical_last_run.json` and skip their manual review) or
+**fresh evaluation**. Script-based controls are decided automatically. Controls needing human
+judgement come back as **Needs Review**; in an interactive terminal (or with `--interactive`) the
+CLI shows the verification guidance and prompts you to mark each **Pass**, **Fail**, or **Skip**
+(with optional notes). Results are written to `results/checklist_results.json`.
+
+The report is **not** generated automatically. The CLI asks *"Evaluation completed. Do you want to
+generate the summary/report?"*; answering yes (or running `generate_report` later) refreshes
+`results/historical_last_run.json` with the newly evaluated manual results and writes
+`results/final_report.md` and `results/audit_report.xlsx` (see [Output](#output)).
 
 The command returns an exit code for scripting: `0` success, `1` one or more controls
 failed, `2` usage/validation error, `3` unexpected error.
@@ -208,6 +220,7 @@ the IDE flow.
 | `save_generated_script` / `validate_generated_script` | Fallback for clients without sampling: validate and save a script the model authored from the returned prompt |
 | `enrich_result` | Record Copilot-authored Finding/Evidence/RiskImpact/Recommendation for a script-evaluated item |
 | `resolve_review` | Record a Pass/Fail decision for an item that needs review |
+| `generate_report` | Refresh `historical_last_run.json` and render `final_report.md` + `audit_report.xlsx` (only when the user asks) |
 | `show_reports` | Return the generated `final_report.md` or `checklist_results.json` |
 
 ### Setup
@@ -244,15 +257,18 @@ the IDE flow.
 
 Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mirrors the CLI:
 
-1. Copilot asks for the **SQL Server name**.
-2. Then the **authentication method** (`windows` or `sql`; for SQL Login it asks the
+1. Copilot asks whether to **use the last runs' manual results** or run a **fresh evaluation**.
+2. Copilot asks for the **SQL Server name**.
+3. Then the **authentication method** (`windows` or `sql`; for SQL Login it asks the
    username — the password is read from the `SQLAUDITOR_SQL_PASSWORD` session environment
    variable you set in your terminal, never typed in chat or stored in `mcp.json`).
-3. Then **which checklist items** to evaluate (e.g. `1.2.1, 3.1.2`).
-4. Copilot calls `evaluate`; script-based controls are decided deterministically.
-5. For **Needs Review** items, Copilot presents the verification guidance, helps you decide,
+4. Then **which checklist items** to evaluate (e.g. `1.2.1, 3.1.2`).
+5. Copilot calls `evaluate`; script-based controls are decided deterministically, and manual
+   items reused from a previous run come back already decided.
+6. For **Needs Review** items, Copilot presents the verification guidance, helps you decide,
    and records each decision via `resolve_review`.
-6. Copilot shows the final **summary/report** (`show_reports`).
+7. Copilot asks whether to generate the summary/report. On yes it calls `generate_report`
+   (which refreshes `historical_last_run.json`) and then shows it with `show_reports`.
 
 Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
 `mark 3.1.1 as pass, notes: verified naming standards`,
@@ -266,6 +282,7 @@ Generated artefacts are written to `results/` in the working directory:
 | File | Contents |
 | --- | --- |
 | `checklist_results.json` | Per-item outcome, technique and token usage |
+| `historical_last_run.json` | Completed manual/AI-Manual results keyed by checklist ID, reusable by later runs; refreshed only at report generation |
 | `final_report.md` | Rendered audit report with weighted scores |
 | `ui_log.txt` | Diagnostic log; the first place to look when a run fails |
 

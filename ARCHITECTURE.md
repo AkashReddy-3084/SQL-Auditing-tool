@@ -11,6 +11,7 @@ The SQL Auditing Tool evaluates SQL environment compliance against a checklist u
 Primary outputs are written to the `results/` folder:
 
 - `checklist_results.json`
+- `historical_last_run.json`
 - `final_report.md`
 - `progress_stream.txt`
 - `ui_log.txt`
@@ -99,12 +100,15 @@ graph TD
   H6 --> H7["Collect operator PASS or FAIL evidence"]
   H7 --> H8["Store AI-Manual result"]
 
+  H5 -- "Reuse enabled and historical result exists" --> H9["Copy result from historical_last_run.json"]
+
   G2 --> I["Merge all results"]
   H4 --> I
   H8 --> I
+  H9 --> I
 
   I --> J["Write checklist_results.json"]
-  J --> K["Build summary metrics and final_report.md"]
+  J --> K["On request: refresh historical_last_run.json, build final_report.md + audit_report.xlsx"]
   K --> L["Display Summary tab"]
 ```
 
@@ -144,6 +148,11 @@ graph TD
 
 - `Backend/agents/modules/PromptTemplateStore.cs`
   - Resolves and renders prompt templates from `Backend/agents/prompts/`.
+
+- `Backend/agents/modules/application/HistoricalManualResultsStore.cs`
+  - Reads/writes `results/historical_last_run.json` (manual and AI-Manual results keyed by
+    checklist ID) so completed manual evaluations can be reused by a later run.
+  - Refreshed only at report generation; shared by WPF, CLI and IDE/MCP.
 
 - `Frontend/MainWindow/MainWindow.xaml(.cs)`
   - Implements staged UX and user-driven evaluation lifecycle.

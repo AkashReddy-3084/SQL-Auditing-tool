@@ -581,7 +581,17 @@ namespace SQLAuditor.Lib
             return fullPath;
         }
 
-        public async Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default)
+        /// <param name="useHistoricalManualResults">
+        /// When true, manual/AI-Manual items that already have a completed result in
+        /// results/historical_last_run.json are copied forward and skip manual-step generation and
+        /// manual review entirely. The caller must decide this explicitly; the engine never infers it.
+        /// </param>
+        /// <param name="generateReports">
+        /// When true (WPF), final_report.md and audit_report.xlsx are produced as soon as the run
+        /// finishes. The CLI and IDE hosts pass false and generate the reports only after the user
+        /// explicitly asks for them.
+        /// </param>
+        public async Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
@@ -694,6 +704,46 @@ namespace SQLAuditor.Lib
 
             var scriptItems = selectedItems.Where(IsScriptMapped).ToList();
             var aiItems = selectedItems.Where(it => !IsScriptMapped(it)).ToList();
+
+            // Historical reuse: manual/AI-Manual items decided in an earlier run are copied
+            // forward verbatim and never reach the manual pipeline, so no manual steps are
+            // generated, no review is queued and no LLM call is made for them. Script and
+            // AI-MCP items are untouched — an entry only qualifies when the recorded technique
+            // is manual.
+            var copiedFromHistory = new System.Collections.Generic.List<ChecklistResult>();
+            if (useHistoricalManualResults)
+            {
+                try
+                {
+                    var historical = HistoricalManualResultsStore.Load();
+                    if (historical.Count > 0)
+                    {
+                        var remaining = new System.Collections.Generic.List<ChecklistItem>(aiItems.Count);
+                        foreach (var it in aiItems)
+                        {
+                            if (historical.TryGetValue(it.Id, out var entry)
+                                && HistoricalManualResultsStore.TryBuildResult(entry, it, out var copied))
+                            {
+                                results.Add(copied);
+                                copiedFromHistory.Add(copied);
+                                progress?.Report(copied);
+                                continue;
+                            }
+                            remaining.Add(it);
+                        }
+                        aiItems = remaining;
+                    }
+
+                    if (copiedFromHistory.Count > 0)
+                        LogDiagnostic($"Copied {copiedFromHistory.Count} manual result(s) from {HistoricalManualResultsStore.FileName}.");
+                }
+                catch (Exception ex)
+                {
+                    // A missing or malformed historical file must never fail a run: fall back to
+                    // the normal manual flow for every item.
+                    LogDiagnostic($"Historical manual result reuse skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
 
             async Task<ChecklistResult?> EvaluateScriptAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
@@ -1021,48 +1071,86 @@ namespace SQLAuditor.Lib
             }
             catch { }
 
-            // Automatically produce the final Markdown summary report from the
-            // freshly written checklist_results.json.
-            try
+            // Automatically produce the final Markdown summary report and the Excel workbook from
+            // the freshly written checklist_results.json, refreshing the historical manual results
+            // as part of that step. CLI/IDE pass generateReports: false and ask the user first.
+            if (generateReports)
             {
-                var reportPath = Path.Combine(resultsDir, "final_report.md");
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    reportPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = enrichedResults.Length,
-                    });
-            }
-            catch (Exception ex)
-            {
-                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
-            }
-
-            // Automatically produce the comprehensive Excel workbook (audit_report.xlsx)
-            // using the exact same scoring pipeline as the Markdown report. Isolated in
-            // its own try/catch so a workbook failure never breaks the audit run.
-            try
-            {
-                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
-                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    excelPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = enrichedResults.Length,
-                    });
-            }
-            catch (Exception ex)
-            {
-                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Excel report generation error: {ex.Message}\r\n"); } catch { }
+                GenerateReports();
             }
 
             return enrichedResults;
+        }
+
+        /// <summary>
+        /// Produces results/final_report.md and results/audit_report.xlsx from the persisted
+        /// results/checklist_results.json. Report generation is also the moment
+        /// results/historical_last_run.json is refreshed, so the historical file always mirrors
+        /// the manual results of the latest reported audit.
+        /// </summary>
+        public static string GenerateReports(bool refreshHistoricalManualResults = true)
+        {
+            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath))
+                return $"No results found at {jsonPath}. Run an evaluation first.";
+
+            var messages = new System.Collections.Generic.List<string>();
+
+            if (refreshHistoricalManualResults)
+            {
+                try
+                {
+                    var added = HistoricalManualResultsStore.RefreshFromResults();
+                    messages.Add($"{HistoricalManualResultsStore.FileName} refreshed ({added} new manual result(s) recorded).");
+                }
+                catch (Exception ex)
+                {
+                    messages.Add($"Historical manual results could not be refreshed: {ex.Message}");
+                }
+            }
+
+            var total = 0;
+            try
+            {
+                total = (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) as System.Text.Json.Nodes.JsonArray)?.Count ?? 0;
+            }
+            catch { }
+
+            var metadata = new SqlAuditor.Reporting.ReportMetadata
+            {
+                ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                Auditors = "SQL Auditor Tool (automated)",
+                TotalChecklistItems = total,
+            };
+
+            try
+            {
+                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
+                    jsonPath, Path.Combine(resultsDir, "final_report.md"), metadata);
+                messages.Add("results/final_report.md generated.");
+            }
+            catch (Exception ex)
+            {
+                messages.Add($"Report generation error: {ex.Message}");
+                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
+            }
+
+            // The workbook is scored from the same JSON. Isolated so a workbook failure never
+            // breaks the Markdown report or the audit run.
+            try
+            {
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath, Path.Combine(resultsDir, "audit_report.xlsx"), metadata);
+                messages.Add("results/audit_report.xlsx generated.");
+            }
+            catch (Exception ex)
+            {
+                messages.Add($"Excel report generation error: {ex.Message}");
+                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Excel report generation error: {ex.Message}\r\n"); } catch { }
+            }
+
+            return string.Join(Environment.NewLine, messages);
         }
 
         // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview in the
