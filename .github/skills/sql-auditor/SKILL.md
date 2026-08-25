@@ -42,8 +42,12 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```
 - **enrich_result** — record the audit wording you authored for one script-evaluated item:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence "<evidence>" --risk "<riskImpact>" --recommendation "<recommendation>"
+  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence-file "<path>" --risk "<riskImpact>" --recommendation "<recommendation>"
   ```
+  Every field also has a file form — `--finding-file`, `--evidence-file`, `--risk-file`,
+  `--recommendation-file` — and `resolve_review` has `--notes-file`. **A quote character inside
+  the text is eaten by the shell**, so write any field that quotes returned values (evidence,
+  above all) to a file and pass the path instead of the text.
 - **generate_scripts** — GENERATE audit scripts for checklist items (no LLM endpoint, no SQL Server):
   ```powershell
   powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_scripts --items <ids>
@@ -73,11 +77,18 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    those**. For each item you author the wording from the `Script result` shown there,
    using only the facts it contains (no invented objects, counts, databases or settings):
    - `finding` — 1–2 sentences on the actual state found, not a restatement of the checklist text
-   - `evidence` — how that finding justifies the outcome, quoting the returned values (< 120 words)
+   - `evidence` — how that finding justifies the outcome, quoting the returned values (< 120 words).
+     When the `Script result` holds **no** supporting artefact at all (every value NULL, empty,
+     zero or "not found"), the control does not exist to be assessed: start the evidence with the
+     exact words `Not Applicable.` followed by one sentence of your own reasoning. A zero that
+     itself proves compliance is real evidence, not "Not Applicable".
    - `riskImpact` — the specific consequence of *this* finding (< 50 words, no generic phrases)
    - `recommendation` — remediation targeted at this gap; leave empty when Score is 3 and Outcome is Pass
 
-   Record each one with **enrich_result** before moving on.
+   Record each one with **enrich_result** before moving on, writing the evidence to a file and
+   passing `--evidence-file` so the quotes it contains survive. When the command replies that the
+   item moved to Outcome `N/A`, that item is excluded from every score and is listed on the
+   workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
 3. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
    (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
    Manual Verification Steps for every item automatically, in your very first reply after
@@ -110,9 +121,14 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    answer as given — do not judge whether it is sufficient, do not ask for more detail, and
    do not argue for a different outcome. Re-ask only if they gave no observation at all.
 6. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
-   (`pass` or `fail`), and `--notes` containing the user's own words.
+   (`pass` or `fail`), and `--notes` containing the user's own words. Then run **enrich_result**
+   for the same item with wording *you* derive from their evidence — finding, evidence,
+   riskImpact and recommendation, using only facts they stated. The reviewer's raw words must
+   never be left as the report Finding.
 7. Do not write a final summary until every review item is resolved and every script item
-   is enriched. Then run **show_reports** to display `results/final_report.md`.
+   is enriched. Then run **show_reports** to display `results/final_report.md`. The counts
+   `evaluate` printed are provisional — N/A is decided during enrichment, so report the
+   counts **show_reports** returns.
 
 ## Generating scripts (separate from evaluation)
 

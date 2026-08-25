@@ -346,9 +346,12 @@ namespace SQLAuditor
             if (copilotMode)
             {
                 Console.WriteLine();
+                Console.WriteLine("NOTE: every enrich_result field also accepts a file form (--finding-file / --evidence-file / --risk-file /");
+                Console.WriteLine("      --recommendation-file <path>). Use it whenever the text contains a quote character, otherwise the");
+                Console.WriteLine("      shell truncates the value at that quote.");
                 Console.Write(SQLAuditor.Lib.Auditor.BuildScriptEnrichmentRequest(
                     results,
-                    id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence \"<evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
+                    id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence-file \"<file holding the evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
 
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
@@ -404,9 +407,14 @@ namespace SQLAuditor
             }
 
             Console.WriteLine();
-            Console.WriteLine("Summary:");
+            Console.WriteLine(copilotMode ? "Summary (PROVISIONAL - script verdicts only):" : "Summary:");
             foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key))
                 Console.WriteLine($"  {g.Key,-12}: {g.Count()}");
+            if (copilotMode)
+            {
+                Console.WriteLine("Not Applicable is decided during enrichment, so these counts are not final. Once every item has been");
+                Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include N/A.");
+            }
 
             var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
             var jsonDefault = Path.Combine(resultsDir, "checklist_results.json");
@@ -552,13 +560,13 @@ namespace SQLAuditor
             var opts = ParseOptions(args);
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
-                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview> [--notes <text>]");
+                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview> [--notes <text> | --notes-file <path>]");
                 return 0;
             }
 
             var id = GetOption(opts, "id");
             var decision = GetOption(opts, "decision");
-            var notes = GetOption(opts, "notes");
+            var notes = ReadValueOption(opts, "notes");
 
             if (string.IsNullOrWhiteSpace(id))
             {
@@ -575,6 +583,9 @@ namespace SQLAuditor
             if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             {
                 Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+                Console.WriteLine($"NEXT: run 'sql-auditor enrich_result --id {id} ...' with audit wording you derive from the reviewer's evidence "
+                    + "- finding, evidence, riskImpact and recommendation - using only facts the reviewer stated. "
+                    + "Their raw words must not stay as the report Finding.");
                 return 0;
             }
 
@@ -594,6 +605,8 @@ namespace SQLAuditor
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
                 Console.WriteLine("Usage: sqlauditor enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]");
+                Console.WriteLine("       Every field also accepts a file form: --finding-file / --evidence-file / --risk-file / --recommendation-file <path>.");
+                Console.WriteLine("       Use the file form whenever the text contains a quote character.");
                 return 0;
             }
 
@@ -604,15 +617,19 @@ namespace SQLAuditor
                 return 2;
             }
 
-            var finding = GetOption(opts, "finding");
-            var evidence = GetOption(opts, "evidence");
-            var risk = GetOption(opts, "risk") ?? GetOption(opts, "riskimpact");
-            var recommendation = GetOption(opts, "recommendation");
+            var finding = ReadValueOption(opts, "finding");
+            var evidence = ReadValueOption(opts, "evidence");
+            var risk = ReadValueOption(opts, "risk") ?? ReadValueOption(opts, "riskimpact");
+            var recommendation = ReadValueOption(opts, "recommendation");
 
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
-            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation))
+            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation, out var markedNotApplicable))
             {
-                Console.WriteLine($"Enriched [{id}]. results/checklist_results.json and results/final_report.md regenerated.");
+                if (markedNotApplicable)
+                    Console.WriteLine($"Enriched [{id}] -> Outcome {SQLAuditor.Lib.NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail.");
+                else
+                    Console.WriteLine($"Enriched [{id}].");
+                Console.WriteLine("results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
                 return 0;
             }
 
@@ -768,6 +785,13 @@ namespace SQLAuditor
                 return 2;
             }
 
+            var tally = SQLAuditor.Lib.Auditor.BuildOutcomeTally();
+            if (!string.IsNullOrEmpty(tally))
+            {
+                Console.WriteLine($"Final outcome counts (after enrichment and review): {tally}");
+                Console.WriteLine();
+            }
+
             Console.WriteLine(File.ReadAllText(path));
             return 0;
         }
@@ -790,7 +814,12 @@ namespace SQLAuditor
                 }
                 else if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
                 {
-                    val = args[++i];
+                    // A quote inside the text makes the shell split one argument into several,
+                    // so every following token is re-joined instead of silently dropped.
+                    var sb = new System.Text.StringBuilder(args[++i]);
+                    while (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                        sb.Append(' ').Append(args[++i]);
+                    val = sb.ToString();
                 }
                 opts[key] = val;
             }
@@ -799,6 +828,14 @@ namespace SQLAuditor
 
         static string? GetOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
             => opts.TryGetValue(key, out var v) ? v : null;
+
+        // Wording that quotes script values is passed by file so no shell can mangle it.
+        static string? ReadValueOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
+        {
+            var file = GetOption(opts, key + "-file") ?? GetOption(opts, key + "file");
+            if (!string.IsNullOrWhiteSpace(file) && File.Exists(file)) return File.ReadAllText(file);
+            return GetOption(opts, key);
+        }
 
         static string Prompt(string msg)
         {

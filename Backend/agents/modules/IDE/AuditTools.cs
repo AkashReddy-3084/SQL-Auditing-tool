@@ -46,7 +46,7 @@ public static class AuditTools
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     [McpServerTool(Name = "evaluate")]
-    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (a 4-tab Excel workbook: Summary, Area Detail, Checklists, Risk Register).")]
+    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) SQL Server name, (2) authentication method, (3) checklist items, (4) automated + manual verification, (5) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server or credentials, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (a 5-tab Excel workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items).")]
     public static async Task<string> EvaluateAsync(
         [Description("STEP 1: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 2: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
@@ -127,10 +127,13 @@ public static class AuditTools
         foreach (var r in results.OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase))
             sb.AppendLine($"- [{r.Id}] {r.Outcome} ({r.Technique}) - {r.Description}");
         sb.AppendLine();
-        sb.AppendLine("Summary:");
+        sb.AppendLine("Summary (PROVISIONAL \u2014 script verdicts only):");
         foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase)
                                   .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
             sb.AppendLine($"  {g.Key}: {g.Count()}");
+        sb.AppendLine("Not Applicable is decided during enrichment below, so these counts are NOT final. Do not present them as the");
+        sb.AppendLine("result of the audit. Once every item has been enriched and reviewed, call 'show_reports' and report ITS counts,");
+        sb.AppendLine("which include the Not Applicable items.");
 
         // Script items get their verdict deterministically but their wording from Copilot,
         // since this server makes no LLM calls.
@@ -205,7 +208,7 @@ public static class AuditTools
         }
 
         sb.AppendLine();
-        sb.AppendLine("Reports written to results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (4-tab Excel workbook).");
+        sb.AppendLine("Reports written to results/checklist_results.json, results/final_report.md and results/audit_report.xlsx (5-tab Excel workbook).");
         return sb.ToString();
     }
 
@@ -628,7 +631,10 @@ public static class AuditTools
         if (!File.Exists(path))
             return Task.FromResult($"No report found at {path}. Run 'evaluate' first.");
 
-        return Task.FromResult(File.ReadAllText(path));
+        var tally = Auditor.BuildOutcomeTally();
+        return Task.FromResult(
+            (string.IsNullOrEmpty(tally) ? string.Empty : $"Final outcome counts (after enrichment and review): {tally}\n\n")
+            + File.ReadAllText(path));
     }
 
     [McpServerTool(Name = "resolve_review")]
@@ -671,11 +677,11 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "enrich_result")]
-    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
+    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'N/A' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
     public static Task<string> EnrichResultAsync(
         [Description("The checklist item ID to enrich, e.g. '1.1.5'.")] string id,
         [Description("1-2 sentences on the actual state the script found (object/database names, counts). Not a restatement of the checklist description.")] string? finding = null,
-        [Description("How the finding justifies the outcome, quoting the values the script returned. Under 120 words.")] string? evidence = null,
+        [Description("How the finding justifies the outcome, quoting the values the script returned. Under 120 words. When every value the script returned is absent (NULL, empty, zero or 'not found'), the control does not exist to be assessed: start with the exact words 'Not Applicable.' followed by one sentence of your own reasoning. A zero that itself proves compliance is real evidence, not 'Not Applicable'.")] string? evidence = null,
         [Description("The specific business/security/operational consequence of this finding. Under 50 words.")] string? riskImpact = null,
         [Description("Remediation targeted at this gap, consistent with the score. Omit when the score is 3 and the outcome is Pass.")] string? recommendation = null)
     {
@@ -683,8 +689,13 @@ public static class AuditTools
             return Task.FromResult("Error: 'id' is required.");
 
         var auditor = new Auditor(string.Empty);
-        if (auditor.ApplyEnrichment(id, finding, evidence, riskImpact, recommendation))
-            return Task.FromResult($"Enriched [{id}]. results/checklist_results.json and results/final_report.md regenerated.");
+        if (auditor.ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out var markedNotApplicable))
+            return Task.FromResult(
+                $"Enriched [{id}]"
+                + (markedNotApplicable
+                    ? $" -> Outcome {NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail."
+                    : ".")
+                + " results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
 
         return Task.FromResult(
             $"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");

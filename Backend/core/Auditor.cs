@@ -1187,13 +1187,44 @@ namespace SQLAuditor.Lib
                 && string.Equals(text, expected, StringComparison.Ordinal);
         }
 
+        // The CLI/IDE hosts stamp N/A during Copilot's enrichment, after 'evaluate' has already
+        // printed its counts, so the final tally has to be read back from the persisted results.
+        public static string BuildOutcomeTally()
+        {
+            var jsonPath = Path.Combine(Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            if (!File.Exists(jsonPath)) return string.Empty;
+
+            try
+            {
+                if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                    return string.Empty;
+
+                var counts = new System.Collections.Generic.SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var el in arr)
+                {
+                    var outcome = (el as System.Text.Json.Nodes.JsonObject)?["Outcome"]?.GetValue<string>() ?? "Unknown";
+                    if (NotApplicableEvidence.IsNotApplicableOutcome(outcome)) outcome = NotApplicableEvidence.Outcome;
+                    counts[outcome] = counts.TryGetValue(outcome, out var c) ? c + 1 : 1;
+                }
+
+                return string.Join(", ", counts.Select(kv => $"{kv.Key}: {kv.Value}"));
+            }
+            catch { return string.Empty; }
+        }
+
         // Records AI-authored wording for an already-evaluated item. Used by the CLI
         // 'enrich_result' command and the IDE 'enrich_result' tool so GitHub Copilot can
         // supply Finding/Evidence/RiskImpact/Recommendation in the flows where this engine
         // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
         // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
         public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation)
+            => ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out _);
+
+        // <paramref name="markedNotApplicable"/> reports whether this enrichment moved the
+        // item to Outcome N/A, so the CLI/IDE host can tell Copilot the verdict changed.
+        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, out bool markedNotApplicable)
         {
+            markedNotApplicable = false;
             if (string.IsNullOrWhiteSpace(id)) return false;
             if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
                 && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
@@ -1223,11 +1254,18 @@ namespace SQLAuditor.Lib
             if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
 
             // Evidence opening with "Not Applicable." means the control does not exist to be
-            // assessed, so the item is re-stamped N/A and dropped from the scoring.
-            if (NotApplicableEvidence.IsMarked(evidence))
+            // assessed, so the item is re-stamped N/A and dropped from the scoring. Only
+            // script-evaluated items qualify, exactly as in the desktop flow: a manual item
+            // already carries a human verdict that must never be overwritten by wording.
+            var isScriptItem = string.Equals(
+                target["Technique"]?.GetValue<string>(), "Script", StringComparison.OrdinalIgnoreCase);
+            if (isScriptItem && NotApplicableEvidence.IsMarked(evidence))
             {
                 target["Outcome"] = NotApplicableEvidence.Outcome;
                 target["NotApplicable"] = true;
+                // An unassessable control carries no severity weight, as in the desktop flow.
+                target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, null, isNotApplicable: true);
+                markedNotApplicable = true;
             }
 
             try
@@ -1242,6 +1280,24 @@ namespace SQLAuditor.Lib
                 new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
                     jsonPath,
                     reportPath,
+                    new SqlAuditor.Reporting.ReportMetadata
+                    {
+                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                        Auditors = "SQL Auditor Tool (automated)",
+                        TotalChecklistItems = arr.Count,
+                    });
+            }
+            catch { }
+
+            // The workbook is scored from the same JSON, so it has to be refreshed here too;
+            // otherwise the enriched wording and any N/A re-stamp never reach audit_report.xlsx
+            // in the CLI/IDE flows. Isolated so a workbook failure never fails the enrichment.
+            try
+            {
+                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
+                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
+                    jsonPath,
+                    excelPath,
                     new SqlAuditor.Reporting.ReportMetadata
                     {
                         ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
