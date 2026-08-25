@@ -51,7 +51,7 @@ public static class AuditTools
         [Description("STEP 1: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 2: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
         [Description("STEP 2b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
-        [Description("STEP 3: Comma-separated checklist item IDs to evaluate, e.g. '1.2.1,3.1.2'. If the user already named IDs earlier, reuse them here.")] string? items = null,
+        [Description("STEP 3: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         CancellationToken cancellationToken = default)
     {
         // STEP 1 — SQL Server name (always required, always from the user first).
@@ -77,14 +77,11 @@ public static class AuditTools
                  + "Then call evaluate again with 'server', authMethod='sql', and 'sqlUser' set.";
 
         // STEP 3 — Checklist items.
-        var ids = (items ?? string.Empty)
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (ids.Length == 0)
+        if (string.IsNullOrWhiteSpace(items))
             return $"STEP 3 of 5 — CHECKLIST ITEMS REQUIRED.\n"
-                 + $"Server '{server}' and authentication are set. Ask the user which checklist item IDs to evaluate (e.g. '1.2.1,3.1.2'). "
-                 + "If the user already provided IDs earlier in the conversation, use those instead of asking again.\n"
+                 + $"Server '{server}' and authentication are set. Ask the user which checklist items to evaluate — a single ID ('1.2.1'), "
+                 + "a list ('1.2.1,3.1.2'), an inclusive range ('1.1.1 - 2.1.4') or 'all'. "
+                 + "If the user already provided items earlier in the conversation, use those instead of asking again.\n"
                  + "Then call evaluate again with 'server', 'authMethod', and 'items' set.";
 
         // Build the connection string from the chosen method. The SQL Login password
@@ -108,14 +105,27 @@ public static class AuditTools
 
         var auditor = new Auditor(connectionString);
 
-        // Validate requested IDs against the known checklist structure.
+        // Resolve the item spec the same way generate_scripts does, so a range or 'all'
+        // works here too and the run follows master-checklist order.
         var structure = await auditor.GetChecklistStructureAsync();
-        var known = new HashSet<string>(
-            structure.SelectMany(s => s.Items).Select(i => i.Id), StringComparer.OrdinalIgnoreCase);
-        var unknown = ids.Where(id => !known.Contains(id)).ToArray();
-        var valid = ids.Where(id => known.Contains(id)).ToArray();
+        var orderedIds = structure
+            .SelectMany(s => s.Items)
+            .Select(i => i.Id)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToList();
+        var spec = items!.Trim();
+        var wantsAll = spec == "*" || string.Equals(spec, "all", StringComparison.OrdinalIgnoreCase);
+
+        var (resolved, unresolved) = wantsAll
+            ? (orderedIds.ToList(), new List<string>())
+            : ExpandChecklistIdSpec(spec, orderedIds);
+
+        var unknown = unresolved.ToArray();
+        var valid = resolved.ToArray();
         if (valid.Length == 0)
-            return "Error: none of the requested checklist IDs exist. Unknown: " + string.Join(", ", unknown);
+            return "Error: none of the requested checklist items could be resolved"
+                 + (unknown.Length > 0 ? ". Unknown: " + string.Join(", ", unknown) : $": '{spec}' matched no checklist ID.")
+                 + " Call load_checklist to look up valid IDs.";
 
         // STEP 4 — run automated evaluation (manual-only items resolve to NeedsReview).
         var results = await auditor.RunChecklistAsync(null, null, valid, cancellationToken);
@@ -717,12 +727,15 @@ public static class AuditPrompts
       + "Call the 'evaluate' tool and follow its step-by-step workflow exactly — it returns the next "
       + "question to ask me: (1) the SQL Server name, (2) the authentication method ('windows' or 'sql'; "
       + "for SQL Login ask the username, the password comes from the environment), then (3) the checklist "
-      + "item IDs to evaluate. Never guess the server or credentials. "
+      + "items to evaluate. Pass what I type for the items straight through — the tool resolves a single ID "
+      + "('1.1.2'), a list ('1.1.2,3.1.1'), an inclusive range ('1.1.1 - 2.1.4') and 'all'. "
+      + "Never guess the server or credentials. "
       + "For every item listed in the COPILOT ENRICHMENT REQUIRED block, author the finding, evidence, "
       + "risk impact and recommendation from the script result shown there and record them with 'enrich_result'. "
       + "For any item that comes back as Needs Review, show its verification guidance, help me decide "
       + "Pass or Fail, and record each decision with the 'resolve_review' tool. "
-      + "When everything is resolved, show the summary with 'show_reports'. "
+      + "The counts 'evaluate' prints are provisional — Not Applicable is decided during enrichment — so when "
+      + "everything is resolved, show the final summary with 'show_reports' and report ITS counts. "
       + "Do not perform the evaluation yourself or duplicate its logic — always use the tools.";
 
     [McpServerPrompt(Name = "generate_scripts")]
