@@ -687,7 +687,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "enrich_result")]
-    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'N/A' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
+    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'Not Applicable' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
     public static Task<string> EnrichResultAsync(
         [Description("The checklist item ID to enrich, e.g. '1.1.5'.")] string id,
         [Description("1-2 sentences on the actual state the script found (object/database names, counts). Not a restatement of the checklist description.")] string? finding = null,

@@ -5,28 +5,31 @@ namespace SQLAuditor.Lib;
 /// <summary>
 /// The AI enricher opens the Evidence with "Not Applicable." when the script result held
 /// no supporting artefact at all - the control does not exist to be assessed rather than
-/// being implemented ineffectively. Such an item is reported with Outcome <c>N/A</c> and
-/// is excluded from every score.
+/// being implemented ineffectively. Such an item is reported with Outcome
+/// <c>Not Applicable</c> and is excluded from every score.
 /// </summary>
 public static class NotApplicableEvidence
 {
     public const string Marker = "Not Applicable";
 
-    public const string Outcome = "N/A";
+    public const string Outcome = "Not Applicable";
 
     /// <summary>True when AI-authored evidence declares the item not applicable.</summary>
     public static bool IsMarked(string? evidence) =>
         !string.IsNullOrWhiteSpace(evidence)
         && evidence.TrimStart().StartsWith(Marker, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>True for the persisted N/A outcome, in any of its spellings.</summary>
+    /// <summary>
+    /// True for the persisted not-applicable outcome. "N/A" and "NA" are still recognised so
+    /// result files written before the outcome was spelled out keep loading correctly.
+    /// </summary>
     public static bool IsNotApplicableOutcome(string? outcome)
     {
         var v = outcome?.Trim();
         return !string.IsNullOrEmpty(v)
             && (v.Equals(Outcome, StringComparison.OrdinalIgnoreCase)
-                || v.Equals("NA", StringComparison.OrdinalIgnoreCase)
-                || v.Equals(Marker, StringComparison.OrdinalIgnoreCase));
+                || v.Equals("N/A", StringComparison.OrdinalIgnoreCase)
+                || v.Equals("NA", StringComparison.OrdinalIgnoreCase));
     }
 }
 

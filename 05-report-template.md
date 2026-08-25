@@ -36,7 +36,7 @@
 | **Risk Rating** | [🔴/🟠/🟡/🟢/🔵] **[Rating]** |
 | **Total Checklist Items** | 328 |
 | **Items Scored** | [N] |
-| **Items N/A** | [N] |
+| **Items Not Applicable** | [N] |
 | **Critical Findings** | [N] |
 | **High Findings** | [N] |
 

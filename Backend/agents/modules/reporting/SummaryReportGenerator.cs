@@ -69,8 +69,9 @@ public sealed class ChecklistItemResult
     public bool IsScored => !IsNotApplicable && Score.HasValue;
 
     /// <summary>
-    /// The control does not exist to be assessed (Outcome "N/A"). Such items are reported
-    /// under "Items N/A" and take no part in any score, whatever Score they carry.
+    /// The control does not exist to be assessed (Outcome "Not Applicable"). Such items are
+    /// reported under "Items Not Applicable" and take no part in any score, whatever Score
+    /// they carry.
     /// </summary>
     [JsonIgnore]
     public bool IsNotApplicable =>
@@ -440,7 +441,7 @@ public sealed class SummaryReportGenerator
         sb.AppendLine($"| **Risk Rating** | {rating.Icon} **{rating.Label}** |");
         sb.AppendLine($"| **Total Checklist Items** | {m.TotalChecklistItems} |");
         sb.AppendLine($"| **Items Scored** | {scored} |");
-        sb.AppendLine($"| **Items N/A** | {na} |");
+        sb.AppendLine($"| **Items Not Applicable** | {na} |");
         sb.AppendLine($"| **Critical Findings** | {critical} |");
         sb.AppendLine($"| **High Findings** | {high} |");
         sb.AppendLine();

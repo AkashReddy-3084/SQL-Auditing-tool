@@ -413,7 +413,7 @@ namespace SQLAuditor
             if (copilotMode)
             {
                 Console.WriteLine("Not Applicable is decided during enrichment, so these counts are not final. Once every item has been");
-                Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include N/A.");
+                Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include Not Applicable.");
             }
 
             var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");

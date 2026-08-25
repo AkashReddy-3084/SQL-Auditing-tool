@@ -68,9 +68,9 @@ never change them.** For each item, using only the facts under `Finding` and `Sc
 every value NULL, empty, zero or "not found" — the control does not exist to be assessed. Start
 the evidence with the exact words `Not Applicable.` followed by one sentence of your own
 reasoning naming what the script looked for and where. `enrich_result` then re-stamps the item
-to Outcome `N/A`, drops it from every score and lists it on the workbook's "Not Applicable
-Items" sheet — report it as **Not Applicable**, never as Pass or Fail. A zero that itself proves
-compliance ("0 unauthorised logins" on a Pass) is real evidence, not "Not Applicable".
+to Outcome `Not Applicable`, drops it from every score and lists it on the workbook's "Not
+Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail. A zero that
+proves compliance ("0 unauthorised logins" on a Pass) is real evidence, not "Not Applicable".
 
 Call `enrich_result` per item and keep going. Work through the list in batches rather than
 pausing after each one, and do not write a summary until every listed item is recorded.
@@ -92,8 +92,8 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 
 ### 4. Report
 
-The counts `evaluate` prints are **provisional** — N/A is decided during enrichment. Once every
-item is enriched and reviewed, call `show_reports` and report the counts it returns.
+The counts `evaluate` prints are **provisional** — Not Applicable is decided during enrichment.
+Once every item is enriched and reviewed, call `show_reports` and report the counts it returns.
 
 ## What gets written
 

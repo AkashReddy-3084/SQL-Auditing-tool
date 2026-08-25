@@ -742,7 +742,7 @@ namespace SQLAuditor.Lib
                 // factual source. Preserve the verdict and score it returned; only fall back
                 // to scraping the console text when the script exposed no structured result.
                 // Either way the verdict is Pass or Fail - a script item is never deferred to
-                // a reviewer; only the N/A check below can move it off that verdict.
+                // a reviewer; only the Not Applicable check below can move it off that verdict.
                 var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
                 var outcome = scriptOutcome.Result
                     ?? EvaluationDecisionService.EvaluateScriptEvidenceOutcome(textLog.ToString());
@@ -777,7 +777,7 @@ namespace SQLAuditor.Lib
 
                 // Evidence opening with "Not Applicable." means the enricher found no
                 // supporting artefact at all: the control does not exist to be assessed, so
-                // the item is reported as N/A and carries no weight in the score.
+                // the item is reported as Not Applicable and carries no weight in the score.
                 var notApplicable = NotApplicableEvidence.IsMarked(ai?.Evidence);
                 if (notApplicable) outcome = NotApplicableEvidence.Outcome;
 
@@ -1104,7 +1104,8 @@ namespace SQLAuditor.Lib
 
             target["Outcome"] = outcome;
 
-            // A human verdict makes the item assessable again, so any earlier N/A marking goes.
+            // A human verdict makes the item assessable again, so any earlier Not Applicable
+            // marking goes.
             target.Remove("NotApplicable");
 
             // Score and severity follow the outcome, exactly as the desktop flow derives them
@@ -1189,8 +1190,9 @@ namespace SQLAuditor.Lib
                 && string.Equals(text, expected, StringComparison.Ordinal);
         }
 
-        // The CLI/IDE hosts stamp N/A during Copilot's enrichment, after 'evaluate' has already
-        // printed its counts, so the final tally has to be read back from the persisted results.
+        // The CLI/IDE hosts stamp Not Applicable during Copilot's enrichment, after 'evaluate'
+        // has already printed its counts, so the final tally has to be read back from the
+        // persisted results.
         public static string BuildOutcomeTally()
         {
             var jsonPath = Path.Combine(Directory.GetCurrentDirectory(), "results", "checklist_results.json");
@@ -1223,7 +1225,7 @@ namespace SQLAuditor.Lib
             => ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out _);
 
         // <paramref name="markedNotApplicable"/> reports whether this enrichment moved the
-        // item to Outcome N/A, so the CLI/IDE host can tell Copilot the verdict changed.
+        // item to Outcome Not Applicable, so the CLI/IDE host can tell Copilot the verdict changed.
         public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, out bool markedNotApplicable)
         {
             markedNotApplicable = false;
@@ -1256,8 +1258,8 @@ namespace SQLAuditor.Lib
             if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
 
             // Evidence opening with "Not Applicable." means the control does not exist to be
-            // assessed, so the item is re-stamped N/A and dropped from the scoring. Only
-            // script-evaluated items qualify, exactly as in the desktop flow: a manual item
+            // assessed, so the item is re-stamped Not Applicable and dropped from the scoring.
+            // Only script-evaluated items qualify, exactly as in the desktop flow: a manual item
             // already carries a human verdict that must never be overwritten by wording.
             var isScriptItem = string.Equals(
                 target["Technique"]?.GetValue<string>(), "Script", StringComparison.OrdinalIgnoreCase);

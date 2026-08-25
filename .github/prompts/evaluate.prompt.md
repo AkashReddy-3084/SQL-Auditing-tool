@@ -32,13 +32,13 @@ Follow the repository skill `.github/skills/evaluate-checklist/SKILL.md` exactly
    Use only the facts it contains. Never change Outcome, Score, Severity or Databases Verified.
 6. When the `Script result` holds no supporting artefact at all (every value NULL, empty, zero or
    "not found"), start the evidence with the exact words `Not Applicable.` plus one sentence of
-   your own reasoning. The tool then re-stamps the item to Outcome `N/A` and excludes it from
-   every score — report it as **Not Applicable**, never as Pass or Fail. A zero that itself
-   proves compliance is real evidence, not "Not Applicable".
+   your own reasoning. The tool then re-stamps the item to Outcome `Not Applicable` and excludes
+   it from every score — report it as **Not Applicable**, never as Pass or Fail. A zero that
+   itself proves compliance is real evidence, not "Not Applicable".
 7. For every item in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer: print the
    full verification guidance for all items first, then ask for the user's Pass/Fail decision,
    then one follow-up for what they inspected. Record it with `resolve_review`, then call
    `enrich_result` for the same item with wording you derive from their evidence.
-8. The counts `evaluate` prints are **provisional** — N/A is decided during enrichment. Do not
-   present them as the result. When every item is enriched and reviewed, call `show_reports` and
-   report ITS counts.
+8. The counts `evaluate` prints are **provisional** — Not Applicable is decided during
+   enrichment. Do not present them as the result. When every item is enriched and reviewed, call
+   `show_reports` and report ITS counts.

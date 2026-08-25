@@ -87,8 +87,8 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 
    Record each one with **enrich_result** before moving on, writing the evidence to a file and
    passing `--evidence-file` so the quotes it contains survive. When the command replies that the
-   item moved to Outcome `N/A`, that item is excluded from every score and is listed on the
-   workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
+   item moved to Outcome `Not Applicable`, that item is excluded from every score and is listed on
+   the workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
 3. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
    (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
    Manual Verification Steps for every item automatically, in your very first reply after
@@ -127,7 +127,7 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    never be left as the report Finding.
 7. Do not write a final summary until every review item is resolved and every script item
    is enriched. Then run **show_reports** to display `results/final_report.md`. The counts
-   `evaluate` printed are provisional — N/A is decided during enrichment, so report the
+   `evaluate` printed are provisional — Not Applicable is decided during enrichment, so report the
    counts **show_reports** returns.
 
 ## Generating scripts (separate from evaluation)

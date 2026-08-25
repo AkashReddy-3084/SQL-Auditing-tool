@@ -223,7 +223,7 @@ public sealed class ExcelReportGenerator
 
         WriteKpiCard(ws, 4, 1, 3, "Overall Score", Pct(overall), NeutralStatus());
         WriteKpiCard(ws, 4, 4, 3, "Overall Risk Rating", overallRating.Label, StatusFor(overallRating.Label));
-        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  N/A {notApplicable} (excluded)";
+        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  Not Applicable {notApplicable} (excluded)";
         WriteKpiCard(ws, 4, 7, 3, "Total Checks Evaluated",
             $"{evaluated}", NeutralStatus(),
             subText: kpiSubText);
@@ -294,7 +294,7 @@ public sealed class ExcelReportGenerator
             XLAlignmentHorizontalValues.Right,
         };
         var covLast = WriteTable(ws, covHeaderRow, 1,
-            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "N/A (excluded)", "Pass Rate (%)" },
+            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "Not Applicable (excluded)", "Pass Rate (%)" },
             covRows,
             covAligns,
             wrap: new[] { false, false, false, false, false, false, false },
@@ -607,8 +607,8 @@ public sealed class ExcelReportGenerator
 
     /// <summary>
     /// Lists the items whose evaluation found no supporting artefact at all, so the control
-    /// does not exist to be assessed (Outcome "N/A"). They are excluded from every score in
-    /// this workbook and are reported here with their full audit wording.
+    /// does not exist to be assessed (Outcome "Not Applicable"). They are excluded from every
+    /// score in this workbook and are reported here with their full audit wording.
     /// </summary>
     private void BuildNotApplicableSheet(
         XLWorkbook wb,
@@ -626,8 +626,8 @@ public sealed class ExcelReportGenerator
         ws.Range(1, 1, 1, headers.Length).Merge();
         var note = ws.Cell(1, 1);
         note.Value = "Checklist items the evaluation found no supporting artefact for: the control does not exist "
-                   + "to be assessed. They are reported as Outcome \"N/A\" and are excluded from the scoring in "
-                   + "every other sheet.";
+                   + "to be assessed. They are reported as Outcome \"Not Applicable\" and are excluded from the "
+                   + "scoring in every other sheet.";
         note.Style.Font.Italic = true;
         note.Style.Font.FontColor = XLColor.FromHtml("#667085");
         note.Style.Alignment.WrapText = true;
