@@ -219,11 +219,13 @@ public sealed class ExcelReportGenerator
         var failed = CountOutcome(items, "fail");
         var needs = CountOutcome(items, "needsreview") + CountOutcome(items, "needs review");
         var notApplicable = items.Count(i => i.IsNotApplicable);
-        var evaluated = items.Count - notApplicable;
+        var notEvaluated = items.Count(i => !i.HasVerdict);
+        var evaluated = items.Count - notApplicable - notEvaluated;
 
         WriteKpiCard(ws, 4, 1, 3, "Overall Score", Pct(overall), NeutralStatus());
         WriteKpiCard(ws, 4, 4, 3, "Overall Risk Rating", overallRating.Label, StatusFor(overallRating.Label));
-        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  Not Applicable {notApplicable} (excluded)";
+        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  Not Applicable {notApplicable} (excluded)"
+            + (notEvaluated > 0 ? $"  /  Not Evaluated {notEvaluated} (excluded)" : string.Empty);
         WriteKpiCard(ws, 4, 7, 3, "Total Checks Evaluated",
             $"{evaluated}", NeutralStatus(),
             subText: kpiSubText);
@@ -275,11 +277,10 @@ public sealed class ExcelReportGenerator
 
         // ---- Coverage by technique -----------------------------------------
         row = sumRow + 3;
-        row = SectionLabel(ws, row, 1, 6, "Coverage by Technique");
+        row = SectionLabel(ws, row, 1, 8, "Coverage by Technique");
         var covHeaderRow = row;
-        var techniques = new[] { "Script", "AI-MCP", "AI-Manual", "Manual" };
         var covRows = new List<string[]>();
-        foreach (var tech in techniques)
+        foreach (var tech in TechniquesPresent(items))
         {
             var techItems = items.Where(i => NormalizeTechnique(i.Technique) == tech).ToList();
             covRows.Add(TechniqueRow(tech, techItems));
@@ -291,19 +292,37 @@ public sealed class ExcelReportGenerator
             XLAlignmentHorizontalValues.Left, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
-            XLAlignmentHorizontalValues.Right,
+            XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
         };
         var covLast = WriteTable(ws, covHeaderRow, 1,
-            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "Not Applicable (excluded)", "Pass Rate (%)" },
+            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "Not Applicable (excluded)", "Not Evaluated (excluded)", "Pass Rate (%)" },
             covRows,
             covAligns,
-            wrap: new[] { false, false, false, false, false, false, false },
+            wrap: new[] { false, false, false, false, false, false, false, false },
             statusColumns: Array.Empty<int>());
         // Emphasize the trailing Total row.
-        ws.Range(covLast, 1, covLast, 7).Style.Font.Bold = true;
+        ws.Range(covLast, 1, covLast, 8).Style.Font.Bold = true;
 
         Finalize(ws, freezeRows: 3, autoFilterRange: null);
         EnsureMergedTextFits(ws, kpiSubText, firstCol: 7, lastCol: 9);
+    }
+
+    /// <summary>
+    /// The techniques to show as rows: the canonical three always, so a run that produced
+    /// none of a given kind still reads as zero, plus any other technique the results
+    /// actually carry (for example "Stopped"). Listing only a hard-coded set would drop
+    /// items from the table while still counting them in the Total row.
+    /// </summary>
+    private static IEnumerable<string> TechniquesPresent(IReadOnlyList<ChecklistItemResult> items)
+    {
+        var canonical = new[] { "Script", "AI-MCP", "AI-Manual" };
+        var extra = items
+            .Select(i => NormalizeTechnique(i.Technique))
+            .Where(t => !canonical.Contains(t, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(t => t, StringComparer.OrdinalIgnoreCase);
+
+        return canonical.Concat(extra);
     }
 
     private string[] TechniqueRow(string label, List<ChecklistItemResult> techItems)
@@ -313,9 +332,14 @@ public sealed class ExcelReportGenerator
         var p = CountOutcome(techItems, "pass");
         var f = CountOutcome(techItems, "fail");
         var nr = CountOutcome(techItems, "needsreview") + CountOutcome(techItems, "needs review");
-        // N/A items were never assessable, so they stay out of the pass-rate denominator.
-        var assessed = total - na;
-        var rate = assessed == 0 ? (double?)null : (double)p / assessed * 100.0;
+        // Items still carrying a placeholder outcome ("Evaluating", "Stopped", "Not Started")
+        // reached no verdict. Counting them in a column keeps every row adding up to Total
+        // Executed instead of letting them vanish between the outcome columns.
+        var pending = techItems.Count(i => !i.HasVerdict);
+        // Neither N/A nor un-evaluated items were ever assessed, so both stay out of the
+        // pass-rate denominator.
+        var assessed = total - na - pending;
+        var rate = assessed <= 0 ? (double?)null : (double)p / assessed * 100.0;
         return new[]
         {
             label,
@@ -324,6 +348,7 @@ public sealed class ExcelReportGenerator
             f.ToString(CultureInfo.InvariantCulture),
             nr.ToString(CultureInfo.InvariantCulture),
             na.ToString(CultureInfo.InvariantCulture),
+            pending.ToString(CultureInfo.InvariantCulture),
             Pct(rate),
         };
     }
@@ -912,13 +937,12 @@ public sealed class ExcelReportGenerator
     private static string NormalizeTechnique(string? technique)
     {
         var t = technique?.Trim();
-        if (string.IsNullOrWhiteSpace(t)) return string.Empty;
+        if (string.IsNullOrWhiteSpace(t)) return "Unspecified";
         return t.ToLowerInvariant() switch
         {
             "script" => "Script",
             "ai-mcp" or "aimcp" or "mcp" => "AI-MCP",
-            "ai-manual" or "aimanual" => "AI-Manual",
-            "manual" => "Manual",
+            "ai-manual" or "aimanual" or "manual" => "AI-Manual",
             _ => t,
         };
     }

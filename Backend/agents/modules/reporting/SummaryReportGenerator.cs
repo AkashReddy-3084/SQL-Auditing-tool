@@ -65,8 +65,28 @@ public sealed class ChecklistItemResult
         }
     }
 
+    /// <summary>
+    /// True when the item reached a reportable conclusion. The engine's placeholder outcomes
+    /// - "Evaluating" for a manual item still queued for the operator, "Stopped", "Not Started"
+    /// - mean nothing was decided, and the Score such an item carries is a default rather than
+    /// an assessment.
+    /// </summary>
     [JsonIgnore]
-    public bool IsScored => !IsNotApplicable && Score.HasValue;
+    public bool HasVerdict
+    {
+        get
+        {
+            if (IsNotApplicable) return true;
+            var o = Outcome?.Trim();
+            return string.Equals(o, "Pass", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o, "Fail", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o, "NeedsReview", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o, "Needs Review", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [JsonIgnore]
+    public bool IsScored => HasVerdict && !IsNotApplicable && Score.HasValue;
 
     /// <summary>
     /// The control does not exist to be assessed (Outcome "Not Applicable"). Such items are
@@ -428,6 +448,7 @@ public sealed class SummaryReportGenerator
     {
         var scored = items.Count(i => i.IsScored);
         var na = items.Count(i => i.IsNotApplicable);
+        var notEvaluated = items.Count(i => !i.HasVerdict);
         var critical = items.Count(i => IsCritical(i));
         var high = items.Count(i => string.Equals(i.Severity, "High", StringComparison.OrdinalIgnoreCase));
 
@@ -442,6 +463,8 @@ public sealed class SummaryReportGenerator
         sb.AppendLine($"| **Total Checklist Items** | {m.TotalChecklistItems} |");
         sb.AppendLine($"| **Items Scored** | {scored} |");
         sb.AppendLine($"| **Items Not Applicable** | {na} |");
+        if (notEvaluated > 0)
+            sb.AppendLine($"| **Items Not Evaluated** | {notEvaluated} |");
         sb.AppendLine($"| **Critical Findings** | {critical} |");
         sb.AppendLine($"| **High Findings** | {high} |");
         sb.AppendLine();
