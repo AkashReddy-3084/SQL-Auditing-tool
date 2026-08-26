@@ -38,7 +38,10 @@ Follow the repository skill `.github/skills/evaluate-checklist/SKILL.md` exactly
 7. For every item in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer: print the
    full verification guidance for all items first, then ask for the user's Pass/Fail decision,
    then one follow-up for what they inspected. Record it with `resolve_review`, then call
-   `enrich_result` for the same item with wording you derive from their evidence.
+   `enrich_result` for the same item with wording you derive from their evidence. When what they
+   report shows the control does not exist on this server at all, call `resolve_review` with
+   `decision="notapplicable"` instead: that item is excluded from every score, reported as
+   **Not Applicable** and needs no `enrich_result` call.
 8. The counts `evaluate` prints are **provisional** — Not Applicable is decided during
    enrichment. Do not present them as the result. When every item is enriched and reviewed, call
    `show_reports` and report ITS counts.

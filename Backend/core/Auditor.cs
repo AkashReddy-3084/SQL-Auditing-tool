@@ -1153,8 +1153,8 @@ namespace SQLAuditor.Lib
             return string.Join(Environment.NewLine, messages);
         }
 
-        // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview in the
-        // persisted results and regenerates the report. Used by the CLI --interactive
+        // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview/Not Applicable in
+        // the persisted results and regenerates the report. Used by the CLI --interactive
         // flow and the IDE 'resolve_review' tool so manual items can be decided by a
         // human without re-running the evaluation. Patches the JSON in place so no
         // enrichment fields are lost.
@@ -1167,9 +1167,16 @@ namespace SQLAuditor.Lib
                 "pass" or "p" or "yes" or "y" => "Pass",
                 "fail" or "f" or "no" or "n" => "Fail",
                 "needsreview" or "review" or "r" => "NeedsReview",
+                "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a"
+                    => NotApplicableEvidence.Outcome,
                 _ => string.Empty
             };
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
+
+            // Nothing about the control could be assessed, so it is excluded from every score -
+            // the same standing a script- or MCP-evaluated item gets when its evidence declares
+            // it not applicable.
+            var isNotApplicable = NotApplicableEvidence.IsNotApplicableOutcome(outcome);
 
             var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
@@ -1193,8 +1200,9 @@ namespace SQLAuditor.Lib
             target["Outcome"] = outcome;
 
             // A human verdict makes the item assessable again, so any earlier Not Applicable
-            // marking goes.
-            target.Remove("NotApplicable");
+            // marking goes - unless the verdict itself is Not Applicable.
+            if (isNotApplicable) target["NotApplicable"] = true;
+            else target.Remove("NotApplicable");
 
             // Score and severity follow the outcome, exactly as the desktop flow derives them
             // through ChecklistResultEnricher; leaving them frozen would score a resolved Pass
@@ -1204,26 +1212,33 @@ namespace SQLAuditor.Lib
                     ? parsedScore
                     : null;
 
-            var newScore = ChecklistResultEnricher.DeriveScore(outcome);
+            // A Not Applicable item is outside the scored population, so it carries no score at
+            // all and no severity weight.
+            int? newScore = isNotApplicable ? null : ChecklistResultEnricher.DeriveScore(outcome);
             target["Score"] = newScore;
-            target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, newScore, false);
+            target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, newScore, isNotApplicable);
 
             // Only wording the enricher itself generated is refreshed, so anything
             // Copilot authored through ApplyEnrichment survives untouched.
             var description = target["Description"]?.GetValue<string>() ?? string.Empty;
             if (Matches(target["Finding"], ChecklistResultEnricher.DefaultFinding(previousScore, description, false)))
-                target["Finding"] = ChecklistResultEnricher.DefaultFinding(newScore, description, false);
+                target["Finding"] = ChecklistResultEnricher.DefaultFinding(newScore, description, isNotApplicable);
             if (Matches(target["RiskImpact"], ChecklistResultEnricher.DefaultRiskImpact(previousScore)))
-                target["RiskImpact"] = ChecklistResultEnricher.DefaultRiskImpact(newScore);
+                target["RiskImpact"] = isNotApplicable ? null : ChecklistResultEnricher.DefaultRiskImpact(newScore);
             if (Matches(target["Recommendation"], ChecklistResultEnricher.DefaultRecommendation(previousScore, description)))
-                target["Recommendation"] = ChecklistResultEnricher.DefaultRecommendation(newScore, description);
+                target["Recommendation"] = isNotApplicable ? null : ChecklistResultEnricher.DefaultRecommendation(newScore, description);
 
             if (!string.IsNullOrWhiteSpace(notes))
             {
+                // A Not Applicable verdict leads the evidence with the marker, so the persisted
+                // evidence reads exactly as it does in the script and MCP flows.
+                var decisionLine = isNotApplicable
+                    ? $"{NotApplicableEvidence.Marker}. {notes}"
+                    : $"Manual decision: {outcome}. {notes}";
                 var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
                 target["Evidence"] = string.IsNullOrWhiteSpace(existing)
-                    ? $"Manual decision: {outcome}. {notes}"
-                    : existing + $"\n\nManual decision: {outcome}. {notes}";
+                    ? decisionLine
+                    : (isNotApplicable ? $"{decisionLine}\n\n{existing}" : $"{existing}\n\n{decisionLine}");
                 target["Finding"] = notes;
             }
 

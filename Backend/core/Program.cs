@@ -401,15 +401,21 @@ namespace SQLAuditor
                 if (manualPending.Count > 0)
                 {
                     Console.WriteLine();
-                    Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail, or skip to keep NeedsReview.");
+                    Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail/not-applicable, or skip to keep NeedsReview.");
                     Console.WriteLine("(Manual verification steps are listed above.)");
                     var updated = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var r in manualPending)
                     {
                         Console.WriteLine();
                         Console.WriteLine($"--- {r.Id}: {r.Description} ---");
-                        var ans = Prompt("Mark item (p=Pass, f=Fail, s=Skip) [s]:").Trim().ToLowerInvariant();
-                        string decision = ans switch { "p" or "pass" => "Pass", "f" or "fail" => "Fail", _ => string.Empty };
+                        var ans = Prompt("Mark item (p=Pass, f=Fail, na=Not Applicable, s=Skip) [s]:").Trim().ToLowerInvariant();
+                        string decision = ans switch
+                        {
+                            "p" or "pass" => "Pass",
+                            "f" or "fail" => "Fail",
+                            "na" or "n/a" or "notapplicable" or "not applicable" => SQLAuditor.Lib.NotApplicableEvidence.Outcome,
+                            _ => string.Empty
+                        };
                         if (decision.Length == 0)
                         {
                             Console.WriteLine("Skipped (kept NeedsReview).");
@@ -676,6 +682,10 @@ namespace SQLAuditor
             Console.WriteLine("     Do NOT add extra sections or headings outside this format.");
             Console.WriteLine("  2. Ask the user for their finding / evidence.");
             Console.WriteLine("  3. Decide Pass or Fail together with the user, then record it with the resolve_review command.");
+            Console.WriteLine("     If the verification shows the control does not exist on this server at all - every value the user");
+            Console.WriteLine("     reports is absent, empty, zero or irrelevant to it - the item is not assessable: record it with");
+            Console.WriteLine("     --decision notapplicable and the reason in --notes. It is then excluded from every score and");
+            Console.WriteLine("     reported as Not Applicable, never as Pass or Fail. A zero that itself proves compliance is a Pass.");
             Console.WriteLine("Do NOT write a final summary until every item has been resolved.");
 
             foreach (var r in pending)
@@ -696,7 +706,7 @@ namespace SQLAuditor
                 {
                     Console.WriteLine("(No baseline guidance was generated for this item.)");
                 }
-                Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail> --notes \"<user's rationale>\"");
+                Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail|notapplicable> --notes \"<user's rationale>\"");
             }
             Console.WriteLine("=== END COPILOT REVIEW REQUIRED ===");
         }
@@ -712,7 +722,7 @@ namespace SQLAuditor
             var opts = ParseOptions(args);
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
-                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview> [--notes <text> | --notes-file <path>]");
+                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> [--notes <text> | --notes-file <path>]");
                 return 0;
             }
 
@@ -727,7 +737,7 @@ namespace SQLAuditor
             }
             if (string.IsNullOrWhiteSpace(decision))
             {
-                Console.Error.WriteLine("Error: --decision is required (pass, fail, or needsreview).");
+                Console.Error.WriteLine("Error: --decision is required (pass, fail, needsreview, or notapplicable).");
                 return 2;
             }
 
@@ -735,13 +745,19 @@ namespace SQLAuditor
             if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             {
                 Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+                if (SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(newOutcome))
+                {
+                    Console.WriteLine($"[{id}] is excluded from every score and is listed on the 'Not Applicable Items' sheet. "
+                        + "Report it as Not Applicable, never as Pass or Fail.");
+                    return 0;
+                }
                 Console.WriteLine($"NEXT: run 'sql-auditor enrich_result --id {id} ...' with audit wording you derive from the reviewer's evidence "
                     + "- finding, evidence, riskImpact and recommendation - using only facts the reviewer stated. "
                     + "Their raw words must not stay as the report Finding.");
                 return 0;
             }
 
-            Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+            Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview/notapplicable.");
             return 2;
         }
 

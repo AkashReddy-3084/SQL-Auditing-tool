@@ -97,34 +97,8 @@ internal sealed class SqlServerMcpEvaluator
             return null;
         }
 
-        var outcome = ResolveOutcome(parsed);
-        if (outcome == null)
-        {
-            return null;
-        }
-
-        var evidence = string.IsNullOrWhiteSpace(parsed.Evidence)
-            ? provider.Content
-            : parsed.Evidence;
-
         stopwatch.Stop();
-        return new ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-MCP")
-        {
-            RawAttribute = parsed.RawAttribute,
-            // RawOutput = provider.RawOutput,
-            // McpTokensUsed = provider.TotalTokens,
-            McpUsage = "Yes",
-            McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-            McpEvidence = evidence,
-            Score = parsed.Score,
-            // ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
-            Severity = parsed.Severity ?? string.Empty,
-            Finding = parsed.Finding ?? string.Empty,
-            Recommendation = parsed.Recommendation,
-            Effort = parsed.Effort ?? string.Empty,
-            RiskImpact = parsed.RiskImpact ?? string.Empty,
-            // ScoreImpact = parsed.ScoreImpact
-        };
+        return BuildResult(item, parsed, provider.Content, stopwatch.ElapsedMilliseconds);
     }
 
     public async Task<ChecklistResult?> EvaluateAsync(ChecklistItem item, SqlConnection connection, CancellationToken cancellationToken = default)
@@ -154,45 +128,69 @@ internal sealed class SqlServerMcpEvaluator
             return null;
         }
 
-        var outcome = ResolveOutcome(parsed);
+        stopwatch.Stop();
+        return BuildResult(item, parsed, provider.Content, stopwatch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// Turns a feasible MCP response into the persisted result. Returns null when the response
+    /// carries no resolvable verdict, which hands the item to the manual pipeline.
+    /// </summary>
+    private static ChecklistResult? BuildResult(ChecklistItem item, ParsedMcpResponse parsed, string rawContent, long elapsedMs)
+    {
+        var evidence = string.IsNullOrWhiteSpace(parsed.Evidence)
+            ? rawContent
+            : parsed.Evidence;
+
+        var outcome = ResolveOutcome(parsed, evidence);
         if (outcome == null)
         {
             return null;
         }
 
-        var evidence = string.IsNullOrWhiteSpace(parsed.Evidence)
-            ? provider.Content
-            : parsed.Evidence;
+        // The snapshot held no supporting artefact for this item, so the control does not exist
+        // to be assessed rather than being implemented ineffectively. The item is reported as
+        // Not Applicable and carries no weight in any score, exactly as a script-evaluated item
+        // whose enrichment declares it not applicable.
+        var notApplicable = NotApplicableEvidence.IsNotApplicableOutcome(outcome);
 
-        stopwatch.Stop();
         return new ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-MCP")
         {
             RawAttribute = parsed.RawAttribute,
             // RawOutput = provider.RawOutput,
             // McpTokensUsed = provider.TotalTokens,
             McpUsage = "Yes",
-            McpExecutionTimeMs = stopwatch.ElapsedMilliseconds,
+            McpExecutionTimeMs = elapsedMs,
             McpEvidence = evidence,
-            Score = parsed.Score,
+            Score = notApplicable ? null : parsed.Score,
             // ImplementationStatus = parsed.ImplementationStatus ?? string.Empty,
-            Severity = parsed.Severity ?? string.Empty,
+            Severity = notApplicable
+                ? ChecklistResultEnricher.DeriveSeverity(item.Id, null, isNotApplicable: true)
+                : (parsed.Severity ?? string.Empty),
             Finding = parsed.Finding ?? string.Empty,
-            Recommendation = parsed.Recommendation,
-            Effort = parsed.Effort ?? string.Empty,
+            Recommendation = notApplicable ? null : parsed.Recommendation,
+            Effort = notApplicable ? null : (parsed.Effort ?? string.Empty),
             RiskImpact = parsed.RiskImpact ?? string.Empty,
+            NotApplicable = notApplicable ? true : null,
             // ScoreImpact = parsed.ScoreImpact
         };
     }
 
     /// <summary>
-    /// The verdict for a feasible MCP evaluation. 'Pass' and 'Fail' are honoured as given;
-    /// a hedged 'NeedsReview' is resolved from the score the same response already carries,
-    /// because no workflow can resolve a NeedsReview on an AI-MCP item. Returns null when
-    /// there is no score to fall back on, which hands the item to the manual pipeline where
-    /// a human can actually decide it.
+    /// The verdict for a feasible MCP evaluation. 'Not Applicable' wins over everything else:
+    /// the snapshot held nothing to assess, so there is no Pass or Fail to give. 'Pass' and
+    /// 'Fail' are otherwise honoured as given; a hedged 'NeedsReview' is resolved from the score
+    /// the same response already carries, because no workflow can resolve a NeedsReview on an
+    /// AI-MCP item. Returns null when there is no score to fall back on, which hands the item to
+    /// the manual pipeline where a human can actually decide it.
     /// </summary>
-    private static string? ResolveOutcome(ParsedMcpResponse parsed)
+    private static string? ResolveOutcome(ParsedMcpResponse parsed, string evidence)
     {
+        if (NotApplicableEvidence.IsNotApplicableOutcome(parsed.Outcome)
+            || NotApplicableEvidence.IsMarked(evidence))
+        {
+            return NotApplicableEvidence.Outcome;
+        }
         if (parsed.Outcome is "Pass" or "Fail") return parsed.Outcome;
         if (parsed.Score.HasValue) return parsed.Score.Value >= PassScore ? "Pass" : "Fail";
         return null;
@@ -397,6 +395,8 @@ internal sealed class SqlServerMcpEvaluator
 
     private static string NormalizeOutcome(string raw)
     {
+        // Checked first so a "not applicable" verdict is never mistaken for a hedge.
+        if (Regex.IsMatch(raw, "not[\\s_-]*applicable", RegexOptions.IgnoreCase)) return NotApplicableEvidence.Outcome;
         if (Regex.IsMatch(raw, "\\bpass(?:ed)?\\b", RegexOptions.IgnoreCase)) return "Pass";
         if (Regex.IsMatch(raw, "\\bfail(?:ed)?\\b", RegexOptions.IgnoreCase)) return "Fail";
         return "NeedsReview";

@@ -106,7 +106,7 @@ public static class ChecklistResultEnricher
         }
 
         var riskImpact = string.IsNullOrWhiteSpace(result.RiskImpact)
-            ? DefaultRiskImpact(score)
+            ? (isNotApplicable ? null : DefaultRiskImpact(score))
             : result.RiskImpact;
 
         var evidence = string.IsNullOrWhiteSpace(result.Evidence)

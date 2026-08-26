@@ -124,6 +124,9 @@ graph TD
 - Builds SQL snapshot (server metadata + user DB summaries).
 - Sends prompt to model provider and parses structured response.
 - If response is feasible and parseable, uses AI-MCP result.
+- If the snapshot holds no supporting artefact for the item (every relevant value irrelevant,
+  NULL, empty or zero), the control does not exist to be assessed: the evidence opens with
+  `Not Applicable.` and the outcome is `Not Applicable`, which is excluded from all scoring.
 
 3. AI-Manual technique
 - Fallback when MCP is unavailable, infeasible, or when no SQL connection.
