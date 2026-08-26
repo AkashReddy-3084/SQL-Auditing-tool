@@ -73,12 +73,19 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 
 ## Using the application
 
-1. **Login** — enter the SQL Server FQDN, choose Windows Authentication or SQL Login, and click *Verify Access*. Named instances such as `localhost\SQLEXPRESS` are supported.
+1. **Login** — enter the SQL Server FQDN, choose Windows Authentication or SQL Login, and click *Verify Access*. Named instances such as `localhost\SQLEXPRESS` are supported. After verification, choose one or more accessible user databases from the database dropdown, or choose *All Databases*. Nothing is selected by default.
 2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
 3. **Checklist** — select the controls to evaluate.
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
 5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklist/scripts/`.
 6. **Summary** — generates the scored report and lets you export it.
+
+Database-scoped scripts never embed the login-page selection. A generated `DATABASE` script
+checks only its current connection database and reports `DB_NAME()`; the backend opens that same
+reusable script once for each selected database and combines the returned rows with the existing
+worst-score rule. Server-scoped and system-database checks continue to run through the master
+connection. CLI and IDE evaluations, which have no desktop selector, default to all accessible
+online user databases.
 
 ## Command-line interface (CLI)
 
@@ -179,6 +186,11 @@ and any corrected script — before writing to `Backend/checklist/scripts/{sql,p
 updating `Backend/checklist/deterministic-script-mapping.json` and
 `Backend/results/execution-results.json`. Without `--validation-file` the save command prints
 the validation prompt and saves nothing.
+
+The mapping records each generated script's `scope`. `SERVER` scripts use instance/system
+catalogs; `DATABASE` scripts inspect only the current database. Database names are supplied only
+at evaluation time by the backend connection configuration, so generated scripts can be reused
+with a different database selection.
 
 ## GitHub Copilot CLI integration (skill)
 

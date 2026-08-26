@@ -24,7 +24,7 @@ namespace SQLAuditor.Agents
         private readonly List<ExecutionResultEntry> _executionResults = new();
 
         // Tracks classification for ALL processed items (feasible and non-feasible)
-        private readonly Dictionary<string, (string? ScriptFile, bool IsAdminCheck, bool IsDocumentationCheck, bool McpFeasibility)> _classificationRegistry = new();
+        private readonly Dictionary<string, (string? ScriptFile, string? Scope, bool IsAdminCheck, bool IsDocumentationCheck, bool McpFeasibility)> _classificationRegistry = new();
 
 
         public ScriptGeneratorAgent(
@@ -80,6 +80,7 @@ namespace SQLAuditor.Agents
                 foreach (var entry in existing)
                 {
                     string? scriptFile = null;
+                    string? scope = null;
                     bool isAdminCheck = false;
                     bool isDocumentationCheck = false;
                     bool mcpFeasibility = false;
@@ -90,6 +91,14 @@ namespace SQLAuditor.Agents
                         scriptFileElement.ValueKind != JsonValueKind.Null)
                     {
                         scriptFile = scriptFileElement.GetString();
+                    }
+
+                    if (entry.Value.TryGetProperty(
+                        "scope",
+                        out var scopeElement) &&
+                        scopeElement.ValueKind == JsonValueKind.String)
+                    {
+                        scope = scopeElement.GetString();
                     }
 
                     if (entry.Value.TryGetProperty(
@@ -117,6 +126,7 @@ namespace SQLAuditor.Agents
                     _classificationRegistry[entry.Key] =
                     (
                         scriptFile,
+                        scope,
                         isAdminCheck,
                         isDocumentationCheck,
                         mcpFeasibility
@@ -276,14 +286,20 @@ namespace SQLAuditor.Agents
                             result.ExecutionResult);
                     }
 
-                    // Classification / deterministic mapping
-                    _classificationRegistry[result.ChecklistId] =
-                        (
-                            result.ScriptFile,
-                            result.IsAdminCheck,
-                            result.IsDocumentationCheck,
-                            result.McpFeasibility
-                        );
+                    // Replace an existing mapping only after generation completed or the
+                    // item was explicitly classified as not feasible. A failed/cancelled
+                    // regeneration must leave the last working script and scope intact.
+                    if (result.Generated || result.Skipped != null)
+                    {
+                        _classificationRegistry[result.ChecklistId] =
+                            (
+                                result.ScriptFile,
+                                result.Scope,
+                                result.IsAdminCheck,
+                                result.IsDocumentationCheck,
+                                result.McpFeasibility
+                            );
+                    }
                 }
 
                 // ==========================================================
@@ -426,6 +442,7 @@ namespace SQLAuditor.Agents
                             };
 
                         result.ScriptFile = null;
+                        result.Scope = response.Scope;
                         result.IsAdminCheck = response.IsAdminCheck;
                         result.IsDocumentationCheck = response.IsDocumentationCheck;
                         result.McpFeasibility = response.McpFeasibility;
@@ -663,6 +680,8 @@ namespace SQLAuditor.Agents
                         $"Backend/checklist/scripts/" +
                         $"{response.ScriptType}/{filename}";
 
+                    result.Scope = response.Scope;
+
                     result.IsAdminCheck =
                         response.IsAdminCheck;
 
@@ -676,16 +695,16 @@ namespace SQLAuditor.Agents
                         new ExecutionResultEntry
                         {
                             ChecklistId =
-                                item.ChecklistId,
+                                item.ChecklistId ?? string.Empty,
 
                             CheckName =
                                 item.CheckName,
 
                             Category =
-                                item.Category,
+                                item.Category ?? string.Empty,
 
                             Scope =
-                                response.Scope,
+                                response.Scope ?? string.Empty,
 
                             Status =
                                 genAttempt > 1
@@ -769,6 +788,8 @@ namespace SQLAuditor.Agents
 
             public string? ScriptFile { get; set; }
 
+            public string? Scope { get; set; }
+
             public bool IsAdminCheck { get; set; }
 
             public bool IsDocumentationCheck { get; set; }
@@ -807,6 +828,7 @@ namespace SQLAuditor.Agents
                 mappingDict[entry.Key] = new
                 {
                     script_file = entry.Value.ScriptFile,
+                    scope = entry.Value.Scope,
                     IsAdminCheck = entry.Value.IsAdminCheck,
                     IsDocumentationCheck = entry.Value.IsDocumentationCheck,
                     MCP_Feasibility = entry.Value.McpFeasibility

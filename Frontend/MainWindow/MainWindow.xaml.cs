@@ -83,6 +83,11 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.HashSet<string> _copiedManualIds = new(StringComparer.OrdinalIgnoreCase);
         // guards the mapping-preview rebuild triggered by the Copy Manual Results checkbox
         private bool _suppressCopyManualReload = false;
+        private readonly System.Collections.Generic.List<System.Windows.Controls.CheckBox> _databaseOptionCheckBoxes = new();
+        private System.Windows.Controls.CheckBox? _allDatabasesCheckBox;
+        private bool _suppressDatabaseSelectionSync = false;
+        private int _sqlConnectionInputsVersion = 0;
+        private bool _isVerifyingSql = false;
 
         public MainWindow()
         {
@@ -101,7 +106,11 @@ namespace SQLAuditor.Wpf
                     SqlUserBox.Visibility = Visibility.Collapsed;
                     SqlPassBox.Visibility = Visibility.Collapsed;
                 }
+                InvalidateSqlVerification();
             };
+            FqdnText.TextChanged += (s, e) => InvalidateSqlVerification();
+            SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
@@ -454,6 +463,13 @@ namespace SQLAuditor.Wpf
 
         private async void StartEvalBtn_Click(object sender, RoutedEventArgs e)
         {
+            var targetDatabases = GetSelectedDatabaseNames();
+            if (targetDatabases.Length == 0)
+            {
+                MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             // Initialize auditor with declared FQDN for this evaluation run
             var fqdn = !string.IsNullOrWhiteSpace(FqdnText.Text) ? FqdnText.Text.Trim() : "abc.windows.net";
             await EnsureAuditor(fqdn);
@@ -616,7 +632,7 @@ namespace SQLAuditor.Wpf
                 // then left the shared connection broken and every remaining script item came
                 // back as a SQL error, which the outcome mapper scores as Fail.
                 var results = await Task.Run(
-                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical),
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases),
                     token);
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
@@ -628,6 +644,10 @@ namespace SQLAuditor.Wpf
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log("Summary report generated at results/final_report.md");
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Evaluation cancelled. Existing result files were left unchanged.");
             }
             catch (Exception ex)
             {
@@ -676,12 +696,22 @@ namespace SQLAuditor.Wpf
 
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
-                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token);
+                var targetDatabases = GetSelectedDatabaseNames();
+                if (targetDatabases.Length == 0)
+                {
+                    MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log("Summary report generated at results/final_report.md");
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Evaluation cancelled. Existing result files were left unchanged.");
             }
             catch (Exception ex)
             {
@@ -1235,7 +1265,10 @@ namespace SQLAuditor.Wpf
             Log($"Selected {outcome} for {item.Id}. Click Submit to save.");
         }
 
-        private async Task PersistManualResultAsync(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
+        private async Task PersistManualResultAsync(
+            SQLAuditor.Lib.ChecklistItem item,
+            ManualEvaluationState state,
+            bool forceWrite = false)
         {
             var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
             var key = outcome + "\u0001" + state.Remarks;
@@ -1266,7 +1299,8 @@ namespace SQLAuditor.Wpf
                     state.EnrichedKey = key;
                 }
 
-                WriteManualResultToDisk(updated);
+                if (forceWrite || !_isEvaluating)
+                    WriteManualResultToDisk(updated);
             }
             catch (Exception ex)
             {
@@ -1299,9 +1333,9 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.
-        // The engine persists manual items as "Evaluating" placeholders at the end of a run,
-        // which can clobber decisions made while evaluation was still in progress.
+        // Writes operator-submitted manual Pass/Fail decisions after the engine has persisted
+        // the complete run. During evaluation they remain in memory, so cancellation cannot
+        // mix new manual rows into an earlier checklist_results.json.
         private async Task ReapplySubmittedManualResultsAsync()
         {
             if (_manualQueue == null || _manualStateMap == null) return;
@@ -1312,7 +1346,7 @@ namespace SQLAuditor.Wpf
                     && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                      || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
                 {
-                    await PersistManualResultAsync(item, state);
+                    await PersistManualResultAsync(item, state, forceWrite: true);
                 }
             }
         }
@@ -1619,21 +1653,188 @@ namespace SQLAuditor.Wpf
             finally { _allowTabChange = false; }
         }
 
+        private void InvalidateSqlVerification()
+        {
+            var hadConnectionState = _isVerified || _isVerifyingSql || _auditor != null;
+            _sqlConnectionInputsVersion++;
+            _isVerified = false;
+            _auditor = null;
+            ResetDatabaseSelection();
+            if (hadConnectionState)
+                AccessStatus.Text = "Connection details changed. Verify access again.";
+            UpdateStageIndicators();
+        }
+
+        private void ResetDatabaseSelection()
+        {
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                DatabaseSelectorToggle.IsChecked = false;
+                DatabaseSelectorToggle.IsEnabled = false;
+                DatabaseSelectorPanel.Visibility = Visibility.Collapsed;
+                DatabaseSelectionText.Text = "Select Databases";
+                DatabaseSelectionText.ToolTip = null;
+                DatabaseOptionsPanel.Children.Clear();
+                _databaseOptionCheckBoxes.Clear();
+                _allDatabasesCheckBox = null;
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+            UpdateStartEvaluationEnabled();
+        }
+
+        private void PopulateDatabaseSelection(System.Collections.Generic.IEnumerable<string> databaseNames)
+        {
+            var names = databaseNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                DatabaseOptionsPanel.Children.Clear();
+                _databaseOptionCheckBoxes.Clear();
+
+                _allDatabasesCheckBox = CreateDatabaseOption("All Databases", null, true);
+                DatabaseOptionsPanel.Children.Add(_allDatabasesCheckBox);
+
+                foreach (var name in names)
+                {
+                    var option = CreateDatabaseOption(name, name, false);
+                    _databaseOptionCheckBoxes.Add(option);
+                    DatabaseOptionsPanel.Children.Add(option);
+                }
+
+                DatabaseSelectorToggle.IsChecked = false;
+                DatabaseSelectorToggle.IsEnabled = names.Length > 0;
+                DatabaseSelectorPanel.Visibility = Visibility.Visible;
+                DatabaseSelectionText.Text = "Select Databases";
+                DatabaseSelectionText.ToolTip = null;
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+            UpdateDatabaseSelectionSummary();
+        }
+
+        private System.Windows.Controls.CheckBox CreateDatabaseOption(
+            string label,
+            string? databaseName,
+            bool isAllDatabases)
+        {
+            var option = new System.Windows.Controls.CheckBox
+            {
+                Content = label,
+                Tag = databaseName,
+                Padding = new Thickness(6, 5, 6, 5),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                FontWeight = isAllDatabases ? FontWeights.SemiBold : FontWeights.Normal
+            };
+            option.Checked += DatabaseOption_Changed;
+            option.Unchecked += DatabaseOption_Changed;
+            return option;
+        }
+
+        private void DatabaseOption_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_suppressDatabaseSelectionSync) return;
+
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                if (ReferenceEquals(sender, _allDatabasesCheckBox))
+                {
+                    var selectAll = _allDatabasesCheckBox?.IsChecked == true;
+                    foreach (var option in _databaseOptionCheckBoxes)
+                        option.IsChecked = selectAll;
+                }
+                else if (_allDatabasesCheckBox != null)
+                {
+                    _allDatabasesCheckBox.IsChecked =
+                        _databaseOptionCheckBoxes.Count > 0 &&
+                        _databaseOptionCheckBoxes.All(option => option.IsChecked == true);
+                }
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+
+            UpdateDatabaseSelectionSummary();
+        }
+
+        private string[] GetSelectedDatabaseNames()
+        {
+            return _databaseOptionCheckBoxes
+                .Where(option => option.IsChecked == true && option.Tag is string)
+                .Select(option => (string)option.Tag)
+                .ToArray();
+        }
+
+        private void UpdateDatabaseSelectionSummary()
+        {
+            var selected = GetSelectedDatabaseNames();
+            DatabaseSelectionText.Text = selected.Length switch
+            {
+                0 => "Select Databases",
+                1 => selected[0],
+                _ when selected.Length == _databaseOptionCheckBoxes.Count => "All Databases",
+                _ => $"{selected.Length} databases selected"
+            };
+            DatabaseSelectionText.ToolTip = selected.Length == 0
+                ? null
+                : string.Join(Environment.NewLine, selected);
+            UpdateStartEvaluationEnabled();
+        }
+
         private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
         {
             var fqdn = FqdnText.Text.Trim();
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
+            _isVerified = false;
+            _auditor = null;
+            ResetDatabaseSelection();
+            var verificationVersion = _sqlConnectionInputsVersion;
+            _isVerifyingSql = true;
             AccessStatus.Text = "Testing connection...";
             VerifyBtn.IsEnabled = false;
             try
             {
                 await EnsureAuditor(fqdn);
-                var ok = await _auditor!.TestConnectionAsync();
+                if (verificationVersion != _sqlConnectionInputsVersion || _auditor == null)
+                {
+                    Log("Discarded SQL verification because the connection details changed.");
+                    return;
+                }
+                var candidateAuditor = _auditor;
+                var ok = await candidateAuditor.TestConnectionAsync();
+                if (verificationVersion != _sqlConnectionInputsVersion)
+                {
+                    Log("Discarded SQL verification because the connection details changed.");
+                    return;
+                }
                 if (ok)
                 {
+                    var databases = await candidateAuditor.GetAvailableDatabasesAsync();
+                    if (verificationVersion != _sqlConnectionInputsVersion)
+                    {
+                        Log("Discarded database discovery because the connection details changed.");
+                        return;
+                    }
+                    _auditor = candidateAuditor;
                     _isVerified = true;
-                    AccessStatus.Text = $"Verified: {fqdn}";
-                    Log($"Connection to {fqdn} verified.");
+                    PopulateDatabaseSelection(databases);
+                    AccessStatus.Text = databases.Length == 0
+                        ? $"Verified: {fqdn}. No accessible user databases found."
+                        : $"Verified: {fqdn}. {databases.Length} database(s) available.";
+                    Log($"Connection to {fqdn} verified; {databases.Length} user database(s) available.");
                 }
                 else
                 {
@@ -1650,6 +1851,7 @@ namespace SQLAuditor.Wpf
             }
             finally
             {
+                _isVerifyingSql = false;
                 VerifyBtn.IsEnabled = true;
                 UpdateStartEvaluationEnabled();
                 UpdateStageIndicators();
@@ -1707,14 +1909,15 @@ namespace SQLAuditor.Wpf
         // The ONLY control that navigates from Login to the Checklist page.
         private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
         {
-            if (!_isVerified) return;
+            var targetDatabases = GetSelectedDatabaseNames();
+            if (!_isVerified || targetDatabases.Length == 0) return;
 
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();
 
             SetTabIndex(1);
             LoadChecklistBtn.IsEnabled = true;
-            Log("Proceeding to checklist.");
+            Log($"Proceeding to checklist with {targetDatabases.Length} database target(s).");
             try
             {
                 await PopulateChecklistStructureAsync();
@@ -1731,7 +1934,7 @@ namespace SQLAuditor.Wpf
         {
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = _isVerified;
+                StartEvaluationBtn.IsEnabled = _isVerified && GetSelectedDatabaseNames().Length > 0;
             }
         }
 

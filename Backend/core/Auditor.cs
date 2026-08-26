@@ -103,9 +103,17 @@ namespace SQLAuditor.Lib
 
     public class Auditor
     {
-        // checklist_results.json is written by this engine at the end of a run and, in the WPF
-        // flow, by the manual Pass/Fail handler while the run is still in progress. Both writers
-        // take this lock so neither can observe or produce a half-written file.
+        private const string RuntimeDatabasesTable = "#SqlAuditorDatabases";
+        private static readonly Regex DeclaredScriptScopeRegex = new(
+            @"\bScope\s*:\s*(SERVER|DATABASE)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex SysDatabasesReferenceRegex = new(
+            @"(?<![\w#])(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)(?![\w])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // checklist_results.json is written by this engine at the end of a run and by the WPF
+        // manual Pass/Fail merge after a completed run. Both writers take this lock so neither
+        // can observe or produce a half-written file.
         public static readonly object ResultsFileLock = new object();
 
         private string _connectionString;
@@ -116,7 +124,18 @@ namespace SQLAuditor.Lib
 
         public Auditor(string connectionString)
         {
-            _connectionString = connectionString;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                _connectionString = connectionString;
+            }
+            else
+            {
+                var builder = new SqlConnectionStringBuilder(connectionString)
+                {
+                    InitialCatalog = "master"
+                };
+                _connectionString = builder.ConnectionString;
+            }
             // Evaluators are created tolerantly so the auditor can be built for SQL-only
             // operations (connection verification, checklist loading) before the user has
             // supplied LLM settings at runtime.
@@ -166,6 +185,206 @@ namespace SQLAuditor.Lib
                 return (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {txt}");
             }
             catch (Exception ex) { return (false, ex.Message); }
+        }
+
+        public async Task<string[]> GetAvailableDatabasesAsync(System.Threading.CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(_connectionString))
+                return Array.Empty<string>();
+
+            var databases = new System.Collections.Generic.List<string>();
+            using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(cancellationToken);
+            using var editionCommand = new SqlCommand(
+                "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition'));",
+                conn)
+            {
+                CommandTimeout = 30
+            };
+            var editionValue = await editionCommand.ExecuteScalarAsync(cancellationToken);
+            var engineEdition = editionValue == null || editionValue == DBNull.Value
+                ? 0
+                : Convert.ToInt32(editionValue);
+
+            var discoverySql = engineEdition == 5
+                ? "SELECT [name] FROM sys.databases " +
+                  "WHERE [name] <> N'master' AND state = 0 AND source_database_id IS NULL " +
+                  "ORDER BY [name];"
+                : "SELECT [name] FROM sys.databases " +
+                  "WHERE database_id > 4 AND state = 0 AND source_database_id IS NULL " +
+                  "AND HAS_DBACCESS([name]) = 1 " +
+                  "ORDER BY [name];";
+
+            using var cmd = new SqlCommand(discoverySql, conn) { CommandTimeout = 30 };
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                    databases.Add(reader.GetString(0));
+            }
+
+            await reader.CloseAsync();
+
+            if (engineEdition == 5)
+            {
+                var accessibleDatabases = new System.Collections.Generic.List<string>();
+                foreach (var databaseName in databases)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        using var databaseConnection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                        await databaseConnection.OpenAsync(cancellationToken);
+                        accessibleDatabases.Add(databaseName);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // A visible Azure SQL database is selectable only when this credential can open it.
+                    }
+                }
+                databases = accessibleDatabases;
+            }
+
+            return databases
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static string? GetDeclaredScriptScope(string? scriptText)
+        {
+            if (string.IsNullOrWhiteSpace(scriptText)) return null;
+            var match = DeclaredScriptScopeRegex.Match(scriptText);
+            return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+        }
+
+        private string GetDatabaseConnectionString(string databaseName)
+        {
+            var builder = new SqlConnectionStringBuilder(_connectionString)
+            {
+                InitialCatalog = databaseName
+            };
+            return builder.ConnectionString;
+        }
+
+        private static async Task<string> PrepareDatabaseScopedScriptAsync(
+            SqlConnection connection,
+            string scriptText,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            var rewrittenScript = RewriteSysDatabasesReferences(scriptText);
+            if (string.Equals(rewrittenScript, scriptText, StringComparison.Ordinal))
+                return scriptText;
+
+            var setup = $@"
+IF OBJECT_ID('tempdb..{RuntimeDatabasesTable}') IS NOT NULL
+    DROP TABLE {RuntimeDatabasesTable};
+
+SELECT d.*
+INTO {RuntimeDatabasesTable}
+FROM sys.databases AS d
+WHERE d.name = DB_NAME();";
+
+            using var command = new SqlCommand(setup, connection) { CommandTimeout = 30 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return rewrittenScript;
+        }
+
+        private static string RewriteSysDatabasesReferences(string scriptText)
+        {
+            var output = new System.Text.StringBuilder(scriptText.Length);
+            var codeStart = 0;
+            var index = 0;
+
+            void AppendCode(int end)
+            {
+                if (end > codeStart)
+                    output.Append(SysDatabasesReferenceRegex.Replace(
+                        scriptText.Substring(codeStart, end - codeStart),
+                        RuntimeDatabasesTable));
+            }
+
+            while (index < scriptText.Length)
+            {
+                if (scriptText[index] == '\'')
+                {
+                    AppendCode(index);
+                    var literalStart = index++;
+                    while (index < scriptText.Length)
+                    {
+                        if (scriptText[index] != '\'')
+                        {
+                            index++;
+                            continue;
+                        }
+                        index++;
+                        if (index < scriptText.Length && scriptText[index] == '\'')
+                        {
+                            index++;
+                            continue;
+                        }
+                        break;
+                    }
+                    var literal = scriptText.Substring(literalStart, index - literalStart);
+                    var readsDatabaseCatalog = Regex.IsMatch(
+                        literal,
+                        @"\b(FROM|JOIN)\s+(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)\b",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                    output.Append(readsDatabaseCatalog
+                        ? SysDatabasesReferenceRegex.Replace(literal, RuntimeDatabasesTable)
+                        : literal);
+                    codeStart = index;
+                    continue;
+                }
+
+                if (index + 1 < scriptText.Length && scriptText[index] == '-' && scriptText[index + 1] == '-')
+                {
+                    AppendCode(index);
+                    var commentStart = index;
+                    index += 2;
+                    while (index < scriptText.Length && scriptText[index] != '\r' && scriptText[index] != '\n')
+                        index++;
+                    output.Append(scriptText, commentStart, index - commentStart);
+                    codeStart = index;
+                    continue;
+                }
+
+                if (index + 1 < scriptText.Length && scriptText[index] == '/' && scriptText[index + 1] == '*')
+                {
+                    AppendCode(index);
+                    var commentStart = index;
+                    var depth = 1;
+                    index += 2;
+                    while (index < scriptText.Length && depth > 0)
+                    {
+                        if (index + 1 < scriptText.Length && scriptText[index] == '/' && scriptText[index + 1] == '*')
+                        {
+                            depth++;
+                            index += 2;
+                        }
+                        else if (index + 1 < scriptText.Length && scriptText[index] == '*' && scriptText[index + 1] == '/')
+                        {
+                            depth--;
+                            index += 2;
+                        }
+                        else
+                        {
+                            index++;
+                        }
+                    }
+                    output.Append(scriptText, commentStart, index - commentStart);
+                    codeStart = index;
+                    continue;
+                }
+
+                index++;
+            }
+
+            AppendCode(scriptText.Length);
+            return output.ToString();
         }
 
         // --- Remaining methods omitted for brevity; this Auditor is a lightweight stub for UI testing ---
@@ -572,7 +791,8 @@ namespace SQLAuditor.Lib
                 }
 
                 var rel = Path.Combine("Backend", "checklist", "scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
-                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
+                var scope = GetDeclaredScriptScope(scriptText);
+                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, scope, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
                 mappingDict[checklistId] = newEntry;
                 await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mappingDict, new JsonSerializerOptions { WriteIndented = true }));
             }
@@ -591,7 +811,21 @@ namespace SQLAuditor.Lib
         /// finishes. The CLI and IDE hosts pass false and generate the reports only after the user
         /// explicitly asks for them.
         /// </param>
-        public async Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
+        public Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
+            => RunChecklistAsync(progress, requestUserInput, selectedIds, cancellationToken, useHistoricalManualResults, generateReports, null);
+
+        /// <param name="targetDatabases">
+        /// User databases on which DATABASE-scope SQL scripts run. Null means all currently
+        /// accessible online user databases; an explicit empty selection is rejected.
+        /// </param>
+        public async Task<ChecklistResult[]> RunChecklistAsync(
+            IProgress<ChecklistResult>? progress,
+            Func<ChecklistItem, string, Task<string?>>? requestUserInput,
+            System.Collections.Generic.IEnumerable<string>? selectedIds,
+            System.Threading.CancellationToken cancellationToken,
+            bool useHistoricalManualResults,
+            bool generateReports,
+            System.Collections.Generic.IEnumerable<string>? targetDatabases)
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
@@ -601,8 +835,33 @@ namespace SQLAuditor.Lib
             // normalize connection (try alternate server variants) so script execution reuses a working connection string when possible
             try { await TestAndNormalizeConnectionAsync(); } catch { }
 
+            string[] databaseTargets;
+            if (targetDatabases == null)
+            {
+                databaseTargets = await GetAvailableDatabasesAsync(cancellationToken);
+            }
+            else
+            {
+                databaseTargets = targetDatabases
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Select(name => name.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (databaseTargets.Length == 0)
+                    throw new InvalidOperationException("Select at least one database before evaluation.");
+
+                var systemDatabase = databaseTargets.FirstOrDefault(name =>
+                    string.Equals(name, "master", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "model", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "msdb", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "tempdb", StringComparison.OrdinalIgnoreCase));
+                if (systemDatabase != null)
+                    throw new InvalidOperationException($"System database '{systemDatabase}' cannot be selected as a user-database target.");
+            }
+
             // load deterministic mapping if present
             var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
+            var scriptScopes = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             // Items whose compliance can only be judged from external documentation.
             var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // Items needing elevated rights: the script is still generated, but the operator runs it.
@@ -632,6 +891,11 @@ namespace SQLAuditor.Lib
                             if (!string.IsNullOrWhiteSpace(scriptFile))
                                 mapping[prop.Name] = new[] { scriptFile! };
 
+                            if (!prop.Value.TryGetProperty("scope", out var scriptScope))
+                                prop.Value.TryGetProperty("Scope", out scriptScope);
+                            if (scriptScope.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(scriptScope.GetString()))
+                                scriptScopes[prop.Name] = scriptScope.GetString()!.Trim().ToUpperInvariant();
+
                             if (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck) && docCheck.ValueKind == JsonValueKind.True)
                                 documentationItems.Add(prop.Name);
 
@@ -640,13 +904,43 @@ namespace SQLAuditor.Lib
                         }
                     }
                 }
+
+                var generationResultsPath = Path.Combine(repoRoot, "Backend", "results", "execution-results.json");
+                if (File.Exists(generationResultsPath))
+                {
+                    using var resultsDoc = JsonDocument.Parse(File.ReadAllText(generationResultsPath));
+                    if (resultsDoc.RootElement.TryGetProperty("results", out var generatedResults)
+                        && generatedResults.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var generatedResult in generatedResults.EnumerateArray())
+                        {
+                            var checklistId = generatedResult.TryGetProperty("ChecklistId", out var idElement)
+                                ? idElement.GetString()
+                                : null;
+                            var scope = generatedResult.TryGetProperty("Scope", out var scopeElement)
+                                ? scopeElement.GetString()
+                                : null;
+                            if (!string.IsNullOrWhiteSpace(checklistId)
+                                && !string.IsNullOrWhiteSpace(scope)
+                                && !scriptScopes.ContainsKey(checklistId))
+                            {
+                                scriptScopes[checklistId] = scope.Trim().ToUpperInvariant();
+                            }
+                        }
+                    }
+                }
+
                 // Normalize any legacy SQL/scripts/checks references to Backend/checklist/scripts/sql
                 var keys = mapping.Keys.ToArray();
                 foreach (var k in keys)
                 {
                     var arr = mapping[k];
                     if (arr == null) continue;
-                    var normalized = arr.Select(s => s?.Replace("Backend/checklist/tools/sql/", "Backend/checklist/scripts/sql/") ?? s).Distinct().ToArray();
+                    var normalized = arr
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s.Replace("Backend/checklist/tools/sql/", "Backend/checklist/scripts/sql/"))
+                        .Distinct()
+                        .ToArray();
                     mapping[k] = normalized;
                 }
             }
@@ -700,6 +994,17 @@ namespace SQLAuditor.Lib
                     catch { }
                 }
                 return null;
+            }
+
+            bool IsDatabaseScopedSql(ChecklistItem item, string path, string scriptText)
+            {
+                if (!string.Equals(Path.GetExtension(path), ".sql", StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                var scope = scriptScopes.TryGetValue(item.Id, out var mappedScope)
+                    ? mappedScope
+                    : GetDeclaredScriptScope(scriptText);
+                return string.Equals(scope, "DATABASE", StringComparison.OrdinalIgnoreCase);
             }
 
             var scriptItems = selectedItems.Where(IsScriptMapped).ToList();
@@ -760,9 +1065,18 @@ namespace SQLAuditor.Lib
                         if (File.Exists(full))
                         {
                             var txt = await File.ReadAllTextAsync(full);
-                            if (pipelineConn != null)
+                            if (IsDatabaseScopedSql(it, full, txt))
                             {
-                                var (log, rows) = await ExecuteSqlCaptureAsync(pipelineConn, txt);
+                                var (log, rows) = await ExecuteDatabaseScopedSqlAsync(
+                                    txt,
+                                    databaseTargets,
+                                    cancellationToken);
+                                allRows.AddRange(rows);
+                                if (!string.IsNullOrWhiteSpace(log)) textLog.AppendLine(log);
+                            }
+                            else if (pipelineConn != null && string.Equals(Path.GetExtension(full), ".sql", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var (log, rows) = await ExecuteSqlCaptureAsync(pipelineConn, txt, cancellationToken);
                                 allRows.AddRange(rows);
                                 if (!string.IsNullOrWhiteSpace(log)) textLog.AppendLine(log);
                             }
@@ -780,6 +1094,10 @@ namespace SQLAuditor.Lib
                                 textLog.AppendLine(await RunScriptFileAsync(match));
                             }
                         }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -865,6 +1183,10 @@ namespace SQLAuditor.Lib
                             return mcp;
                         }
                     }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
                     catch (Exception ex)
                     {
                         LogDiagnostic($"SQL MCP evaluation error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
@@ -887,6 +1209,10 @@ namespace SQLAuditor.Lib
                         try
                         {
                             await requestUserInput(it, manualPlan.Instructions);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            return;
                         }
                         catch
                         {
@@ -938,6 +1264,10 @@ namespace SQLAuditor.Lib
                             // };
                         }
                     }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
                     catch { }
                 }
 
@@ -979,6 +1309,10 @@ namespace SQLAuditor.Lib
                     await fresh.OpenAsync(cancellationToken);
                     return fresh;
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
                 catch
                 {
                     // Falling back to null makes the evaluators open their own short-lived
@@ -995,13 +1329,7 @@ namespace SQLAuditor.Lib
                 {
                     foreach (var it in items)
                     {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            var stopped = new ChecklistResult(it.Id, it.Description, it.Verification, "Stopped", "Cancelled by user", it.ScriptFile, "Stopped");
-                            results.Add(stopped);
-                            progress?.Report(stopped);
-                            break;
-                        }
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         pipelineConn = await EnsureUsableConnectionAsync(pipelineConn);
 
@@ -1029,6 +1357,10 @@ namespace SQLAuditor.Lib
                                 progress?.Report(result);
                             }
                         }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
                         catch (Exception ex)
                         {
                             var err = new ChecklistResult(it.Id, it.Description, it.Verification, isScriptPipeline ? "Fail" : "NeedsReview", "Error: " + ex.Message, it.ScriptFile, isScriptPipeline ? "Script" : "AI-Manual");
@@ -1049,6 +1381,7 @@ namespace SQLAuditor.Lib
             await Task.WhenAll(
                 RunPipelineAsync(scriptItems, true),
                 RunPipelineAsync(aiItems, false));
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Back-fill report-oriented fields so the persisted JSON is always
             // schema-compatible with the Summary Report generator. Script items were
@@ -1473,17 +1806,24 @@ namespace SQLAuditor.Lib
             if (await TestConnectionAsync()) return true;
             try
             {
-                // extract server token from connection string
-                var m = System.Text.RegularExpressions.Regex.Match(_connectionString, "Server\\s*=\\s*([^;]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (!m.Success) return false;
-                var server = m.Groups[1].Value;
-                // candidate variants to try
-                var variants = new[] { server, ".", "(local)", "localhost", "127.0.0.1", "np:" + server, "tcp:" + server, server + ",1433",
-                    // common named instance patterns
-                    server + "\\SQLEXPRESS", ".\\SQLEXPRESS", "localhost\\SQLEXPRESS", "127.0.0.1\\SQLEXPRESS" };
-                foreach (var v in variants.Distinct())
+                var baseBuilder = new SqlConnectionStringBuilder(_connectionString);
+                var server = baseBuilder.DataSource;
+                if (string.IsNullOrWhiteSpace(server)) return false;
+                var unprefixedServer = Regex.Replace(
+                    server,
+                    @"^(tcp:|np:)",
+                    string.Empty,
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                // Transport variants keep the exact requested host/instance. Never fall back
+                // to a different local server after a remote connection fails.
+                var variants = new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
+                foreach (var v in variants.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    var cs2 = System.Text.RegularExpressions.Regex.Replace(_connectionString, "Server\\s*=\\s*[^;]+", $"Server={v}", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    var candidateBuilder = new SqlConnectionStringBuilder(_connectionString)
+                    {
+                        DataSource = v
+                    };
+                    var cs2 = candidateBuilder.ConnectionString;
                     try
                     {
                         using var conn = new SqlConnection(cs2);
@@ -1627,6 +1967,10 @@ namespace SQLAuditor.Lib
                     LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 LogDiagnostic($"Manual steps LLM call failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
@@ -1651,11 +1995,121 @@ namespace SQLAuditor.Lib
             catch { }
         }
 
+        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteDatabaseScopedSqlAsync(
+            string scriptText,
+            System.Collections.Generic.IReadOnlyList<string> databaseNames,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            var rows = new System.Collections.Generic.List<SqlScriptRow>();
+            var log = new System.Text.StringBuilder();
+
+            if (databaseNames.Count == 0)
+            {
+                rows.Add(CreateDatabaseExecutionFailureRow("None", "No database found to be queried"));
+                return (string.Empty, rows);
+            }
+
+            foreach (var databaseName in databaseNames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    using var connection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                    await connection.OpenAsync(cancellationToken);
+                    var executableScript = await PrepareDatabaseScopedScriptAsync(
+                        connection,
+                        scriptText,
+                        cancellationToken);
+                    var (databaseLog, databaseRows) = await ExecuteSqlCaptureAsync(
+                        connection,
+                        executableScript,
+                        cancellationToken);
+
+                    var normalizedRows = NormalizeDatabaseResultRows(databaseRows, databaseName);
+
+                    rows.AddRange(normalizedRows);
+                    if (!string.IsNullOrWhiteSpace(databaseLog))
+                        log.AppendLine($"[{databaseName}] {databaseLog.Trim()}");
+
+                    var hasStructuredVerdict = normalizedRows.Any(row =>
+                        row.Get("Result", "Outcome", "Status", "PassFail") != null ||
+                        row.Get("Score", "DbScore", "ItemScore") != null ||
+                        row.Get("Finding", "Findings", "Detail", "Details", "Message") != null);
+                    if (!hasStructuredVerdict)
+                    {
+                        var reason = string.IsNullOrWhiteSpace(databaseLog)
+                            ? "Script returned no structured result"
+                            : databaseLog.Trim();
+                        rows.Add(CreateDatabaseExecutionFailureRow(databaseName, reason));
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    log.AppendLine($"[{databaseName}] SQL EXEC ERROR: {ex.Message}");
+                    rows.Add(CreateDatabaseExecutionFailureRow(databaseName, ex.Message));
+                }
+            }
+
+            return (log.ToString(), rows);
+        }
+
+        private static System.Collections.Generic.List<SqlScriptRow> NormalizeDatabaseResultRows(
+            System.Collections.Generic.IEnumerable<SqlScriptRow> sourceRows,
+            string databaseName)
+        {
+            var normalizedRows = new System.Collections.Generic.List<SqlScriptRow>();
+            foreach (var row in sourceRows)
+            {
+                var isVerdictRow = row.Get("Result", "Outcome", "Status", "PassFail") != null ||
+                    row.Get("Score", "DbScore", "ItemScore") != null ||
+                    row.Get("Finding", "Findings", "Detail", "Details", "Message") != null;
+                if (!isVerdictRow)
+                {
+                    normalizedRows.Add(row);
+                    continue;
+                }
+
+                var values = row.Values.ToArray();
+                for (var index = 0; index < row.Columns.Count && index < values.Length; index++)
+                {
+                    var column = row.Columns[index];
+                    if (string.Equals(column, "DatabaseQueried", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabasesQueried", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabasesVerified", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DbName", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabaseName", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "Database", StringComparison.OrdinalIgnoreCase))
+                    {
+                        values[index] = databaseName;
+                    }
+                }
+                normalizedRows.Add(new SqlScriptRow(row.Columns, values));
+            }
+            return normalizedRows;
+        }
+
+        private static SqlScriptRow CreateDatabaseExecutionFailureRow(string databaseName, string reason)
+        {
+            var finding = string.IsNullOrWhiteSpace(reason)
+                ? "Database evaluation failed"
+                : $"Database evaluation failed: {reason}";
+            return new SqlScriptRow(
+                new[] { "Result", "Score", "DatabaseQueried", "Finding" },
+                new[] { "Fail", "0", databaseName, finding });
+        }
+
         // Executes a (possibly multi-batch) SQL script and captures every returned row
         // keyed by its column name, so the audit verdict can be read from the script's
         // final SELECT (Result/Score/DatabaseQueried/Finding) rather than scraped from
         // console text. Only error text is returned as the log; row data is structured.
-        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteSqlCaptureAsync(SqlConnection conn, string txt)
+        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteSqlCaptureAsync(
+            SqlConnection conn,
+            string txt,
+            System.Threading.CancellationToken cancellationToken = default)
         {
             var rows = new System.Collections.Generic.List<SqlScriptRow>();
             var sb = new System.Text.StringBuilder();
@@ -1669,13 +2123,13 @@ namespace SQLAuditor.Lib
                     try
                     {
                         using var cmd = new SqlCommand(script, conn) { CommandTimeout = 120 };
-                        using var rdr = await cmd.ExecuteReaderAsync();
+                        using var rdr = await cmd.ExecuteReaderAsync(cancellationToken);
                         do
                         {
                             if (rdr.FieldCount == 0) continue;
                             var names = new System.Collections.Generic.List<string>(rdr.FieldCount);
                             for (int i = 0; i < rdr.FieldCount; i++) names.Add(rdr.GetName(i));
-                            while (await rdr.ReadAsync())
+                            while (await rdr.ReadAsync(cancellationToken))
                             {
                                 var vals = new System.Collections.Generic.List<string>(rdr.FieldCount);
                                 for (int i = 0; i < rdr.FieldCount; i++)
@@ -1685,13 +2139,21 @@ namespace SQLAuditor.Lib
                                 }
                                 rows.Add(new SqlScriptRow(names, vals));
                             }
-                        } while (await rdr.NextResultAsync());
+                        } while (await rdr.NextResultAsync(cancellationToken));
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
                         sb.AppendLine("SQL ERROR: " + ex.Message);
                     }
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {

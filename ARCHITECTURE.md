@@ -13,6 +13,7 @@ Primary outputs are written to the `results/` folder:
 - `checklist_results.json`
 - `historical_last_run.json`
 - `final_report.md`
+- `audit_report.xlsx`
 - `progress_stream.txt`
 - `ui_log.txt`
 
@@ -79,15 +80,22 @@ graph TD
   A["Start App"] --> B["Verify Access<br/>Build connection string from auth mode"]
   B --> C{"Connection valid?"}
   C -- "No" --> C1["Stay on Login<br/>Show failure status"]
-  C -- "Yes" --> D["Load checklist structure"]
+  C -- "Yes" --> C2["Discover accessible online<br/>user databases"]
+  C2 --> C3["Select databases<br/>or All Databases"]
+  C3 --> D["Load checklist structure"]
   D --> E["Load deterministic mapping"]
   E --> F["Classify selected items<br/>Script mapped vs AI items"]
 
   F --> G["Run Script Pipeline"]
   F --> H["Run AI Pipeline"]
 
-  G --> G1["Execute mapped SQL files"]
-  G1 --> G2["Derive outcome from script evidence"]
+  G --> G1{"Mapped script scope"}
+  G1 -- "SERVER" --> G2["Execute on master connection"]
+  G1 -- "DATABASE" --> G3["Open one connection per<br/>configured database"]
+  G3 --> G4["Execute reusable current-database SQL"]
+  G2 --> G5["Parse Result / Score /<br/>DatabaseQueried / Finding"]
+  G4 --> G5
+  G5 --> G6["Worst score and any Fail<br/>govern the item"]
 
   H --> H1{"SQL connection available?"}
   H1 -- "Yes" --> H2["Try AI-MCP evaluation"]
@@ -102,7 +110,7 @@ graph TD
 
   H5 -- "Reuse enabled and historical result exists" --> H9["Copy result from historical_last_run.json"]
 
-  G2 --> I["Merge all results"]
+  G6 --> I["Merge all results"]
   H4 --> I
   H8 --> I
   H9 --> I
@@ -116,8 +124,12 @@ graph TD
 
 1. Script technique
 - Used when checklist item has mapped script(s).
-- Executes SQL and captures textual evidence.
-- Outcome derived using evidence heuristics (`Pass`, `Fail`, `NeedsReview`).
+- `SERVER` scripts execute on the shared master connection. `DATABASE` scripts execute once per
+  configured user database, using `InitialCatalog`; selected names are never inserted into SQL.
+- Legacy database scripts that enumerate `sys.databases` receive a session-local filtered catalog
+  containing only the current target. Newly generated scripts query only current-database catalogs.
+- Captures the final structured `Result`, `Score`, `DatabaseQueried`, and `Finding` row. Across
+  database executions, the minimum score wins and any `Fail` makes the item fail.
 
 2. AI-MCP technique
 - Used for unmapped items when SQL connectivity is available.
@@ -130,11 +142,39 @@ graph TD
 - Generates manual verification steps (LLM first, static prompt fallback).
 - Operator provides PASS/FAIL or notes; result is persisted.
 
+## Script Generation
+
+- `ChecklistItemProcessor` asks the configured model to classify feasibility, script type, and
+  `SERVER` or `DATABASE` scope, then generate the read-only four-column contract.
+- `ScriptOutputValidator` applies the deterministic format gate; the C1-C7 review can return a
+  complete corrected script before save.
+- `ScriptGeneratorAgent` and `ScriptGenerationSkill` save the script and its scope in
+  `deterministic-script-mapping.json`.
+- A `DATABASE` script is generated for `DB_NAME()` only. Runtime database selection belongs to
+  `Auditor`, which keeps scripts reusable across different audit runs.
+
+## Scoring and Reports
+
+- A script's score is factual input from its final result row. Database fan-out does not rescore
+  it; `SqlScriptResultParser` selects the minimum returned score (0-3).
+- Category score is `sum(item scores) / (scored items * 3)`. Area score is the average of its
+  scored category percentages. Overall score is the weighted average of scored areas, with weights
+  renormalized when an area has no scored items.
+- Not Applicable items have no score and are excluded at item, category, area, and overall levels.
+- `checklist_results.json` is the persisted source for both reports. `SummaryReportGenerator`
+  writes `final_report.md`; `ExcelReportGenerator` uses the same `ScoreCalculator` and writes
+  `audit_report.xlsx` with Summary, Area Detail, Checklists, Risk Register, and Not Applicable
+  Items sheets.
+
 ## Main Modules and Responsibilities
 
 - `Backend/core/Auditor.cs`
   - Core orchestrator for checklist loading, pipeline execution, and result persistence.
-  - Normalizes SQL connection variants and coordinates Script/AI flows.
+  - Normalizes SQL connection variants, discovers user databases, routes scripts by scope, and
+    coordinates Script/AI flows.
+
+- `Backend/agents/modules/reporting/SummaryReportGenerator.cs` and `ExcelReportGenerator.cs`
+  - Share the score calculator and render Markdown and Excel from persisted checklist results.
 
 - `Backend/agents/modules/SqlServerMcpEvaluator.cs`
   - Collects SQL snapshot and performs model-based evaluation for AI-MCP.
@@ -162,6 +202,8 @@ graph TD
 
 - Checklist definition: `Backend/checklist/master-checklist.json`.
 - Deterministic mapping: `Backend/checklist/deterministic-script-mapping.json`.
+- Runtime database selection: in-memory only; WPF passes selected names to `Auditor`. It is not
+  written into scripts, mappings, result files, or provider configuration.
 - SQL script assets: `Backend/checklist/scripts/sql/`.
 - Prompt templates: `Backend/agents/prompts/`.
 - Runtime artifacts: `results/`.
