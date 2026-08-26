@@ -87,7 +87,9 @@ graph TD
   E --> F["Classify selected items<br/>Script mapped vs AI items"]
 
   F --> G["Run Script Pipeline"]
-  F --> H["Run AI Pipeline"]
+  F --> H0{"Can MCP decide this item?"}
+  H0 -- "Yes" --> H["MCP Stage<br/>concurrent workers"]
+  H0 -- "No (documentation / admin /<br/>no provider or SQL)" --> M["Manual Stage<br/>concurrent workers"]
 
   G --> G1{"Mapped script scope"}
   G1 -- "SERVER" --> G2["Execute on master connection"]
@@ -97,18 +99,17 @@ graph TD
   G4 --> G5
   G5 --> G6["Worst score and any Fail<br/>govern the item"]
 
-  H --> H1{"SQL connection available?"}
-  H1 -- "Yes" --> H2["Try AI-MCP evaluation"]
+  H --> H2["Evaluate against the<br/>per-run SQL snapshot"]
   H2 --> H3{"MCP feasible and parsed?"}
   H3 -- "Yes" --> H4["Store AI-MCP result"]
-  H3 -- "No" --> H5["Queue AI-Manual"]
-  H1 -- "No" --> H5
+  H3 -- "No" --> H5["Hand item to the manual queue<br/>and take the next item"]
+  H5 --> M
 
-  H5 --> H6["Generate manual instructions"]
+  M --> H6["Generate manual instructions"]
   H6 --> H7["Collect operator PASS or FAIL evidence"]
   H7 --> H8["Store AI-Manual result"]
 
-  H5 -- "Reuse enabled and historical result exists" --> H9["Copy result from historical_last_run.json"]
+  F -- "Reuse enabled and historical result exists" --> H9["Copy result from historical_last_run.json"]
 
   G6 --> I["Merge all results"]
   H4 --> I
@@ -133,14 +134,36 @@ graph TD
 
 2. AI-MCP technique
 - Used for unmapped items when SQL connectivity is available.
-- Builds SQL snapshot (server metadata + user DB summaries).
+- Reads the per-run SQL snapshot (server metadata + user DB summaries). The snapshot describes the
+  server rather than the checklist item, so it is collected once per run and shared by every item.
 - Sends prompt to model provider and parses structured response.
 - If response is feasible and parseable, uses AI-MCP result.
+- An item it cannot decide is handed to the manual stage; the worker immediately takes the next item.
 
 3. AI-Manual technique
 - Fallback when MCP is unavailable, infeasible, or when no SQL connection.
 - Generates manual verification steps (LLM first, static prompt fallback).
 - Operator provides PASS/FAIL or notes; result is persisted.
+
+## Evaluation Concurrency
+
+The script pipeline, the MCP stage and the manual stage all run at the same time, so no stage waits
+for another to finish:
+
+- MCP evaluation and manual-step generation are separate provider calls joined by an unbounded
+  queue. Deferring an item costs the MCP stage nothing, and manual guidance for already-deferred
+  items is written while later items are still being evaluated.
+- Documentation and admin checks never qualify for MCP, so they reach the manual stage immediately
+  instead of waiting behind MCP evaluations.
+- Each stage processes several items at once (`Auditor.MaxAiStageWorkers`). Every MCP worker owns
+  its SQL connection, because one connection cannot serve concurrent evaluations.
+- The manual stage runs single-threaded when the host collects operator input inline, so the
+  reviewer is still prompted for one item at a time.
+- The queue is closed only after every MCP worker stops producing, so no deferred item is lost and
+  no manual worker waits forever.
+
+Ordering is not part of the contract: each item still produces exactly one result, and scoring reads
+the merged results rather than their arrival order.
 
 ## Script Generation
 

@@ -104,6 +104,10 @@ namespace SQLAuditor.Lib
     public class Auditor
     {
         private const string RuntimeDatabasesTable = "#SqlAuditorDatabases";
+
+        // MCP evaluation and manual-step generation are both provider-bound, so each stage works
+        // on several checklist items at once rather than one at a time.
+        private const int MaxAiStageWorkers = 4;
         private static readonly Regex DeclaredScriptScopeRegex = new(
             @"\bScope\s*:\s*(SERVER|DATABASE)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -829,6 +833,7 @@ WHERE d.name = DB_NAME();";
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
+            _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
 
@@ -1162,37 +1167,33 @@ WHERE d.name = DB_NAME();";
                 };
             }
 
-            async Task<ChecklistResult?> EvaluateAiAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
+            // Deciding an item with MCP and writing its manual guidance are independent provider
+            // calls. Returning null defers the item to the manual stage instead of generating that
+            // guidance inline, so the next MCP evaluation can start immediately.
+            async Task<ChecklistResult?> TryEvaluateMcpAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? stageConn)
             {
-                if (_mcpEvaluator != null && !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it))
+                if (_mcpEvaluator == null || string.IsNullOrWhiteSpace(_connectionString)) return null;
+                if (IsDocumentationCheck(it) || IsAdminCheck(it)) return null;
+
+                try
                 {
-                    try
-                    {
-                        ChecklistResult? mcp = null;
-                        if (pipelineConn != null)
-                        {
-                            mcp = await _mcpEvaluator.EvaluateAsync(it, pipelineConn, cancellationToken);
-                        }
-                        else
-                        {
-                            mcp = await _mcpEvaluator.EvaluateAsync(it, _connectionString, cancellationToken);
-                        }
-
-                        if (mcp != null)
-                        {
-                            return mcp;
-                        }
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        LogDiagnostic($"SQL MCP evaluation error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
-                    }
+                    return stageConn != null
+                        ? await _mcpEvaluator.EvaluateAsync(it, stageConn, cancellationToken)
+                        : await _mcpEvaluator.EvaluateAsync(it, _connectionString, cancellationToken);
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    LogDiagnostic($"SQL MCP evaluation error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
+                    return null;
+                }
+            }
 
+            async Task<ChecklistResult?> EvaluateManualAsync(ChecklistItem it)
+            {
                 var manualStartingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, it.ScriptFile, "AI-Manual");
                 progress?.Report(manualStartingProgress);
 
@@ -1321,36 +1322,59 @@ WHERE d.name = DB_NAME();";
                 }
             }
 
-            async Task RunPipelineAsync(System.Collections.Generic.List<ChecklistItem> items, bool isScriptPipeline)
+            // Both AI stages are provider-bound, so each works on several items at once. Blocking
+            // manual review stays single-threaded: the operator is still asked about one item at a
+            // time, exactly as before.
+            var manualQueue = System.Threading.Channels.Channel.CreateUnbounded<ChecklistItem>();
+
+            bool CanTryMcp(ChecklistItem it) =>
+                _mcpEvaluator != null
+                && !string.IsNullOrWhiteSpace(_connectionString)
+                && !IsDocumentationCheck(it)
+                && !IsAdminCheck(it);
+
+            // Documentation and admin checks can never be decided by MCP, so they are handed over
+            // up front rather than queueing behind evaluations that cannot help them.
+            var mcpItems = new System.Collections.Generic.List<ChecklistItem>();
+            foreach (var it in aiItems)
+            {
+                if (CanTryMcp(it)) mcpItems.Add(it);
+                else manualQueue.Writer.TryWrite(it);
+            }
+
+            var mcpStageWidth = Math.Clamp(mcpItems.Count, 1, MaxAiStageWorkers);
+            var manualStageWidth = nonBlockingManualFallback ? Math.Clamp(aiItems.Count, 1, MaxAiStageWorkers) : 1;
+            var mcpQueue = new System.Collections.Concurrent.ConcurrentQueue<ChecklistItem>(mcpItems);
+
+            string StartingScriptFile(ChecklistItem it)
+            {
+                if (!IsDocumentationCheck(it)
+                    && mapping.TryGetValue(it.Id, out var mappedFiles)
+                    && mappedFiles != null
+                    && mappedFiles.Length > 0)
+                {
+                    return string.Join(';', mappedFiles);
+                }
+
+                return string.Empty;
+            }
+
+            async Task RunScriptPipelineAsync()
             {
                 Microsoft.Data.SqlClient.SqlConnection? pipelineConn = await EnsureUsableConnectionAsync(null);
 
                 try
                 {
-                    foreach (var it in items)
+                    foreach (var it in scriptItems)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
 
                         pipelineConn = await EnsureUsableConnectionAsync(pipelineConn);
-
-                        var startingScriptFile = string.Empty;
-                        if (!IsDocumentationCheck(it) && mapping.TryGetValue(it.Id, out var mappedFiles) && mappedFiles != null && mappedFiles.Length > 0)
-                        {
-                            startingScriptFile = string.Join(';', mappedFiles);
-                        }
-                        var canTryMcp = !string.IsNullOrWhiteSpace(_connectionString) && !IsDocumentationCheck(it) && !IsAdminCheck(it);
-                        var startingTechnique = isScriptPipeline
-                            ? "Script"
-                            : (canTryMcp ? "AI-MCP" : "AI-Manual");
-                        var startingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, startingScriptFile, startingTechnique);
-                        progress?.Report(startingProgress);
+                        progress?.Report(new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, StartingScriptFile(it), "Script"));
 
                         try
                         {
-                            ChecklistResult? result = isScriptPipeline
-                                ? await EvaluateScriptAsync(it, pipelineConn)
-                                : await EvaluateAiAsync(it, pipelineConn);
-
+                            var result = await EvaluateScriptAsync(it, pipelineConn);
                             if (result != null)
                             {
                                 results.Add(result);
@@ -1363,7 +1387,7 @@ WHERE d.name = DB_NAME();";
                         }
                         catch (Exception ex)
                         {
-                            var err = new ChecklistResult(it.Id, it.Description, it.Verification, isScriptPipeline ? "Fail" : "NeedsReview", "Error: " + ex.Message, it.ScriptFile, isScriptPipeline ? "Script" : "AI-Manual");
+                            var err = new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", "Error: " + ex.Message, it.ScriptFile, "Script");
                             results.Add(err);
                             progress?.Report(err);
                         }
@@ -1378,9 +1402,103 @@ WHERE d.name = DB_NAME();";
                 }
             }
 
+            async Task RunMcpStageWorkerAsync()
+            {
+                // Each worker owns its connection: the shared pipeline connection cannot be used
+                // by more than one evaluation at a time.
+                Microsoft.Data.SqlClient.SqlConnection? stageConn = null;
+
+                try
+                {
+                    while (mcpQueue.TryDequeue(out var it))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        ChecklistResult? result = null;
+                        try
+                        {
+                            stageConn = await EnsureUsableConnectionAsync(stageConn);
+                            progress?.Report(new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, StartingScriptFile(it), "AI-MCP"));
+                            result = await TryEvaluateMcpAsync(it, stageConn);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            LogDiagnostic($"MCP stage error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
+                        }
+
+                        if (result != null)
+                        {
+                            results.Add(result);
+                            progress?.Report(result);
+                        }
+                        else
+                        {
+                            // Hand the item over and take the next one; the manual stage is already
+                            // running and picks this up in parallel.
+                            await manualQueue.Writer.WriteAsync(it, cancellationToken);
+                        }
+                    }
+                }
+                finally
+                {
+                    if (stageConn != null)
+                    {
+                        try { await stageConn.DisposeAsync(); } catch { }
+                    }
+                }
+            }
+
+            async Task RunManualStageWorkerAsync()
+            {
+                await foreach (var it in manualQueue.Reader.ReadAllAsync(cancellationToken))
+                {
+                    try
+                    {
+                        var result = await EvaluateManualAsync(it);
+                        if (result != null)
+                        {
+                            results.Add(result);
+                            progress?.Report(result);
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        var err = new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", "Error: " + ex.Message, it.ScriptFile, "AI-Manual");
+                        results.Add(err);
+                        progress?.Report(err);
+                    }
+                }
+            }
+
+            // The queue is closed only once every MCP worker has stopped producing, so no deferred
+            // item is lost and no manual worker waits forever.
+            async Task RunMcpStageAsync()
+            {
+                try
+                {
+                    await Task.WhenAll(Enumerable.Range(0, mcpStageWidth).Select(_ => RunMcpStageWorkerAsync()).ToArray());
+                }
+                finally
+                {
+                    manualQueue.Writer.TryComplete();
+                }
+            }
+
+            Task RunManualStageAsync() =>
+                Task.WhenAll(Enumerable.Range(0, manualStageWidth).Select(_ => RunManualStageWorkerAsync()).ToArray());
+
             await Task.WhenAll(
-                RunPipelineAsync(scriptItems, true),
-                RunPipelineAsync(aiItems, false));
+                RunScriptPipelineAsync(),
+                RunMcpStageAsync(),
+                RunManualStageAsync());
             cancellationToken.ThrowIfCancellationRequested();
 
             // Back-fill report-oriented fields so the persisted JSON is always
@@ -1984,13 +2102,18 @@ WHERE d.name = DB_NAME();";
             return new ManualStepsGenerationResult(fallback, fallback, 0);
         }
 
+        private static readonly object DiagnosticLogLock = new();
+
         private static void LogDiagnostic(string message)
         {
             try
             {
                 var dir = Path.Combine(Directory.GetCurrentDirectory(), "results");
                 Directory.CreateDirectory(dir);
-                File.AppendAllText(Path.Combine(dir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n");
+                lock (DiagnosticLogLock)
+                {
+                    File.AppendAllText(Path.Combine(dir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n");
+                }
             }
             catch { }
         }

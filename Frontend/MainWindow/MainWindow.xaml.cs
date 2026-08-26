@@ -63,6 +63,8 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
         private int _manualIndex = -1;
+        // Checklist position per item id, so manual items generated in parallel stay in order.
+        private System.Collections.Generic.Dictionary<string, int>? _checklistOrder;
         private System.Collections.Generic.Dictionary<string, string>? _manualInstructions;
         private System.Collections.Generic.Dictionary<string, ManualEvaluationState>? _manualStateMap;
         private System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>? _evalItemMap;
@@ -499,6 +501,12 @@ namespace SQLAuditor.Wpf
             _manualIndex = -1;
             _evalItemMap = new System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>();
             _evalStatusMap = new System.Collections.Generic.Dictionary<string, (string Status, string Technique)>();
+            _checklistOrder = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (_loadedStructure != null)
+            {
+                var checklistPosition = 0;
+                foreach (var pair in _loadedStructure) _checklistOrder[pair.Item.Id] = checklistPosition++;
+            }
 
             var selectedLookup = new System.Collections.Generic.HashSet<string>(selected);
 
@@ -587,7 +595,7 @@ namespace SQLAuditor.Wpf
                         if (_manualQueue == null) _manualQueue = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
                         if (_manualInstructions == null) _manualInstructions = new System.Collections.Generic.Dictionary<string, string>();
                         if (_manualStateMap == null) _manualStateMap = new System.Collections.Generic.Dictionary<string, ManualEvaluationState>();
-                        if (!_manualQueue.Any(m => m.Id == item.Id)) _manualQueue.Add(item);
+                        InsertManualQueueItem(item);
                         _manualInstructions[item.Id] = instructions ?? string.Empty;
 
                         var state = EnsureManualState(item.Id);
@@ -1171,6 +1179,33 @@ namespace SQLAuditor.Wpf
 
             return _manualQueue[_manualIndex];
         }
+
+        // Manual guidance now arrives in completion order, but the reviewer steps through the queue
+        // by index, so each item is placed at its checklist position instead of being appended.
+        private void InsertManualQueueItem(SQLAuditor.Lib.ChecklistItem item)
+        {
+            _manualQueue ??= new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+            if (_manualQueue.Any(m => string.Equals(m.Id, item.Id, StringComparison.OrdinalIgnoreCase))) return;
+
+            var order = ChecklistOrderOf(item.Id);
+            var position = _manualQueue.Count;
+            for (var i = 0; i < _manualQueue.Count; i++)
+            {
+                if (ChecklistOrderOf(_manualQueue[i].Id) > order)
+                {
+                    position = i;
+                    break;
+                }
+            }
+
+            _manualQueue.Insert(position, item);
+
+            // Keep the reviewer on the item they are currently looking at.
+            if (_manualIndex >= position) _manualIndex++;
+        }
+
+        private int ChecklistOrderOf(string id) =>
+            _checklistOrder != null && _checklistOrder.TryGetValue(id, out var index) ? index : int.MaxValue;
 
         private ManualEvaluationState EnsureManualState(string itemId)
         {

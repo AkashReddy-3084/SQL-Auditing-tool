@@ -314,14 +314,19 @@ namespace SQLAuditor
             var announced = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var progress = new Progress<SQLAuditor.Lib.ChecklistResult>(r =>
             {
-                if (string.Equals(r.Outcome, "Evaluating", StringComparison.OrdinalIgnoreCase))
+                // Console has no synchronization context, so these callbacks arrive on pool threads
+                // from every evaluation stage at once.
+                lock (announced)
                 {
-                    if (announced.Add(r.Id))
-                        Console.WriteLine($"  [{r.Id}] evaluating... ({r.Technique}; manual items may take a moment)");
-                }
-                else
-                {
-                    Console.WriteLine($"  [{r.Id}] {r.Outcome,-11} ({r.Technique}) - {r.Description}");
+                    if (string.Equals(r.Outcome, "Evaluating", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (announced.Add(r.Id))
+                            Console.WriteLine($"  [{r.Id}] evaluating... ({r.Technique}; manual items may take a moment)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  [{r.Id}] {r.Outcome,-11} ({r.Technique}) - {r.Description}");
+                    }
                 }
             });
 
