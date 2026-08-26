@@ -33,6 +33,14 @@ public static class NotApplicableEvidence
     }
 }
 
+public static class SkippedEvaluation
+{
+    public const string Outcome = "Skipped";
+
+    public static bool IsSkippedOutcome(string? outcome) =>
+        string.Equals(outcome?.Trim(), Outcome, StringComparison.OrdinalIgnoreCase);
+}
+
 /// <summary>
 /// Back-fills the report-oriented fields (Score, Severity, Finding, etc.) on a
 /// <see cref="ChecklistResult"/> with deterministic defaults so that the
@@ -50,9 +58,27 @@ public static class ChecklistResultEnricher
     {
         if (result == null) return result!;
 
+        var isSkipped = SkippedEvaluation.IsSkippedOutcome(result.Outcome);
         var isNotApplicable = result.NotApplicable == true
             || NotApplicableEvidence.IsNotApplicableOutcome(result.Outcome)
             || NotApplicableEvidence.IsMarked(result.Evidence);
+
+        if (isSkipped)
+        {
+            return result with
+            {
+                Outcome = SkippedEvaluation.Outcome,
+                Score = null,
+                Severity = "Informational",
+                Finding = string.IsNullOrWhiteSpace(result.Finding)
+                    ? $"Manual evaluation deferred: {result.Description}."
+                    : result.Finding,
+                Recommendation = null,
+                Effort = null,
+                RiskImpact = null,
+                NotApplicable = null,
+            };
+        }
 
         var outcome = isNotApplicable ? NotApplicableEvidence.Outcome : result.Outcome;
 

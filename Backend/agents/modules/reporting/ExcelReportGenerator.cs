@@ -219,11 +219,12 @@ public sealed class ExcelReportGenerator
         var failed = CountOutcome(items, "fail");
         var needs = CountOutcome(items, "needsreview") + CountOutcome(items, "needs review");
         var notApplicable = items.Count(i => i.IsNotApplicable);
-        var evaluated = items.Count - notApplicable;
+        var skipped = items.Count(i => i.IsSkipped);
+        var evaluated = items.Count - notApplicable - skipped;
 
         WriteKpiCard(ws, 4, 1, 3, "Overall Score", Pct(overall), NeutralStatus());
         WriteKpiCard(ws, 4, 4, 3, "Overall Risk Rating", overallRating.Label, StatusFor(overallRating.Label));
-        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  Not Applicable {notApplicable} (excluded)";
+        var kpiSubText = $"Passed {passed}  /  Failed {failed}  /  Needs Review {needs}  /  Skipped {skipped} (excluded)  /  Not Applicable {notApplicable} (excluded)";
         WriteKpiCard(ws, 4, 7, 3, "Total Checks Evaluated",
             $"{evaluated}", NeutralStatus(),
             subText: kpiSubText);
@@ -275,7 +276,7 @@ public sealed class ExcelReportGenerator
 
         // ---- Coverage by technique -----------------------------------------
         row = sumRow + 3;
-        row = SectionLabel(ws, row, 1, 6, "Coverage by Technique");
+        row = SectionLabel(ws, row, 1, 8, "Coverage by Technique");
         var covHeaderRow = row;
         var techniques = new[] { "Script", "AI-MCP", "AI-Manual", "Manual" };
         var covRows = new List<string[]>();
@@ -292,15 +293,16 @@ public sealed class ExcelReportGenerator
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right, XLAlignmentHorizontalValues.Right,
             XLAlignmentHorizontalValues.Right,
+            XLAlignmentHorizontalValues.Right,
         };
         var covLast = WriteTable(ws, covHeaderRow, 1,
-            new[] { "Technique", "Total Executed", "Passed", "Failed", "Needs Review", "Not Applicable (excluded)", "Pass Rate (%)" },
+            new[] { "Technique", "Total Selected", "Passed", "Failed", "Needs Review", "Skipped (excluded)", "Not Applicable (excluded)", "Pass Rate (%)" },
             covRows,
             covAligns,
-            wrap: new[] { false, false, false, false, false, false, false },
+            wrap: new[] { false, false, false, false, false, false, false, false },
             statusColumns: Array.Empty<int>());
         // Emphasize the trailing Total row.
-        ws.Range(covLast, 1, covLast, 7).Style.Font.Bold = true;
+        ws.Range(covLast, 1, covLast, 8).Style.Font.Bold = true;
 
         Finalize(ws, freezeRows: 3, autoFilterRange: null);
         EnsureMergedTextFits(ws, kpiSubText, firstCol: 7, lastCol: 9);
@@ -310,11 +312,12 @@ public sealed class ExcelReportGenerator
     {
         var total = techItems.Count;
         var na = techItems.Count(i => i.IsNotApplicable);
+        var skipped = techItems.Count(i => i.IsSkipped);
         var p = CountOutcome(techItems, "pass");
         var f = CountOutcome(techItems, "fail");
         var nr = CountOutcome(techItems, "needsreview") + CountOutcome(techItems, "needs review");
-        // N/A items were never assessable, so they stay out of the pass-rate denominator.
-        var assessed = total - na;
+        // N/A and skipped items were not assessed, so they stay out of the pass-rate denominator.
+        var assessed = total - na - skipped;
         var rate = assessed == 0 ? (double?)null : (double)p / assessed * 100.0;
         return new[]
         {
@@ -323,6 +326,7 @@ public sealed class ExcelReportGenerator
             p.ToString(CultureInfo.InvariantCulture),
             f.ToString(CultureInfo.InvariantCulture),
             nr.ToString(CultureInfo.InvariantCulture),
+            skipped.ToString(CultureInfo.InvariantCulture),
             na.ToString(CultureInfo.InvariantCulture),
             Pct(rate),
         };

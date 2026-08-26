@@ -388,7 +388,13 @@
                                 </Border>
 
                                 <Border Grid.Row="1" Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,16,0,0">
-                                    <Button x:Name="GenSummaryBtn" Content="Generate Summary / Report" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="GenSummaryBtn_Click" />
+                                    <StackPanel>
+                                        <Button x:Name="GenSummaryBtn" Content="Generate Summary / Report" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="GenSummaryBtn_Click" Margin="0,0,0,10" />
+                                        <Button x:Name="ImportManualCsvBtn" Content="Import Filled Manual CSV" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="ImportManualCsvBtn_Click" Margin="0,0,0,10"
+                                            ToolTip="Apply Pass/Fail decisions and evidence from a previously exported manual-check CSV to this completed evaluation." />
+                                        <Button x:Name="ExportManualAndGenerateBtn" Content="Export Manual CSV + Generate" Style="{StaticResource ModernButton}" HorizontalAlignment="Stretch" Click="ExportManualAndGenerateBtn_Click"
+                                                ToolTip="Export all manual checks for offline completion, mark unanswered manual checks as Skipped, and generate the reports without scoring them." />
+                                    </StackPanel>
                                 </Border>
                             </Grid>
                         </Grid>

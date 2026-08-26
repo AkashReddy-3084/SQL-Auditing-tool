@@ -79,6 +79,17 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
 5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklist/scripts/`.
 6. **Summary** — generates the scored report and lets you export it.
+7. **Export Manual CSV + Generate** — after evaluation finishes, exports every selected manual check and its verification guidance to CSV. Unanswered manual checks are recorded as **Skipped**, excluded from all scores, and retained in the generated Markdown and Excel reports for audit transparency. Submitted and previously copied manual decisions are preserved.
+
+### Reuse a filled manual-check CSV
+
+1. In the exported CSV, enter `Pass` or `Fail` in **Decision** and the observation supporting that decision in **Evidence**. Keep the header row and **Checklist ID** values unchanged.
+2. Start the next evaluation with the checklist IDs represented in the CSV and wait for the automated evaluation to finish.
+3. On the **Evaluate** tab, select **Import Filled Manual CSV** and choose the completed file.
+4. The importer applies valid rows only to pending manual checks in the current run. Blank decisions or evidence, invalid decisions, duplicate IDs, IDs not selected in the run, non-manual checks, and checks already completed in the run are reported and left unchanged.
+5. Resolve any remaining pending rows, then select **Generate Summary / Report**.
+
+The accepted decision values are `Pass`, `Passed`, `P`, `Fail`, `Failed`, and `F` (case-insensitive). The import can also be performed in the same run after the CSV has been completed externally.
 
 ## Command-line interface (CLI)
 

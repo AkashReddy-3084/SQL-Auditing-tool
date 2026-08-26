@@ -44,6 +44,32 @@ namespace SQLAuditor.Wpf
             public string? EnrichedKey { get; set; }
         }
 
+        private sealed class ManualCheckExportRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Area { get; init; } = string.Empty;
+            public string Description { get; init; } = string.Empty;
+            public string Verification { get; init; } = string.Empty;
+            public string ManualSteps { get; init; } = string.Empty;
+            public string Status { get; init; } = string.Empty;
+            public string Decision { get; init; } = string.Empty;
+            public string Evidence { get; init; } = string.Empty;
+        }
+
+        private sealed class ManualCheckImportRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Decision { get; init; } = string.Empty;
+            public string Evidence { get; init; } = string.Empty;
+            public string ManualSteps { get; init; } = string.Empty;
+        }
+
+        private sealed class ManualCheckImportFile
+        {
+            public System.Collections.Generic.List<ManualCheckImportRow> Rows { get; } = new();
+            public System.Collections.Generic.List<string> Issues { get; } = new();
+        }
+
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
         private long _progressStreamPos = 0;
         private bool _isVerified = false;
@@ -891,63 +917,313 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void MarkPendingManualAsFailed()
+        private System.Collections.Generic.List<ManualCheckExportRow> GetManualChecksForExport()
         {
-            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
-            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
-            if (System.IO.File.Exists(path))
+            var rows = new System.Collections.Generic.List<ManualCheckExportRow>();
+            if (_evalItemMap == null || _evalStatusMap == null) return rows;
+
+            var persisted = LoadSummaryResultsFromDisk()
+                .GroupBy(result => result.Id, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var pair in _evalItemMap.OrderBy(entry => entry.Value.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
             {
-                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+                if (!_evalStatusMap.TryGetValue(pair.Key, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique))
+                {
+                    continue;
+                }
+
+                ManualEvaluationState? state = null;
+                _manualStateMap?.TryGetValue(pair.Key, out state);
+                persisted.TryGetValue(pair.Key, out var persistedResult);
+
+                var instructions = state?.Instructions ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(instructions)
+                    && _manualInstructions != null
+                    && _manualInstructions.TryGetValue(pair.Key, out var generatedInstructions))
+                {
+                    instructions = generatedInstructions;
+                }
+
+                rows.Add(new ManualCheckExportRow
+                {
+                    Id = pair.Value.Item.Id,
+                    Area = pair.Value.Area,
+                    Description = pair.Value.Item.Description,
+                    Verification = pair.Value.Item.Verification,
+                    ManualSteps = instructions,
+                    Status = statusEntry.Status,
+                    Decision = state?.SelectedOutcome
+                        ?? (persistedResult != null && HistoricalManualResultsStore.IsCompletedOutcome(persistedResult.Outcome)
+                            ? persistedResult.Outcome
+                            : string.Empty),
+                    Evidence = state?.Remarks ?? persistedResult?.Evidence ?? string.Empty,
+                });
             }
 
-            var pendingIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (_evalStatusMap != null)
+            return rows;
+        }
+
+        private System.Collections.Generic.HashSet<string> GetUnresolvedManualCheckIds()
+        {
+            var unresolved = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_evalItemMap == null || _evalStatusMap == null) return unresolved;
+
+            foreach (var pair in _evalItemMap)
             {
-                foreach (var kv in _evalStatusMap)
+                if (!_evalStatusMap.TryGetValue(pair.Key, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
+                    || _copiedManualIds.Contains(pair.Key))
                 {
-                    if (string.Equals(kv.Value.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
-                        && (string.Equals(kv.Value.Status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(kv.Value.Status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                }
+
+                if (_manualStateMap != null
+                    && _manualStateMap.TryGetValue(pair.Key, out var state)
+                    && state.IsSubmitted)
+                {
+                    continue;
+                }
+
+                unresolved.Add(pair.Key);
+            }
+
+            return unresolved;
+        }
+
+        private static void WriteManualChecksCsv(string path, System.Collections.Generic.IEnumerable<ManualCheckExportRow> rows)
+        {
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine(string.Join(",", new[]
+            {
+                "Checklist ID", "Area", "Description", "Verification", "Manual Steps",
+                "Current Status", "Decision", "Evidence",
+            }.Select(ToCsvField)));
+
+            foreach (var row in rows)
+            {
+                csv.AppendLine(string.Join(",", new[]
+                {
+                    row.Id, row.Area, row.Description, row.Verification, row.ManualSteps,
+                    row.Status, row.Decision, row.Evidence,
+                }.Select(ToCsvField)));
+            }
+
+            System.IO.File.WriteAllText(path, csv.ToString(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        }
+
+        private static string ToCsvField(string? value) =>
+            $"\"{(value ?? string.Empty).Replace("\"", "\"\"")}\"";
+
+        private static ManualCheckImportFile ReadManualChecksCsv(string path)
+        {
+            var result = new ManualCheckImportFile();
+            using var parser = new Microsoft.VisualBasic.FileIO.TextFieldParser(path, System.Text.Encoding.UTF8)
+            {
+                TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited,
+                HasFieldsEnclosedInQuotes = true,
+                TrimWhiteSpace = false,
+            };
+            parser.SetDelimiters(",");
+
+            var headers = parser.ReadFields();
+            if (headers == null || headers.Length == 0)
+                throw new InvalidDataException("The CSV is empty or has no header row.");
+
+            var headerIndexes = headers
+                .Select((header, index) => new { Header = (header ?? string.Empty).Trim().TrimStart('\uFEFF'), Index = index })
+                .GroupBy(entry => entry.Header, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First().Index, StringComparer.OrdinalIgnoreCase);
+
+            var requiredHeaders = new[] { "Checklist ID", "Decision", "Evidence" };
+            var missingHeaders = requiredHeaders.Where(header => !headerIndexes.ContainsKey(header)).ToArray();
+            if (missingHeaders.Length > 0)
+                throw new InvalidDataException("Missing required CSV column(s): " + string.Join(", ", missingHeaders));
+
+            var seenIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (!parser.EndOfData)
+            {
+                var lineNumber = parser.LineNumber;
+                string[]? fields;
+                try
+                {
+                    fields = parser.ReadFields();
+                }
+                catch (Microsoft.VisualBasic.FileIO.MalformedLineException ex)
+                {
+                    result.Issues.Add($"Line {lineNumber}: malformed CSV ({ex.Message}).");
+                    continue;
+                }
+
+                if (fields == null || fields.All(string.IsNullOrWhiteSpace)) continue;
+
+                string Field(string header)
+                {
+                    if (!headerIndexes.TryGetValue(header, out var index) || index >= fields.Length) return string.Empty;
+                    return fields[index]?.Trim() ?? string.Empty;
+                }
+
+                var id = Field("Checklist ID");
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    result.Issues.Add($"Line {lineNumber}: Checklist ID is empty.");
+                    continue;
+                }
+
+                if (!seenIds.Add(id))
+                {
+                    result.Issues.Add($"Line {lineNumber}: duplicate Checklist ID '{id}'.");
+                    continue;
+                }
+
+                var decision = Field("Decision").ToLowerInvariant() switch
+                {
+                    "pass" or "passed" or "p" => "Pass",
+                    "fail" or "failed" or "f" => "Fail",
+                    "" => string.Empty,
+                    _ => "Invalid",
+                };
+                if (decision.Length == 0)
+                {
+                    result.Issues.Add($"{id}: Decision is empty; enter Pass or Fail.");
+                    continue;
+                }
+                if (decision == "Invalid")
+                {
+                    result.Issues.Add($"{id}: Decision must be Pass or Fail.");
+                    continue;
+                }
+
+                var evidence = Field("Evidence");
+                if (string.IsNullOrWhiteSpace(evidence))
+                {
+                    result.Issues.Add($"{id}: Evidence is empty.");
+                    continue;
+                }
+
+                result.Rows.Add(new ManualCheckImportRow
+                {
+                    Id = id,
+                    Decision = decision,
+                    Evidence = evidence,
+                    ManualSteps = Field("Manual Steps"),
+                });
+            }
+
+            return result;
+        }
+
+        private async Task<(int Applied, int Ignored)> ApplyImportedManualChecksAsync(
+            System.Collections.Generic.IEnumerable<ManualCheckImportRow> importedRows)
+        {
+            if (_evalItemMap == null || _evalStatusMap == null) return (0, importedRows.Count());
+
+            var appliedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ignored = 0;
+            foreach (var imported in importedRows)
+            {
+                if (!_evalItemMap.TryGetValue(imported.Id, out var pair)
+                    || !_evalStatusMap.TryGetValue(imported.Id, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
+                    || _copiedManualIds.Contains(imported.Id))
+                {
+                    ignored++;
+                    continue;
+                }
+
+                var state = EnsureManualState(imported.Id);
+                if (state.IsSubmitted)
+                {
+                    ignored++;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(state.Instructions) && !string.IsNullOrWhiteSpace(imported.ManualSteps))
+                    state.Instructions = imported.ManualSteps;
+                state.SelectedOutcome = imported.Decision;
+                state.Remarks = imported.Evidence;
+                state.IsSubmitted = true;
+                state.EnrichedResult = null;
+                state.EnrichedKey = null;
+
+                await PersistManualResultAsync(pair.Item, state);
+                _evalStatusMap[imported.Id] = (
+                    string.Equals(imported.Decision, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed",
+                    "AI-Manual");
+                appliedIds.Add(imported.Id);
+            }
+
+            _manualQueue?.RemoveAll(item => appliedIds.Contains(item.Id));
+            if (_manualQueue == null || _manualQueue.Count == 0)
+                _manualIndex = -1;
+            else if (_manualIndex >= _manualQueue.Count)
+                _manualIndex = _manualQueue.Count - 1;
+
+            ShowManualAtIndex();
+            RenderEvaluationTree();
+            return (appliedIds.Count, ignored);
+        }
+
+        private int MarkPendingManualAsSkipped(
+            System.Collections.Generic.IReadOnlyCollection<string> pendingIds,
+            string csvPath)
+        {
+            if (pendingIds.Count == 0) return 0;
+            if (_evalItemMap == null) return 0;
+
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            var exportedFileName = System.IO.Path.GetFileName(csvPath);
+            var skippedCount = 0;
+
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
+            {
+                var list = System.IO.File.Exists(path)
+                    ? JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path))
+                        ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>()
+                    : new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+
+                foreach (var id in pendingIds)
+                {
+                    if (!_evalItemMap.TryGetValue(id, out var pair)) continue;
+                    var item = pair.Item;
+                    var evidence = $"Manual evaluation was skipped for this report. Verification steps were exported to {exportedFileName} for offline completion.";
+                    var skippedResult = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(
+                        new SQLAuditor.Lib.ChecklistResult(
+                            item.Id,
+                            item.Description,
+                            item.Verification,
+                            SQLAuditor.Lib.SkippedEvaluation.Outcome,
+                            evidence,
+                            item.ScriptFile,
+                            "AI-Manual"));
+                    var index = list.FindIndex(result => string.Equals(result.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+                    if (index >= 0) list[index] = skippedResult;
+                    else list.Add(skippedResult);
+                    skippedCount++;
+
+                    if (_evalStatusMap != null)
                     {
-                        pendingIds.Add(kv.Key);
+                        _evalStatusMap[item.Id] = (SQLAuditor.Lib.SkippedEvaluation.Outcome, "AI-Manual");
                     }
                 }
+
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+                System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
             }
 
-            if (_manualQueue != null)
+            _manualQueue?.RemoveAll(item => pendingIds.Contains(item.Id));
+            if (_manualQueue == null || _manualQueue.Count == 0)
             {
-                foreach (var it in _manualQueue)
-                {
-                    pendingIds.Add(it.Id);
-                }
+                _manualIndex = -1;
             }
-
-            foreach (var id in pendingIds)
+            else if (_manualIndex >= _manualQueue.Count)
             {
-                if (_evalItemMap == null || !_evalItemMap.TryGetValue(id, out var pair)) continue;
-                var item = pair.Item;
-                var failEvidence = "Marked as Fail because manual evaluation was skipped by the operator.";
-                var failResult = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, "Fail", failEvidence, item.ScriptFile, "AI-Manual");
-                failResult = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(failResult);
-                var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
-                if (idx >= 0) list[idx] = failResult;
-                else list.Add(failResult);
-
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = ("Failed", "AI-Manual");
-                }
+                _manualIndex = _manualQueue.Count - 1;
             }
-
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
-
-            if (_manualQueue != null) _manualQueue.Clear();
-            _manualIndex = -1;
-            ManualTitle.Text = "Manual steps";
-            ManualStepsText.Text = string.Empty;
-            ManualOutputBox.Text = string.Empty;
+            ShowManualAtIndex();
             RenderEvaluationTree();
+            return skippedCount;
         }
 
         private void UpdateSummaryView(System.Collections.Generic.IReadOnlyCollection<ChecklistResult> results)
@@ -957,6 +1233,7 @@ namespace SQLAuditor.Wpf
             var passed = resultList.Count(r => string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase));
             var failed = resultList.Count(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
             var review = resultList.Count(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase));
+            var skipped = resultList.Count(r => SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(r.Outcome));
             var script = resultList.Count(r => string.Equals(r.Technique, "Script", StringComparison.OrdinalIgnoreCase));
             var mcp = resultList.Count(r => string.Equals(r.Technique, "AI-MCP", StringComparison.OrdinalIgnoreCase));
             var manual = resultList.Count(r => string.Equals(r.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase));
@@ -985,7 +1262,8 @@ namespace SQLAuditor.Wpf
                 {
                     new SummaryMetricItem { Label = "Passed", Value = passed, Total = Math.Max(total, 1), Detail = "Items marked Pass", BarBrush = System.Windows.Media.Brushes.ForestGreen },
                     new SummaryMetricItem { Label = "Failed", Value = failed, Total = Math.Max(total, 1), Detail = "Items marked Fail", BarBrush = System.Windows.Media.Brushes.IndianRed },
-                    new SummaryMetricItem { Label = "Needs Review", Value = review, Total = Math.Max(total, 1), Detail = "Items requiring follow-up", BarBrush = System.Windows.Media.Brushes.Goldenrod }
+                    new SummaryMetricItem { Label = "Needs Review", Value = review, Total = Math.Max(total, 1), Detail = "Items requiring follow-up", BarBrush = System.Windows.Media.Brushes.Goldenrod },
+                    new SummaryMetricItem { Label = "Skipped", Value = skipped, Total = Math.Max(total, 1), Detail = "Exported and excluded from scoring", BarBrush = System.Windows.Media.Brushes.SlateGray }
                 };
             }
 
@@ -1006,6 +1284,7 @@ namespace SQLAuditor.Wpf
             if (string.Equals(outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return "Evaluating";
             if (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Passed", StringComparison.OrdinalIgnoreCase)) return "Passed";
             if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase) && string.Equals(outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) return "Pending Manual Evaluation";
+            if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(outcome)) return SQLAuditor.Lib.SkippedEvaluation.Outcome;
             if (SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(outcome)) return "Not Applicable";
             if (string.Equals(outcome, "Not Started", StringComparison.OrdinalIgnoreCase)) return "Not Started";
             return "Failed";
@@ -1017,6 +1296,7 @@ namespace SQLAuditor.Wpf
             if (string.Equals(status, "Evaluating", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DarkOrange;
             if (string.Equals(status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DodgerBlue;
             if (string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.Goldenrod;
+            if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)) return System.Windows.Media.Brushes.SlateGray;
             if (string.Equals(status, "Not Started", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DimGray;
             if (string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.SlateGray;
             return System.Windows.Media.Brushes.IndianRed;
@@ -1433,6 +1713,11 @@ namespace SQLAuditor.Wpf
 
                 var technique = statusEntry.Technique;
                 var status = statusEntry.Status;
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status))
+                {
+                    continue;
+                }
+
                 if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
                     && !_copiedManualIds.Contains(item.Id))
                 {
@@ -2237,6 +2522,139 @@ namespace SQLAuditor.Wpf
             {
                 Log("Generate summary error: " + ex.Message);
                 MessageBox.Show("The summary could not be generated:\n\n" + ex.Message, "Generate Summary failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void ExportManualAndGenerateBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isEvaluating)
+                {
+                    MessageBox.Show("Evaluation is still running. Wait for completion so every manual check and its guidance can be exported.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var resultsPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                if (!System.IO.File.Exists(resultsPath))
+                {
+                    MessageBox.Show("No completed evaluation results were found. Run the evaluation first.", "No evaluation results", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var manualChecks = GetManualChecksForExport();
+                if (manualChecks.Count == 0)
+                {
+                    MessageBox.Show("The current evaluation does not contain any manual checks to export.", "No manual checks", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                var pendingIds = GetUnresolvedManualCheckIds();
+                var confirmation = MessageBox.Show(
+                    $"Export {manualChecks.Count} manual check(s) to CSV and generate the reports?\n\n"
+                    + $"{pendingIds.Count} unanswered manual check(s) will be marked Skipped and excluded from all scores. "
+                    + "Submitted and previously copied manual decisions will be preserved.",
+                    "Export manual checks and generate",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+                if (confirmation != MessageBoxResult.Yes) return;
+
+                var dialog = new SaveFileDialog
+                {
+                    Title = "Export Manual Checks",
+                    FileName = $"manual_checks_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                    DefaultExt = ".csv",
+                    Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                    InitialDirectory = AuditOutputPaths.CurrentRunDirectory,
+                    AddExtension = true,
+                    OverwritePrompt = true,
+                };
+                if (dialog.ShowDialog(this) != true) return;
+
+                WriteManualChecksCsv(dialog.FileName, manualChecks);
+                var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
+                RegenerateReportFromPersisted();
+
+                var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
+                UpdateSummaryView(results);
+                SetTabIndex(3);
+                UpdateStageIndicators();
+
+                Log($"Exported {manualChecks.Count} manual check(s) to {dialog.FileName}; {skippedCount} unanswered check(s) were skipped.");
+                MessageBox.Show(
+                    $"Manual checks exported to:\n{dialog.FileName}\n\n"
+                    + $"{skippedCount} unanswered manual check(s) were excluded from scoring. Reports were generated in:\n{AuditOutputPaths.CurrentRunDirectory}",
+                    "Reports generated",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                Log("Manual CSV export failed: " + ex.Message);
+                MessageBox.Show("The manual checks could not be exported or the reports could not be generated:\n\n" + ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void ImportManualCsvBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_isEvaluating)
+            {
+                MessageBox.Show("Evaluation is still running. Wait for completion before importing manual decisions.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (_evalItemMap == null || _evalStatusMap == null
+                || !System.IO.File.Exists(AuditOutputPaths.GetCurrentFilePath("checklist_results.json")))
+            {
+                MessageBox.Show("Start and complete the new evaluation before importing the filled CSV.", "No completed evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var dialog = new OpenFileDialog
+            {
+                Title = "Import Filled Manual Checks",
+                DefaultExt = ".csv",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false,
+            };
+            if (dialog.ShowDialog(this) != true) return;
+
+            ImportManualCsvBtn.IsEnabled = false;
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            try
+            {
+                var importFile = ReadManualChecksCsv(dialog.FileName);
+                var (applied, ignored) = await ApplyImportedManualChecksAsync(importFile.Rows);
+
+                var issuePreview = string.Join("\n", importFile.Issues.Take(8));
+                var moreIssues = importFile.Issues.Count > 8
+                    ? $"\n...and {importFile.Issues.Count - 8} more row issue(s)."
+                    : string.Empty;
+                var details = string.IsNullOrWhiteSpace(issuePreview)
+                    ? string.Empty
+                    : "\n\nRows not imported:\n" + issuePreview + moreIssues;
+
+                Log($"Imported {applied} manual decision(s) from {dialog.FileName}; ignored {ignored} row(s), {importFile.Issues.Count} row issue(s).");
+                MessageBox.Show(
+                    $"Imported {applied} manual decision(s).\n"
+                    + $"Ignored {ignored} row(s) that were not selected manual checks or were already completed.\n"
+                    + $"Rows needing correction: {importFile.Issues.Count}."
+                    + details
+                    + "\n\nWhen all required rows are resolved, click Generate Summary / Report.",
+                    "Manual CSV imported",
+                    MessageBoxButton.OK,
+                    applied > 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                Log("Manual CSV import failed: " + ex.Message);
+                MessageBox.Show("The manual CSV could not be imported:\n\n" + ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                System.Windows.Input.Mouse.OverrideCursor = null;
+                ImportManualCsvBtn.IsEnabled = true;
             }
         }
     }
