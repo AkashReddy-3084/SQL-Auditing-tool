@@ -9,8 +9,8 @@ High-level architecture and flow documentation: see `ARCHITECTURE.md`.
 | Requirement | Version | Notes |
 | --- | --- | --- |
 | Windows | 10 or later | The UI is WPF; it does not run on Linux or macOS |
-| .NET SDK | 10.0 or later | Projects target `net10.0`; verified on SDK 10.0.302 |
-| .NET Desktop Runtime | 10.0 or later | Ships with the SDK |
+| .NET SDK | 8.0 or later | Projects target `net8.0`; the WPF app targets `net8.0-windows` |
+| .NET Desktop Runtime | 8.0 or later | Ships with the SDK |
 | SQL Server | 2016 or later | Local or remote; SQL Server Express is fine |
 | Git | any recent version | To clone the repository |
 
@@ -95,12 +95,12 @@ spirit.
 dotnet build Backend/core/SQLAuditor.csproj
 ```
 
-This produces `Backend/core/bin/Debug/net10.0/SQLAuditor.exe`.
+This produces `Backend/core/bin/Debug/net8.0/SQLAuditor.exe`.
 
 ### Run an evaluation
 
 ```powershell
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate [options]
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate [options]
 ```
 
 Any option not supplied is prompted for interactively (SQL Server, then login details, then
@@ -129,37 +129,38 @@ Examples:
 
 ```powershell
 # Fully interactive (prompts for the manual-results source, server, auth, and items)
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate
 
 # Non-interactive with flags
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results fresh
 
 # Reuse the manual results recorded by the previous audit
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results last-runs
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results last-runs
 
 # Copilot CLI mode: surface Needs Review items for Copilot to review
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost --manual-results fresh
 
 # Render the reports once the evaluation is complete
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe generate_report
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe generate_report
 
 # List the checklist structure without running an evaluation
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe --dump-checklist
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe --dump-checklist
 ```
 
 ### Manual review and output
 
 Every run starts by asking how manual checklist items should be handled: **use the last runs**
-(copy the results recorded in `results/historical_last_run.json` and skip their manual review) or
+(copy the results recorded in the latest run's `historical_last_run.json` and skip their manual review) or
 **fresh evaluation**. Script-based controls are decided automatically. Controls needing human
 judgement come back as **Needs Review**; in an interactive terminal (or with `--interactive`) the
 CLI shows the verification guidance and prompts you to mark each **Pass**, **Fail**, or **Skip**
-(with optional notes). Results are written to `results/checklist_results.json`.
+(with optional notes). Results are written to the server-specific run directory described in
+[Output](#output).
 
 The report is **not** generated automatically. The CLI asks *"Evaluation completed. Do you want to
 generate the summary/report?"*; answering yes (or running `generate_report` later) refreshes
-`results/historical_last_run.json` with the newly evaluated manual results and writes
-`results/final_report.md` and `results/audit_report.xlsx` (see [Output](#output)).
+`historical_last_run.json` with the newly evaluated manual results and writes `final_report.md`
+and `audit_report.xlsx` in that same run directory.
 
 The command returns an exit code for scripting: `0` success, `1` one or more controls
 failed, `2` usage/validation error, `3` unexpected error.
@@ -167,8 +168,8 @@ failed, `2` usage/validation error, `3` unexpected error.
 ### Generate audit scripts
 
 ```powershell
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
-Backend\core\bin\Debug\net10.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
+Backend\core\bin\Debug\net8.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
 ```
 
 This is **generation, not evaluation**: no SQL Server, no credentials, no LLM settings.
@@ -243,7 +244,7 @@ the IDE flow.
      "servers": {
        "sql-auditor": {
          "type": "stdio",
-         "command": "<absolute path>/Backend/agents/modules/IDE/bin/Debug/net10.0/SQLAuditor.Mcp.exe",
+         "command": "<absolute path>/Backend/agents/modules/IDE/bin/Debug/net8.0/SQLAuditor.Mcp.exe",
          "cwd": "<absolute path>/SQL-Auditing-tool"
        }
      }
@@ -277,7 +278,18 @@ Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
 
 ## Output
 
-Generated artefacts are written to `results/` in the working directory:
+Each audit run writes its artefacts to a timestamped, server-specific directory:
+
+```text
+results/<yyyyMMdd_HHmmss_fff>_<server-name>/
+```
+
+The timestamp uses local time. Characters that are unsafe in a directory name are replaced with
+underscores, so `tcp:sql01.example.com,1433` becomes a suffix such as
+`tcp_sql01.example.com_1433`. Follow-up commands such as `generate_report`, `show_reports`,
+`resolve_review`, and `enrich_result` automatically use the latest run containing
+`checklist_results.json`. Existing files directly under `results/` remain readable for backward
+compatibility.
 
 | File | Contents |
 | --- | --- |
@@ -286,7 +298,7 @@ Generated artefacts are written to `results/` in the working directory:
 | `final_report.md` | Rendered audit report with weighted scores |
 | `ui_log.txt` | Diagnostic log; the first place to look when a run fails |
 
-The `results/` folder is git-ignored, as it contains server names and connection details.
+The `results/` folder is git-ignored, as its directory names and logs can contain server details.
 
 ## Troubleshooting
 

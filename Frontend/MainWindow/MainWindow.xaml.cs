@@ -145,12 +145,26 @@ namespace SQLAuditor.Wpf
                 {
                     Log("Agent health check failed: " + exAvail.Message);
                 }
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "progress_stream.txt");
+                string? watchedPath = null;
                 while (true)
                 {
                     if (token.IsCancellationRequested) return;
                     try
                     {
+                        var activeRunDirectory = AuditOutputPaths.ActiveRunDirectory;
+                        if (activeRunDirectory == null)
+                        {
+                            try { await Task.Delay(1000, token); } catch (TaskCanceledException) { return; }
+                            continue;
+                        }
+
+                        var path = System.IO.Path.Combine(activeRunDirectory, "progress_stream.txt");
+                        if (!string.Equals(path, watchedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            watchedPath = path;
+                            _progressStreamPos = 0;
+                        }
+
                         if (System.IO.File.Exists(path))
                         {
                             using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
@@ -627,7 +641,7 @@ namespace SQLAuditor.Wpf
                 UpdateSummaryView(LoadPersistedResults() ?? results);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log("Summary report generated at results/final_report.md");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
             }
             catch (Exception ex)
             {
@@ -681,7 +695,7 @@ namespace SQLAuditor.Wpf
                 UpdateSummaryView(results);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log("Summary report generated at results/final_report.md");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
             }
             catch (Exception ex)
             {
@@ -866,7 +880,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
                 if (!System.IO.File.Exists(path)) return Array.Empty<ChecklistResult>();
                 var txt = System.IO.File.ReadAllText(path);
                 return JsonSerializer.Deserialize<ChecklistResult[]>(txt) ?? Array.Empty<ChecklistResult>();
@@ -879,7 +893,7 @@ namespace SQLAuditor.Wpf
 
         private void MarkPendingManualAsFailed()
         {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
             if (System.IO.File.Exists(path))
             {
@@ -1280,7 +1294,7 @@ namespace SQLAuditor.Wpf
 
         private static void WriteManualResultToDisk(SQLAuditor.Lib.ChecklistResult updated)
         {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             // The engine writes this same file from its own thread at the end of a run.
             lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
             {
@@ -1319,7 +1333,7 @@ namespace SQLAuditor.Wpf
 
         private System.Collections.Generic.IReadOnlyCollection<ChecklistResult>? LoadPersistedResults()
         {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             if (!System.IO.File.Exists(path)) return null;
             try
             {
@@ -1510,10 +1524,10 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var defaultPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
+                var defaultPath = AuditOutputPaths.GetCurrentFilePath("final_report.md");
                 if (!System.IO.File.Exists(defaultPath))
                 {
-                    MessageBox.Show("No final report found in results/. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show($"No final report found at {defaultPath}. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 var dlg = new SaveFileDialog() { FileName = "final_report.md", Filter = "Markdown|*.md|All Files|*.*" };
@@ -2149,7 +2163,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                var dir = AuditOutputPaths.ActiveRunDirectory ?? AuditOutputPaths.RootDirectory;
                 System.IO.Directory.CreateDirectory(dir);
                 var path = System.IO.Path.Combine(dir, "ui_log.txt");
                 var line = $"{DateTime.UtcNow:O} {message}\n";
@@ -2200,8 +2214,8 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
-                if (!System.IO.File.Exists(path)) { Log("No results/checklist_results.json found"); return; }
+                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                if (!System.IO.File.Exists(path)) { Log($"No checklist results found at {path}"); return; }
                 var txt = System.IO.File.ReadAllText(path);
                 var arr = JsonSerializer.Deserialize<SQLAuditor.Lib.ChecklistResult[]>(txt) ?? Array.Empty<SQLAuditor.Lib.ChecklistResult>();
 
@@ -2211,7 +2225,7 @@ namespace SQLAuditor.Wpf
                 try
                 {
                     RegenerateReportFromPersisted();
-                    Log("Rendered report saved to results/final_report.md and results/audit_report.xlsx");
+                    Log($"Rendered reports saved to {AuditOutputPaths.CurrentRunDirectory}");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
 

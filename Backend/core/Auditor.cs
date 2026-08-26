@@ -440,15 +440,15 @@ namespace SQLAuditor.Lib
         {
             var scriptsDir = FindSqlScriptsFolder();
             if (scriptsDir == null) return Array.Empty<ScriptResult>();
-            Directory.CreateDirectory(Path.Combine(Directory.GetCurrentDirectory(), "results"));
+            var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
             var list = new System.Collections.Generic.List<ScriptResult>();
             foreach (var f in Directory.GetFiles(scriptsDir, "*.sql"))
             {
                 var txt = await RunScriptFileAsync(f);
                 var json = SummarizeTextResultToJson(Path.GetFileName(f), txt);
-                var outPath = Path.Combine("results", Path.GetFileNameWithoutExtension(f) + "_result.txt");
+                var outPath = Path.Combine(resultsDir, Path.GetFileNameWithoutExtension(f) + "_result.txt");
                 await File.WriteAllTextAsync(outPath, txt);
-                var jsonPath = Path.Combine("results", Path.GetFileNameWithoutExtension(f) + ".json");
+                var jsonPath = Path.Combine(resultsDir, Path.GetFileNameWithoutExtension(f) + ".json");
                 await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }));
                 list.Add(new ScriptResult(Path.GetFileName(f), txt, json));
             }
@@ -595,6 +595,7 @@ namespace SQLAuditor.Lib
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
+            var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
 
@@ -1058,7 +1059,6 @@ namespace SQLAuditor.Lib
             // GitHub Copilot to author and write back via ApplyEnrichment.
             var enrichedResults = results.Select(ChecklistResultEnricher.Enrich).ToArray();
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             try
             {
@@ -1083,14 +1083,14 @@ namespace SQLAuditor.Lib
         }
 
         /// <summary>
-        /// Produces results/final_report.md and results/audit_report.xlsx from the persisted
-        /// results/checklist_results.json. Report generation is also the moment
-        /// results/historical_last_run.json is refreshed, so the historical file always mirrors
-        /// the manual results of the latest reported audit.
+        /// Produces final_report.md and audit_report.xlsx in the active run directory from its
+        /// persisted checklist_results.json. Report generation is also the moment
+        /// historical_last_run.json is refreshed, so the historical file always mirrors the
+        /// manual results of the latest reported audit.
         /// </summary>
         public static string GenerateReports(bool refreshHistoricalManualResults = true)
         {
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath))
                 return $"No results found at {jsonPath}. Run an evaluation first.";
@@ -1128,7 +1128,7 @@ namespace SQLAuditor.Lib
             {
                 new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
                     jsonPath, Path.Combine(resultsDir, "final_report.md"), metadata);
-                messages.Add("results/final_report.md generated.");
+                messages.Add($"{Path.Combine(resultsDir, "final_report.md")} generated.");
             }
             catch (Exception ex)
             {
@@ -1142,7 +1142,7 @@ namespace SQLAuditor.Lib
             {
                 new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
                     jsonPath, Path.Combine(resultsDir, "audit_report.xlsx"), metadata);
-                messages.Add("results/audit_report.xlsx generated.");
+                messages.Add($"{Path.Combine(resultsDir, "audit_report.xlsx")} generated.");
             }
             catch (Exception ex)
             {
@@ -1171,7 +1171,7 @@ namespace SQLAuditor.Lib
             };
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath)) return false;
 
@@ -1283,7 +1283,7 @@ namespace SQLAuditor.Lib
         // persisted results.
         public static string BuildOutcomeTally()
         {
-            var jsonPath = Path.Combine(Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var jsonPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             if (!File.Exists(jsonPath)) return string.Empty;
 
             try
@@ -1321,7 +1321,7 @@ namespace SQLAuditor.Lib
             if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
                 && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath)) return false;
 
@@ -1493,8 +1493,8 @@ namespace SQLAuditor.Lib
                         _connectionString = cs2;
                         try
                         {
-                            Directory.CreateDirectory(Path.Combine(Directory.GetCurrentDirectory(), "results"));
-                            var log = Path.Combine(Directory.GetCurrentDirectory(), "results", "ui_log.txt");
+                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
                             File.AppendAllText(log, $"{DateTime.UtcNow:O} Adopted working connection variant: {v} -> SUCCESS\n");
                         }
                         catch { }
@@ -1504,8 +1504,8 @@ namespace SQLAuditor.Lib
                     {
                         try
                         {
-                            Directory.CreateDirectory(Path.Combine(Directory.GetCurrentDirectory(), "results"));
-                            var log = Path.Combine(Directory.GetCurrentDirectory(), "results", "ui_log.txt");
+                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
                             File.AppendAllText(log, $"{DateTime.UtcNow:O} Variant: {v} -> FAIL: {ex.Message}\n");
                         }
                         catch { }
@@ -1644,7 +1644,7 @@ namespace SQLAuditor.Lib
         {
             try
             {
-                var dir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+                var dir = AuditOutputPaths.CurrentRunDirectory;
                 Directory.CreateDirectory(dir);
                 File.AppendAllText(Path.Combine(dir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n");
             }

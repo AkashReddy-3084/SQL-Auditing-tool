@@ -19,9 +19,9 @@ if ($Args -eq $null -or $Args.Length -eq 0) {
     exit 0
 }
 
-# Candidate exe location (project targets net10.0)
+# Candidate exe location (project targets net8.0)
 $exeCandidates = @()
-$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','core','bin','Debug','net10.0','SQLAuditor.exe')
+$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','core','bin','Debug','net8.0','SQLAuditor.exe')
 
 $exePath = $null
 foreach ($p in $exeCandidates) {

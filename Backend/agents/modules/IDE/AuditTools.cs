@@ -46,7 +46,7 @@ public static class AuditTools
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     [McpServerTool(Name = "evaluate")]
-    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes results/checklist_results.json only — the reports are NOT generated automatically; ask the user afterwards and call 'generate_report' if they say yes.")]
+    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes checklist_results.json in a timestamp-and-server run directory under results — the reports are NOT generated automatically; ask the user afterwards and call 'generate_report' if they say yes.")]
     public static async Task<string> EvaluateAsync(
         [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
         [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
@@ -260,25 +260,26 @@ public static class AuditTools
         }
 
         sb.AppendLine();
-        sb.AppendLine("Results written to results/checklist_results.json.");
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+        sb.AppendLine($"Results written to {Path.Combine(resultsDir, "checklist_results.json")}.");
         sb.AppendLine();
         sb.AppendLine("=== REPORT GENERATION DECISION REQUIRED ===");
         sb.AppendLine("NO report has been generated. Once every item above is enriched and reviewed, ask the user:");
         sb.AppendLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
-        sb.AppendLine("If YES: call generate_report() \u2014 it refreshes results/historical_last_run.json with the newly evaluated");
-        sb.AppendLine("manual results, then writes results/final_report.md and results/audit_report.xlsx.");
-        sb.AppendLine("If NO: stop. Keep results/checklist_results.json, do not refresh the historical file, and do not generate");
+        sb.AppendLine("If YES: call generate_report() \u2014 it refreshes historical_last_run.json in this run directory with the newly evaluated");
+        sb.AppendLine($"manual results, then writes {Path.Combine(resultsDir, "final_report.md")} and {Path.Combine(resultsDir, "audit_report.xlsx")}.");
+        sb.AppendLine($"If NO: stop. Keep {Path.Combine(resultsDir, "checklist_results.json")}, do not refresh the historical file, and do not generate");
         sb.AppendLine("the report or the workbook. Never make this decision yourself.");
         sb.AppendLine("=== END REPORT GENERATION DECISION REQUIRED ===");
         return sb.ToString();
     }
 
     [McpServerTool(Name = "generate_report")]
-    [Description("Generate the final audit outputs after the user has explicitly asked for them: refreshes results/historical_last_run.json with the newly evaluated manual/AI-Manual results from results/checklist_results.json (existing historical entries are preserved), then writes results/final_report.md and results/audit_report.xlsx. Call ONLY after the user answers yes to 'Evaluation completed. Do you want to generate the summary/report?'. Never call it on your own initiative.")]
+    [Description("Generate the final audit outputs after the user has explicitly asked for them: refreshes historical_last_run.json with the newly evaluated manual/AI-Manual results from checklist_results.json, then writes final_report.md and audit_report.xlsx in the active timestamp-and-server run directory. Call ONLY after the user answers yes to 'Evaluation completed. Do you want to generate the summary/report?'. Never call it on your own initiative.")]
     public static Task<string> GenerateReportAsync(
         [Description("Set to false to render the reports without recording the new manual results in results/historical_last_run.json. Defaults to true.")] bool refreshHistoricalManualResults = true)
     {
-        var jsonPath = Path.Combine(Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+        var jsonPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
         if (!File.Exists(jsonPath))
             return Task.FromResult($"No results found at {jsonPath}. Run 'evaluate' first.");
 
@@ -287,7 +288,7 @@ public static class AuditTools
         return Task.FromResult(
             message
             + (string.IsNullOrEmpty(tally) ? string.Empty : $"\nFinal outcome counts: {tally}")
-            + "\nCall 'show_reports' to display results/final_report.md and report ITS counts.");
+            + $"\nCall 'show_reports' to display {AuditOutputPaths.GetCurrentFilePath("final_report.md")} and report ITS counts.");
     }
 
     [McpServerTool(Name = "load_checklist")]
@@ -697,11 +698,11 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "show_reports")]
-    [Description("Return the most recently generated audit output: 'summary' for results/final_report.md (default) or 'json' for results/checklist_results.json.")]
+    [Description("Return the most recently generated audit output from the latest timestamp-and-server run directory: 'summary' for final_report.md (default) or 'json' for checklist_results.json.")]
     public static Task<string> ShowReportsAsync(
         [Description("'summary' for the Markdown report (default) or 'json' for the raw results.")] string kind = "summary")
     {
-        var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
         var path = string.Equals(kind, "json", StringComparison.OrdinalIgnoreCase)
             ? Path.Combine(resultsDir, "checklist_results.json")
             : Path.Combine(resultsDir, "final_report.md");
@@ -716,7 +717,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Requires the reviewer's own observation/evidence text for pass and fail decisions. Updates results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Requires the reviewer's own observation/evidence text for pass and fail decisions. Updates checklist_results.json and regenerates final_report.md and audit_report.xlsx in the current run directory. Use after 'evaluate' surfaces manual-review items.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
         [Description("The decision: 'pass', 'fail', or 'needsreview'.")] string decision,
@@ -738,7 +739,7 @@ public static class AuditTools
         var auditor = new Auditor(string.Empty);
         if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             return Task.FromResult(
-                $"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated. "
+                $"Updated [{id}] -> {newOutcome}. Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}. "
                 + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the reviewer's evidence above — finding, evidence, riskImpact and recommendation — using only facts the reviewer stated.");
 
         return Task.FromResult(
@@ -755,7 +756,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "enrich_result")]
-    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in results/checklist_results.json and regenerates results/final_report.md and results/audit_report.xlsx. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'Not Applicable' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
+    [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in checklist_results.json and regenerates final_report.md and audit_report.xlsx in the current run directory. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'Not Applicable' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
     public static Task<string> EnrichResultAsync(
         [Description("The checklist item ID to enrich, e.g. '1.1.5'.")] string id,
         [Description("1-2 sentences on the actual state the script found (object/database names, counts). Not a restatement of the checklist description.")] string? finding = null,
@@ -773,7 +774,7 @@ public static class AuditTools
                 + (markedNotApplicable
                     ? $" -> Outcome {NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail."
                     : ".")
-                + " results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+                + $" Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}.");
 
         return Task.FromResult(
             $"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");

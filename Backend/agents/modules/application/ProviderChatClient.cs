@@ -164,7 +164,7 @@ internal sealed class ProviderChatClient
     {
         try
         {
-            var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+            var dir = AuditOutputPaths.CurrentRunDirectory;
             System.IO.Directory.CreateDirectory(dir);
             var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{id}] {message}{Environment.NewLine}";
             System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "enrichment_diagnostics.log"), line);

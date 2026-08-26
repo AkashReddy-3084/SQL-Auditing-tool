@@ -9,7 +9,7 @@ namespace SQLAuditor.Lib;
 
 /// <summary>
 /// Keeps the manual / AI-Manual results of previous audit runs in
-/// <c>results/historical_last_run.json</c> so a later run can reuse a decision the reviewer
+/// <c>historical_last_run.json</c> within each run directory so a later run can reuse a decision the reviewer
 /// already made instead of asking them to verify the same control again.
 ///
 /// The file holds exactly the attributes <c>checklist_results.json</c> carries for those items,
@@ -20,7 +20,7 @@ public static class HistoricalManualResultsStore
 {
     public const string FileName = "historical_last_run.json";
 
-    private static string ResultsDirectory => Path.Combine(Directory.GetCurrentDirectory(), "results");
+    private static string ResultsDirectory => AuditOutputPaths.CurrentRunDirectory;
 
     public static string FilePath => Path.Combine(ResultsDirectory, FileName);
 
@@ -52,8 +52,8 @@ public static class HistoricalManualResultsStore
     public static Dictionary<string, JsonObject> Load()
     {
         var map = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
-        var path = FilePath;
-        if (!File.Exists(path)) return map;
+        var path = AuditOutputPaths.FindLatestFile(FileName);
+        if (path is null) return map;
 
         try
         {

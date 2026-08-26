@@ -203,7 +203,7 @@ namespace SQLAuditor
             }
 
             Console.WriteLine(useHistoricalManualResults.Value
-                ? "Manual items: reusing results from previous runs where available (results/historical_last_run.json)."
+                ? "Manual items: reusing historical_last_run.json from the latest completed run where available."
                 : "Manual items: fresh evaluation (previous manual results are not copied).");
 
             // Values come from flags/env first; anything missing is prompted for,
@@ -444,7 +444,7 @@ namespace SQLAuditor
                 Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include Not Applicable.");
             }
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var jsonDefault = Path.Combine(resultsDir, "checklist_results.json");
             Console.WriteLine();
             Console.WriteLine($"Results JSON : {jsonDefault}");
@@ -455,12 +455,12 @@ namespace SQLAuditor
             {
                 Console.WriteLine();
                 Console.WriteLine("=== REPORT GENERATION DECISION REQUIRED ===");
-                Console.WriteLine("Evaluation completed and results/checklist_results.json has been updated.");
+                Console.WriteLine($"Evaluation completed and {jsonDefault} has been updated.");
                 Console.WriteLine("No report has been generated. After every item is enriched and reviewed, ask the user:");
                 Console.WriteLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
                 Console.WriteLine("If the user says YES, run: sql-auditor generate_report");
-                Console.WriteLine("  -> refreshes results/historical_last_run.json with the newly evaluated manual results,");
-                Console.WriteLine("     then writes results/final_report.md and results/audit_report.xlsx.");
+                Console.WriteLine("  -> refreshes historical_last_run.json in the current run directory with the newly evaluated manual results,");
+                Console.WriteLine($"     then writes {Path.Combine(resultsDir, "final_report.md")} and {Path.Combine(resultsDir, "audit_report.xlsx")}.");
                 Console.WriteLine("If the user says NO, stop here: keep checklist_results.json, do not refresh the historical file,");
                 Console.WriteLine("and do not generate final_report.md or the Excel workbook. Never decide this yourself.");
                 Console.WriteLine("=== END REPORT GENERATION DECISION REQUIRED ===");
@@ -488,7 +488,7 @@ namespace SQLAuditor
                 }
                 else
                 {
-                    Console.WriteLine("No report generated. results/checklist_results.json is up to date; run 'sqlauditor generate_report' later.");
+                    Console.WriteLine($"No report generated. {jsonDefault} is up to date; run 'sqlauditor generate_report' later.");
                 }
             }
 
@@ -524,7 +524,7 @@ namespace SQLAuditor
             Console.WriteLine("Options:");
             Console.WriteLine("  --manual-results <last-runs|fresh>");
             Console.WriteLine("                      How manual/AI-Manual items are handled: reuse the results");
-            Console.WriteLine("                      recorded in results/historical_last_run.json, or evaluate");
+            Console.WriteLine("                      recorded in the latest run's historical_last_run.json, or evaluate");
             Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
             Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
@@ -734,7 +734,7 @@ namespace SQLAuditor
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
             if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             {
-                Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+                Console.WriteLine($"Updated [{id}] -> {newOutcome}. Outputs regenerated in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
                 Console.WriteLine($"NEXT: run 'sql-auditor enrich_result --id {id} ...' with audit wording you derive from the reviewer's evidence "
                     + "- finding, evidence, riskImpact and recommendation - using only facts the reviewer stated. "
                     + "Their raw words must not stay as the report Finding.");
@@ -781,7 +781,7 @@ namespace SQLAuditor
                     Console.WriteLine($"Enriched [{id}] -> Outcome {SQLAuditor.Lib.NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail.");
                 else
                     Console.WriteLine($"Enriched [{id}].");
-                Console.WriteLine("results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated.");
+                Console.WriteLine($"Outputs regenerated in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
                 return 0;
             }
 
@@ -931,13 +931,13 @@ namespace SQLAuditor
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
                 Console.WriteLine("Usage: sqlauditor generate_report [--no-historical-refresh]");
-                Console.WriteLine("  Refreshes results/historical_last_run.json with the manual results in");
-                Console.WriteLine("  results/checklist_results.json, then writes results/final_report.md and");
-                Console.WriteLine("  results/audit_report.xlsx.");
+                Console.WriteLine("  Refreshes historical_last_run.json with the manual results in");
+                Console.WriteLine("  checklist_results.json, then writes final_report.md and audit_report.xlsx");
+                Console.WriteLine("  in the latest timestamp-and-server run directory under results.");
                 return 0;
             }
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath))
             {
@@ -963,7 +963,7 @@ namespace SQLAuditor
         {
             var opts = ParseOptions(args);
             var kind = GetOption(opts, "kind") ?? "summary";
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var path = string.Equals(kind, "json", StringComparison.OrdinalIgnoreCase)
                 ? Path.Combine(resultsDir, "checklist_results.json")
                 : Path.Combine(resultsDir, "final_report.md");

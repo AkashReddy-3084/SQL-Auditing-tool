@@ -8,7 +8,8 @@ The SQL Auditing Tool evaluates SQL environment compliance against a checklist u
 - AI-MCP: AI evaluation using SQL metadata snapshot and model prompts.
 - AI-Manual: manual operator validation with AI-generated instructions.
 
-Primary outputs are written to the `results/` folder:
+Primary outputs are grouped by audit run under
+`results/<yyyyMMdd_HHmmss_fff>_<sanitized-server-name>/`:
 
 - `checklist_results.json`
 - `historical_last_run.json`
