@@ -1,47 +1,53 @@
 -- Checklist: Backups are encrypted
 -- Scope: SERVER
--- Scoring: 3 = 100% of databases' most recent backups are encrypted (or Azure SQL DB platform-managed); 2 = 50-99%; 1 = under 50%; 0 = no backup history found
+-- Scoring: 3 = all backup history rows are encrypted and have an encryptor; 2 = at least 75% are encrypted; 1 = some but less than 75% are encrypted; 0 = no backup history or evidence is unavailable
+-- NOTE: Automated evidence covers backup history; encryption requirements for future backups and key ownership require human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
-DECLARE @Finding NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
+DECLARE @Finding NVARCHAR(MAX) = N'Backup encryption evidence unavailable';
+DECLARE @BackupCount INT = 0;
+DECLARE @EncryptedBackupCount INT = 0;
+DECLARE @AlgorithmCount INT = 0;
+DECLARE @EncryptorCount INT = 0;
+DECLARE @EncryptedPercent DECIMAL(6, 2) = 0.00;
+DECLARE @ReadError BIT = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    SET @Score = 3;
-    SET @Finding = 'Azure SQL Database: backups are platform-managed and encrypted by default';
-END
-ELSE
-BEGIN
-    DECLARE @TotalDbCount INT, @EncryptedDbCount INT;
+BEGIN TRY
+    SELECT
+        @BackupCount = COUNT(*),
+        @EncryptedBackupCount = ISNULL(SUM(CASE WHEN key_algorithm IS NOT NULL THEN 1 ELSE 0 END), 0),
+        @AlgorithmCount = COUNT(DISTINCT key_algorithm),
+        @EncryptorCount = ISNULL(SUM(CASE WHEN encryptor_type IS NOT NULL THEN 1 ELSE 0 END), 0)
+    FROM msdb.dbo.backupset;
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-    IF OBJECT_ID('msdb.dbo.backupset') IS NOT NULL
-    BEGIN
-        SELECT @TotalDbCount = COUNT(DISTINCT database_name)
-        FROM msdb.dbo.backupset bs
-        WHERE bs.backup_finish_date = (
-            SELECT MAX(bs2.backup_finish_date) FROM msdb.dbo.backupset bs2 WHERE bs2.database_name = bs.database_name
-        )
-        AND bs.database_name IN (SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0);
+SET @EncryptedPercent = CASE
+    WHEN @BackupCount = 0 THEN 0.00
+    ELSE CONVERT(DECIMAL(6, 2), 100.0 * @EncryptedBackupCount / NULLIF(@BackupCount, 0))
+END;
 
-        SELECT @EncryptedDbCount = COUNT(DISTINCT database_name)
-        FROM msdb.dbo.backupset bs
-        WHERE bs.backup_finish_date = (
-            SELECT MAX(bs2.backup_finish_date) FROM msdb.dbo.backupset bs2 WHERE bs2.database_name = bs.database_name
-        )
-        AND bs.database_name IN (SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0)
-        AND bs.is_backup_encrypted = 1;
-    END
+SET @Score = CASE
+    WHEN @ReadError = 1 OR @BackupCount = 0 THEN 0
+    WHEN @EncryptedBackupCount = @BackupCount AND @EncryptorCount = @BackupCount THEN 3
+    WHEN @EncryptedPercent >= 75.00 THEN 2
+    WHEN @EncryptedBackupCount > 0 THEN 1
+    ELSE 0
+END;
 
-    SET @Score = CASE WHEN ISNULL(@TotalDbCount,0) = 0 THEN 0
-                      WHEN @EncryptedDbCount = @TotalDbCount THEN 3
-                      WHEN (CAST(ISNULL(@EncryptedDbCount,0) AS DECIMAL(9,4)) / NULLIF(@TotalDbCount,0)) >= 0.50 THEN 2
-                      ELSE 1 END;
-    SET @Finding = CASE WHEN ISNULL(@TotalDbCount,0) = 0 THEN 'No backup history found for any user database'
-                        ELSE CONCAT('Databases with backup history = ', @TotalDbCount, ', most recent backup encrypted = ', ISNULL(@EncryptedDbCount,0)) END;
-END
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'backup history rows = ', @BackupCount,
+    N'; encrypted rows = ', @EncryptedBackupCount,
+    N'; encrypted percentage = ', @EncryptedPercent, N'%',
+    N'; distinct key algorithms = ', @AlgorithmCount,
+    N'; rows with encryptor = ', @EncryptorCount,
+    CASE WHEN @ReadError = 1 THEN N'; backup history could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

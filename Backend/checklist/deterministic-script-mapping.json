@@ -1,15 +1,17 @@
 {
   "1.1.1": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/9.3.3.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "1.1.5": {
-    "script_file": null,
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "script_file": "Backend/checklist/scripts/sql/6.4.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "1.1.3": {
     "script_file": null,
@@ -32,10 +34,11 @@
     "MCP_Feasibility": false
   },
   "1.1.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/1.1.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "1.1.2": {
     "script_file": "Backend/checklist/scripts/sql/1.1.2.sql",
@@ -93,7 +96,6 @@
     "script_file": "Backend/checklist/scripts/sql/1.3.2.sql",
     "scope": "SERVER",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "1.3.5": {
@@ -104,10 +106,11 @@
     "MCP_Feasibility": true
   },
   "1.3.1": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/1.3.1.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "1.2.6": {
     "script_file": "Backend/checklist/scripts/sql/1.2.6.sql",
@@ -117,7 +120,6 @@
     "MCP_Feasibility": true
   },
   "1.3.3": {
-    "script_file": "Backend/checklist/scripts/sql/1.3.3.sql",
     "scope": "SERVER",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
@@ -131,7 +133,6 @@
     "MCP_Feasibility": true
   },
   "1.3.8": {
-    "script_file": "Backend/checklist/scripts/sql/1.3.8.sql",
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
@@ -152,10 +153,11 @@
     "MCP_Feasibility": true
   },
   "1.3.10": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/1.3.10.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "1.3.9": {
     "script_file": null,
@@ -187,7 +189,7 @@
   "2.1.3": {
     "script_file": "Backend/checklist/scripts/sql/2.1.3.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -240,8 +242,9 @@
     "MCP_Feasibility": false
   },
   "2.3.2": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/2.3.2.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -252,10 +255,11 @@
     "MCP_Feasibility": true
   },
   "2.2.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/2.2.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "2.2.4": {
     "script_file": "Backend/checklist/scripts/sql/2.2.4.sql",
@@ -307,8 +311,9 @@
     "MCP_Feasibility": true
   },
   "2.3.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/2.3.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -320,8 +325,9 @@
     "MCP_Feasibility": true
   },
   "2.4.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/2.4.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -381,7 +387,8 @@
     "MCP_Feasibility": false
   },
   "3.2.1": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/3.2.1.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -460,7 +467,6 @@
     "script_file": "Backend/checklist/scripts/sql/3.2.6.sql",
     "scope": "DATABASE",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "4.1.2": {
@@ -471,13 +477,15 @@
     "MCP_Feasibility": false
   },
   "4.2.2": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.2.2.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "4.2.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.2.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -504,10 +512,11 @@
     "MCP_Feasibility": true
   },
   "4.1.3": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.1.3.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "4.1.5": {
     "script_file": "Backend/checklist/scripts/sql/4.1.5.sql",
@@ -521,7 +530,7 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "4.2.5": {
     "script_file": "Backend/checklist/scripts/sql/4.2.5.sql",
@@ -566,7 +575,8 @@
     "MCP_Feasibility": false
   },
   "4.3.3": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.3.3.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -593,10 +603,11 @@
     "MCP_Feasibility": true
   },
   "4.3.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.3.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "4.2.8": {
     "script_file": "Backend/checklist/scripts/sql/4.2.8.sql",
@@ -629,7 +640,7 @@
   "4.4.5": {
     "script_file": "Backend/checklist/scripts/sql/4.4.5.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -652,13 +663,14 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "4.5.3": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/4.5.3.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "4.4.3": {
     "script_file": "Backend/checklist/scripts/sql/4.4.3.sql",
@@ -670,7 +682,7 @@
   "4.4.7": {
     "script_file": "Backend/checklist/scripts/sql/4.4.7.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -721,10 +733,11 @@
     "MCP_Feasibility": false
   },
   "5.1.7": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/5.1.7.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "5.1.4": {
     "script_file": "Backend/checklist/scripts/sql/5.1.4.sql",
@@ -752,7 +765,7 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "5.1.8": {
     "script_file": "Backend/checklist/scripts/sql/5.1.8.sql",
@@ -762,22 +775,25 @@
     "MCP_Feasibility": false
   },
   "5.2.4": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/5.2.4.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "5.3.1": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/5.3.1.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "5.2.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/5.2.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "5.2.5": {
     "script_file": "Backend/checklist/scripts/sql/5.2.5.sql",
@@ -850,7 +866,8 @@
     "MCP_Feasibility": true
   },
   "5.4.1": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/5.4.1.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -948,9 +965,9 @@
   "6.2.7": {
     "script_file": "Backend/checklist/scripts/sql/6.2.7.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "6.2.6": {
     "script_file": "Backend/checklist/scripts/sql/6.2.6.sql",
@@ -995,7 +1012,8 @@
     "MCP_Feasibility": true
   },
   "6.1.8": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/6.1.8.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -1026,10 +1044,11 @@
     "MCP_Feasibility": false
   },
   "6.4.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "script_file": "Backend/checklist/scripts/sql/6.4.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "6.3.3": {
     "script_file": null,
@@ -1116,8 +1135,9 @@
     "MCP_Feasibility": false
   },
   "7.2.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/7.2.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1126,7 +1146,7 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "7.3.1": {
     "script_file": null,
@@ -1154,10 +1174,11 @@
     "MCP_Feasibility": false
   },
   "7.2.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/7.2.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "7.3.4": {
     "script_file": null,
@@ -1193,8 +1214,9 @@
     "MCP_Feasibility": true
   },
   "7.4.2": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/7.4.2.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": false
   },
@@ -1215,7 +1237,7 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "8.2.1": {
     "script_file": "Backend/checklist/scripts/sql/8.2.1.sql",
@@ -1262,9 +1284,9 @@
   "7.4.3": {
     "script_file": "Backend/checklist/scripts/sql/7.4.3.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "8.2.2": {
     "script_file": null,
@@ -1310,7 +1332,8 @@
     "MCP_Feasibility": true
   },
   "8.3.2": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/8.3.2.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
@@ -1381,13 +1404,13 @@
     "MCP_Feasibility": true
   },
   "9.1.6": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/9.1.6.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "9.2.3": {
-    "script_file": "Backend/checklist/scripts/sql/9.2.3.sql",
     "scope": "SERVER",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
@@ -1414,9 +1437,9 @@
   "9.2.6": {
     "script_file": "Backend/checklist/scripts/sql/9.2.6.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "9.2.8": {
     "script_file": "Backend/checklist/scripts/sql/9.2.8.sql",
@@ -1426,7 +1449,6 @@
     "MCP_Feasibility": false
   },
   "9.3.2": {
-    "script_file": "Backend/checklist/scripts/sql/9.3.2.sql",
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
@@ -1442,14 +1464,14 @@
   "9.2.9": {
     "script_file": "Backend/checklist/scripts/sql/9.2.9.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "9.2.11": {
     "script_file": "Backend/checklist/scripts/sql/9.2.11.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1467,17 +1489,18 @@
     "MCP_Feasibility": false
   },
   "9.4.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "script_file": "Backend/checklist/scripts/sql/9.4.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "9.4.2": {
     "script_file": "Backend/checklist/scripts/sql/9.4.2.sql",
-    "scope": "DATABASE",
-    "IsAdminCheck": false,
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "10.1.2": {
     "script_file": "Backend/checklist/scripts/sql/10.1.2.sql",
@@ -1501,14 +1524,16 @@
     "MCP_Feasibility": false
   },
   "9.3.5": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/9.3.5.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "9.3.3": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/9.3.3.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1521,8 +1546,8 @@
   },
   "10.1.3": {
     "script_file": "Backend/checklist/scripts/sql/10.1.3.sql",
-    "scope": "DATABASE",
-    "IsAdminCheck": false,
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1563,9 +1588,9 @@
   "10.1.5": {
     "script_file": "Backend/checklist/scripts/sql/10.1.5.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "10.1.4": {
     "script_file": "Backend/checklist/scripts/sql/10.1.4.sql",
@@ -1614,8 +1639,9 @@
     "MCP_Feasibility": false
   },
   "10.3.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/10.3.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1674,10 +1700,11 @@
     "MCP_Feasibility": false
   },
   "11.2.4": {
-    "script_file": null,
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "script_file": "Backend/checklist/scripts/sql/11.2.4.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "11.2.6": {
     "script_file": null,
@@ -1776,7 +1803,7 @@
   "11.3.2": {
     "script_file": "Backend/checklist/scripts/sql/11.3.2.sql",
     "scope": "DATABASE",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1818,10 +1845,11 @@
     "MCP_Feasibility": false
   },
   "12.2.2": {
-    "script_file": null,
-    "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "script_file": "Backend/checklist/scripts/sql/12.2.2.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "12.1.5": {
     "script_file": null,
@@ -1894,22 +1922,23 @@
     "MCP_Feasibility": true
   },
   "12.2.6": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/12.2.6.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "12.1.2": {
     "script_file": "Backend/checklist/scripts/sql/12.1.2.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
   "12.2.5": {
     "script_file": "Backend/checklist/scripts/sql/12.2.5.sql",
-    "scope": "SERVER",
-    "IsAdminCheck": false,
+    "scope": "DATABASE",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
@@ -1977,10 +2006,11 @@
     "MCP_Feasibility": false
   },
   "14.1.7": {
-    "script_file": null,
+    "script_file": "Backend/checklist/scripts/sql/14.1.7.sql",
+    "scope": "DATABASE",
     "IsAdminCheck": false,
-    "IsDocumentationCheck": true,
-    "MCP_Feasibility": false
+    "IsDocumentationCheck": false,
+    "MCP_Feasibility": true
   },
   "14.2.4": {
     "script_file": "Backend/checklist/scripts/sql/14.2.4.sql",
@@ -2005,15 +2035,16 @@
   "14.2.3": {
     "script_file": "Backend/checklist/scripts/sql/14.2.3.sql",
     "scope": "DATABASE",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.1.5": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/14.1.5.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.1.2": {
     "script_file": null,
@@ -2043,16 +2074,18 @@
     "MCP_Feasibility": false
   },
   "14.3.2": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/14.3.2.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.3.1": {
-    "script_file": null,
-    "IsAdminCheck": false,
+    "script_file": "Backend/checklist/scripts/sql/14.3.1.sql",
+    "scope": "SERVER",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.4.1": {
     "script_file": "Backend/checklist/scripts/sql/14.4.1.sql",
@@ -2073,7 +2106,7 @@
     "scope": "DATABASE",
     "IsAdminCheck": false,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.3.3": {
     "script_file": "Backend/checklist/scripts/sql/14.3.3.sql",
@@ -2084,10 +2117,10 @@
   },
   "14.3.5": {
     "script_file": "Backend/checklist/scripts/sql/14.3.5.sql",
-    "scope": "SERVER",
-    "IsAdminCheck": false,
+    "scope": "DATABASE",
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
-    "MCP_Feasibility": false
+    "MCP_Feasibility": true
   },
   "14.4.2": {
     "script_file": "Backend/checklist/scripts/sql/14.4.2.sql",
@@ -2106,7 +2139,7 @@
   "14.3.6": {
     "script_file": "Backend/checklist/scripts/sql/14.3.6.sql",
     "scope": "SERVER",
-    "IsAdminCheck": false,
+    "IsAdminCheck": true,
     "IsDocumentationCheck": false,
     "MCP_Feasibility": true
   },
