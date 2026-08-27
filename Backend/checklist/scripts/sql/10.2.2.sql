@@ -1,28 +1,57 @@
 -- Checklist: Query Store used to detect regressions and force plans where needed
 -- Scope: DATABASE
--- Scoring: 3 = Query Store enabled and at least one forced plan found; 2 = reserved; 1 = Query Store enabled but no forced plans; 0 = Query Store is not enabled
--- NOTE: Automated evidence only; the absence of a forced plan may simply mean no regression has occurred, not that the practice is unused. Full compliance requires human review.
+-- Scoring: 3 = Query Store is read-write with runtime intervals and plans captured; 2 = Query Store is enabled with plans or runtime intervals; 1 = Query Store is enabled but has no captured plans or intervals; 0 = Query Store is unavailable or not enabled
+-- NOTE: Automated evidence only; whether a specific regression required plan forcing requires human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @ActualState INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = N'Query Store evidence unavailable';
+DECLARE @QueryStoreState NVARCHAR(60) = N'UNKNOWN';
+DECLARE @PlanCount INT = 0;
 DECLARE @ForcedPlanCount INT = 0;
+DECLARE @RuntimeIntervalCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-SET @DatabaseQueried = DB_NAME();
+BEGIN TRY
+    SELECT @QueryStoreState = ISNULL(MAX(actual_state_desc), N'UNKNOWN')
+    FROM sys.database_query_store_options;
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-IF OBJECT_ID('sys.database_query_store_options') IS NOT NULL
-    SELECT @ActualState = actual_state FROM sys.database_query_store_options;
+IF @ReadError = 0 AND @QueryStoreState IN (N'READ_WRITE', N'READ_ONLY')
+BEGIN
+    BEGIN TRY
+        SELECT @PlanCount = COUNT(*) FROM sys.query_store_plan;
+        SELECT @ForcedPlanCount = ISNULL(SUM(CASE WHEN is_forced_plan = 1 THEN 1 ELSE 0 END), 0)
+        FROM sys.query_store_plan;
+        SELECT @RuntimeIntervalCount = COUNT(*) FROM sys.query_store_runtime_stats_interval;
+    END TRY
+    BEGIN CATCH
+        SET @ReadError = 1;
+        SET @PlanCount = 0;
+        SET @ForcedPlanCount = 0;
+        SET @RuntimeIntervalCount = 0;
+    END CATCH;
+END;
 
-IF OBJECT_ID('sys.query_store_plan') IS NOT NULL
-    SELECT @ForcedPlanCount = COUNT(*) FROM sys.query_store_plan WHERE is_forced_plan = 1;
+SET @Score = CASE
+    WHEN @ReadError = 1 OR @QueryStoreState NOT IN (N'READ_WRITE', N'READ_ONLY') THEN 0
+    WHEN @QueryStoreState = N'READ_WRITE' AND @PlanCount > 0 AND @RuntimeIntervalCount > 0 THEN 3
+    WHEN @PlanCount > 0 OR @RuntimeIntervalCount > 0 THEN 2
+    ELSE 1
+END;
 
-SET @Score = CASE WHEN ISNULL(@ActualState,0) = 0 THEN 0
-                  WHEN ISNULL(@ForcedPlanCount,0) > 0 THEN 3
-                  ELSE 1 END;
-SET @Finding = CASE WHEN ISNULL(@ActualState,0) = 0 THEN 'Query Store is not enabled'
-                    ELSE CONCAT('Query Store enabled; forced plans currently in effect = ', ISNULL(@ForcedPlanCount,0)) END;
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'Query Store state = ', @QueryStoreState,
+    N'; plans = ', @PlanCount,
+    N'; forced plans = ', @ForcedPlanCount,
+    N'; runtime-statistics intervals = ', @RuntimeIntervalCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more Query Store sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

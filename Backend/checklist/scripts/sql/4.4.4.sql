@@ -1,56 +1,49 @@
-DECLARE @Result VARCHAR(50);
+-- Checklist: Data compression (row/page/columnstore) applied where beneficial
+-- Scope: DATABASE
+-- Scoring: 3 = at least 75% of table partitions are compressed; 2 = 50%-74%; 1 = greater than 0% but below 50%; 0 = no compressed partitions or evidence is unavailable
+-- NOTE: Automated evidence measures configured compression; whether compression is beneficial for a workload requires human review.
+
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried VARCHAR(128) = 'master';
-DECLARE @Finding VARCHAR(MAX) = 'No data compression applied.';
-DECLARE @TotalCompressed INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = N'Compression evidence unavailable';
+DECLARE @CompressedPartitionCount INT = 0;
+DECLARE @PartitionCount INT = 0;
+DECLARE @CompressedPercent DECIMAL(6, 2) = 0.00;
+DECLARE @ReadError BIT = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    SET @DatabaseQueried = DB_NAME();
-    SELECT @TotalCompressed = COUNT(*) FROM sys.partitions WHERE data_compression > 0;
-END
-ELSE
-BEGIN
-    IF OBJECT_ID('tempdb..#Comp') IS NOT NULL DROP TABLE #Comp;
-    CREATE TABLE #Comp (CompressedPartitions INT);
-    
-    DECLARE @Db sysname;
-    DECLARE @SQL NVARCHAR(MAX);
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-    SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0;
-    
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @Db;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        SET @SQL = N'INSERT INTO #Comp (CompressedPartitions) SELECT COUNT(*) FROM ' + QUOTENAME(@Db) + N'.sys.partitions WHERE data_compression > 0;';
-        BEGIN TRY
-            EXEC sp_executesql @SQL;
-        END TRY
-        BEGIN CATCH
-        END CATCH
-        FETCH NEXT FROM db_cursor INTO @Db;
-    END
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-    
-    SELECT @TotalCompressed = SUM(CompressedPartitions) FROM #Comp;
-END
+BEGIN TRY
+    SELECT
+        @CompressedPartitionCount = ISNULL(SUM(CASE WHEN p.data_compression > 0 THEN 1 ELSE 0 END), 0),
+        @PartitionCount = COUNT(*)
+    FROM sys.partitions AS p
+    WHERE p.object_id IN (SELECT object_id FROM sys.tables);
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-IF ISNULL(@TotalCompressed, 0) > 0
-BEGIN
-    SET @Score = 3;
-    SET @Finding = CAST(@TotalCompressed AS VARCHAR(20)) + ' compressed partitions found.';
-END
-ELSE
-BEGIN
-    SET @Score = 1;
-END
+SET @CompressedPercent = CASE
+    WHEN @PartitionCount = 0 THEN 0.00
+    ELSE CONVERT(DECIMAL(6, 2), 100.0 * @CompressedPartitionCount / NULLIF(@PartitionCount, 0))
+END;
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Score = CASE
+    WHEN @ReadError = 1 THEN 0
+    WHEN @PartitionCount = 0 THEN 2
+    WHEN @CompressedPercent >= 75.00 THEN 3
+    WHEN @CompressedPercent >= 50.00 THEN 2
+    WHEN @CompressedPartitionCount > 0 THEN 1
+    ELSE 0
+END;
 
-SELECT 
-    @Result AS Result, 
-    @Score AS Score, 
-    @DatabaseQueried AS DatabaseQueried, 
-    @Finding AS Finding;
+SET @Finding = CONCAT(
+    N'compressed partitions = ', @CompressedPartitionCount,
+    N'; total table partitions = ', @PartitionCount,
+    N'; compressed percentage = ', @CompressedPercent, N'%',
+    CASE WHEN @ReadError = 1 THEN N'; partition metadata could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
+
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
