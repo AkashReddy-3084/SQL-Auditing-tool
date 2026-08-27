@@ -1,123 +1,51 @@
+-- Checklist: Orchestration/dependency management exists (master package/pipeline or scheduler)
+-- Scope: SERVER
+-- Scoring: 3 = enabled jobs are scheduled and multi-step; 2 = enabled jobs are scheduled or multi-step; 1 = jobs exist without orchestration indicators; 0 = no jobs or metadata unavailable
+-- NOTE: Automated evidence only; SSIS, external pipelines, and dependency correctness require human review.
+
 SET NOCOUNT ON;
 
-DECLARE @Result          varchar(10);
-DECLARE @Score           int;
-DECLARE @DatabaseQueried nvarchar(256);
-DECLARE @Finding         nvarchar(max);
-
-DECLARE @EngineEdition int =
-    CAST(SERVERPROPERTY('EngineEdition') AS int);
-
-DECLARE @JobCount            int = 0;
-DECLARE @EnabledJobCount     int = 0;
-DECLARE @ScheduledJobCount   int = 0;
-DECLARE @MultiStepJobCount   int = 0;
-DECLARE @SsisDbExists        bit = 0;
-DECLARE @SsisProjectCount    int = 0;
-DECLARE @SsisPackageCount    int = 0;
-DECLARE @MasterPackageCount  int = 0;
+DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
+DECLARE @Finding NVARCHAR(MAX) = N'SQL Agent orchestration metadata could not be evaluated';
+DECLARE @Jobs INT = 0;
+DECLARE @Enabled INT = 0;
+DECLARE @Scheduled INT = 0;
+DECLARE @MultiStep INT = 0;
+DECLARE @EngineEdition INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
 
 IF @EngineEdition = 5
 BEGIN
-    SET @DatabaseQueried = ISNULL(DB_NAME(), N'None');
-    SET @Score = 0;
-    SET @Finding = N'Azure SQL Database does not host SQL Agent or SSISDB; T-SQL cannot verify master package/pipeline/scheduler orchestration on this engine.';
+    SET @Score = 1;
+    SET @Finding = N'Azure SQL Database does not host SQL Agent; external orchestration is not visible to this T-SQL probe';
 END
 ELSE
 BEGIN
-    SET @DatabaseQueried = N'msdb';
-
-    IF DB_ID(N'msdb') IS NOT NULL
-    BEGIN
-        SELECT
-            @JobCount = COUNT(*),
-            @EnabledJobCount = ISNULL(SUM(CASE WHEN j.enabled = 1 THEN 1 ELSE 0 END), 0)
-        FROM msdb.dbo.sysjobs AS j;
-
-        SELECT @ScheduledJobCount = COUNT(DISTINCT j.job_id)
+    BEGIN TRY
+        SELECT @Jobs = COUNT(*),
+               @Enabled = ISNULL(SUM(CASE WHEN j.enabled = 1 THEN 1 ELSE 0 END), 0),
+               @Scheduled = ISNULL(SUM(CASE WHEN x.sched > 0 THEN 1 ELSE 0 END), 0),
+               @MultiStep = ISNULL(SUM(CASE WHEN x.steps > 1 THEN 1 ELSE 0 END), 0)
         FROM msdb.dbo.sysjobs AS j
-        INNER JOIN msdb.dbo.sysjobschedules AS js
-            ON js.job_id = j.job_id
-        INNER JOIN msdb.dbo.sysschedules AS s
-            ON s.schedule_id = js.schedule_id
-        WHERE j.enabled = 1
-          AND s.enabled = 1;
+        OUTER APPLY
+        (
+            SELECT
+                (SELECT COUNT(*) FROM msdb.dbo.sysjobschedules AS s WHERE s.job_id = j.job_id) AS sched,
+                (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps AS st WHERE st.job_id = j.job_id) AS steps
+        ) AS x;
 
-        SELECT @MultiStepJobCount = COUNT(*)
-        FROM (
-            SELECT js.job_id
-            FROM msdb.dbo.sysjobsteps AS js
-            INNER JOIN msdb.dbo.sysjobs AS j
-                ON j.job_id = js.job_id
-            WHERE j.enabled = 1
-            GROUP BY js.job_id
-            HAVING COUNT(*) > 1
-        ) AS multi_step_jobs;
-    END
-
-    IF DB_ID(N'SSISDB') IS NOT NULL
-    BEGIN
-        SET @SsisDbExists = 1;
-        SET @DatabaseQueried = N'msdb, SSISDB';
-
-        SELECT @SsisProjectCount = COUNT(*)
-        FROM SSISDB.catalog.projects;
-
-        SELECT @SsisPackageCount = COUNT(*)
-        FROM SSISDB.catalog.packages;
-
-        SELECT @MasterPackageCount = COUNT(*)
-        FROM SSISDB.catalog.packages AS p
-        WHERE LOWER(p.name) LIKE N'%master%'
-           OR LOWER(p.name) LIKE N'%orch%'
-           OR LOWER(p.name) LIKE N'%control%'
-           OR LOWER(p.name) LIKE N'%parent%'
-           OR LOWER(p.name) LIKE N'%main%';
-    END
-
-    IF (
-            @ScheduledJobCount >= 3
-            AND @MultiStepJobCount >= 2
-        )
-        OR (
-            @SsisProjectCount >= 1
-            AND @SsisPackageCount >= 2
-            AND @MasterPackageCount >= 1
-        )
-        OR (
-            @ScheduledJobCount >= 1
-            AND @MultiStepJobCount >= 1
-            AND @SsisPackageCount >= 2
-        )
-        SET @Score = 3;
-    ELSE IF (
-            @ScheduledJobCount >= 1
-            AND @MultiStepJobCount >= 1
-        )
-        OR @SsisPackageCount >= 2
-        OR @ScheduledJobCount >= 2
-        SET @Score = 2;
-    ELSE IF @JobCount >= 1 OR @SsisPackageCount >= 1
-        SET @Score = 1;
-    ELSE
+        SET @Score = CASE WHEN @Jobs = 0 THEN 0
+                          WHEN @Enabled > 0 AND @Scheduled = @Enabled AND @MultiStep = @Enabled THEN 3
+                          WHEN @Scheduled > 0 OR @MultiStep > 0 THEN 2
+                          ELSE 1 END;
+        SET @Finding = N'jobs=' + CONVERT(NVARCHAR(20), @Jobs) + N', enabled=' + CONVERT(NVARCHAR(20), @Enabled) + N', scheduled=' + CONVERT(NVARCHAR(20), @Scheduled) + N', multi_step=' + CONVERT(NVARCHAR(20), @MultiStep);
+    END TRY
+    BEGIN CATCH
         SET @Score = 0;
-
-    SET @Finding =
-        N'SQL Agent jobs=' + CAST(ISNULL(@JobCount, 0) AS nvarchar(20))
-        + N', enabled=' + CAST(ISNULL(@EnabledJobCount, 0) AS nvarchar(20))
-        + N', scheduled_enabled=' + CAST(ISNULL(@ScheduledJobCount, 0) AS nvarchar(20))
-        + N', multi_step_enabled=' + CAST(ISNULL(@MultiStepJobCount, 0) AS nvarchar(20))
-        + N'; SSISDB=' + CASE WHEN @SsisDbExists = 1 THEN N'yes' ELSE N'no' END
-        + N', projects=' + CAST(ISNULL(@SsisProjectCount, 0) AS nvarchar(20))
-        + N', packages=' + CAST(ISNULL(@SsisPackageCount, 0) AS nvarchar(20))
-        + N', master_like_packages=' + CAST(ISNULL(@MasterPackageCount, 0) AS nvarchar(20))
-        + N'.';
-END
+        SET @Finding = N'Unable to read SQL Agent orchestration metadata: ' + ERROR_MESSAGE();
+    END CATCH;
+END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    @Result AS Result,
-    @Score AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
