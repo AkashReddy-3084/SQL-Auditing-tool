@@ -137,10 +137,15 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    answer as given — do not judge whether it is sufficient, do not ask for more detail, and
    do not argue for a different outcome. Re-ask only if they gave no observation at all.
 7. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
-   (`pass` or `fail`), and `--notes` containing the user's own words. Then run **enrich_result**
-   for the same item with wording *you* derive from their evidence — finding, evidence,
-   riskImpact and recommendation, using only facts they stated. The reviewer's raw words must
-   never be left as the report Finding.
+   (`pass`, `fail` or `notapplicable`), and `--notes` containing the user's own words. Then run
+   **enrich_result** for the same item with wording *you* derive from their evidence — finding,
+   evidence, riskImpact and recommendation, using only facts they stated. The reviewer's raw words
+   must never be left as the report Finding.
+   - Use `--decision notapplicable` when what the user reports shows the control does not exist on
+     this server at all — every value absent, empty, zero or irrelevant to the item, so there is
+     nothing to assess. The item is then excluded from every score, listed on the workbook's
+     "Not Applicable Items" sheet and reported as **Not Applicable**, never as Pass or Fail, and it
+     needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
 8. Do not write a final summary until every review item is resolved and every script item
    is enriched. **No report has been generated at this point.** Ask the user exactly:
    "Evaluation completed. Do you want to generate the summary/report?" — and never decide for them.

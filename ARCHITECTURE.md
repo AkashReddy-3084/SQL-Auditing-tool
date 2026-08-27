@@ -139,6 +139,9 @@ graph TD
 - Sends prompt to model provider and parses structured response.
 - If response is feasible and parseable, uses AI-MCP result.
 - An item it cannot decide is handed to the manual stage; the worker immediately takes the next item.
+- If the snapshot holds no supporting artefact for the item (every relevant value irrelevant,
+  NULL, empty or zero), the control does not exist to be assessed: the evidence opens with
+  `Not Applicable.` and the outcome is `Not Applicable`, which is excluded from all scoring.
 
 3. AI-Manual technique
 - Fallback when MCP is unavailable, infeasible, or when no SQL connection.
