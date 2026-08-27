@@ -625,7 +625,7 @@ namespace SQLAuditor.Agents
 
 
             // ==========================================
-            // SCOPE with fallback to SERVER
+            // SCOPE is mandatory; ScriptOutputValidator rejects a missing value.
             // ==========================================
 
             var scope =
@@ -643,9 +643,9 @@ namespace SQLAuditor.Agents
             }
             else
             {
-                response.Scope = "SERVER";
+                response.Scope = "";
                 Console.WriteLine(
-                    "    ⚠ SCOPE missing, defaulted to 'SERVER'");
+                    "    ⚠ SCOPE missing");
             }
 
 

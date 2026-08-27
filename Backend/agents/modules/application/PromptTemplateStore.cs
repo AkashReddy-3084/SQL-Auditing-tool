@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -7,7 +8,8 @@ namespace SQLAuditor.Lib;
 
 internal static class PromptTemplateStore
 {
-    private static readonly Dictionary<string, string> Cache = new(StringComparer.OrdinalIgnoreCase);
+    // Loaded from every evaluation stage at once, so the cache must tolerate concurrent writes.
+    private static readonly ConcurrentDictionary<string, string> Cache = new(StringComparer.OrdinalIgnoreCase);
 
     public static string Render(string fileName, IReadOnlyDictionary<string, string> variables)
     {

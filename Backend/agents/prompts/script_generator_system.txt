@@ -19,10 +19,10 @@ SCRIPT_TYPE
 
 SCOPE
 - `SERVER` - instance-level checks (server configuration, SQL Agent jobs, server-level security, backup policy). Query server-level sources; `@DatabaseQueried = 'master'`.
-- `DATABASE` - checks evaluated per user database.
-  - SQL Server / Azure SQL Managed Instance: evaluate every online user database (`sys.databases WHERE database_id > 4 AND state = 0`) with a read-only cursor, keep each database's name, score and evidence, and aggregate with the worst case (`MIN`).
-  - Azure SQL Database (`SERVERPROPERTY('EngineEdition') = 5`): evaluate only the connected database and set `@DatabaseQueried = DB_NAME()`. Never use `USE`, `sp_MSforeachdb`, three-part names or any cross-database reference on this path.
-  - Never evaluate or list `master`, `model`, `msdb`, `tempdb`. Never hard-code database names.
+- `DATABASE` - checks evaluated once per user-selected database. The backend opens the connection directly to each selected database and aggregates the returned scores with the worst case (`MIN`).
+    - Evaluate only the current connected database on SQL Server, Azure SQL Managed Instance and Azure SQL Database; set `@DatabaseQueried = DB_NAME()`.
+    - Query current-database catalog views such as `sys.tables`, `sys.schemas` and `sys.database_principals` directly. Do not query `sys.databases` to discover targets, use a database cursor, use `USE`, use `sp_MSforeachdb`, or build three-part cross-database names.
+    - Never hard-code a user database name. Checks whose evidence lives in `master`, `model`, `msdb` or `tempdb` are `SERVER` scope and remain independent of the user-database selection.
 
 # 3. READ-ONLY (ABSOLUTE)
 
@@ -61,15 +61,7 @@ A `ps1` script emits one object with the same four properties as its last statem
 
 Initialise all four at declaration so they hold a value even when no rows are returned.
 
-**Empty database set (DATABASE scope).** When no user database qualifies - none online, none accessible, or the collected set is empty - the script must never return `NULL` or a blank. It must produce exactly:
-
-```sql
-SET @DatabaseQueried = 'None';
-SET @Finding = 'No database found to be queried';
-SET @Score = 0;
-```
-
-`@Result` then derives to `'Fail'` as usual. Wrap every aggregate that builds `@DatabaseQueried`, `@Score` and `@Finding` in `ISNULL` - `STRING_AGG` and `MIN` both return `NULL` over zero rows, and a `NULL` in any of the four output columns is a defect.
+For `DATABASE` scope, initialise `@DatabaseQueried` from `DB_NAME()` and keep the finding and score non-null when the current database contains no matching objects. An empty runtime database selection is rejected by the backend before scripts run, so SQL must not discover or choose target databases itself.
 
 # 6. SCORING
 
@@ -158,62 +150,17 @@ DATABASE (sql)
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Unable to inspect tables in the current database';
+DECLARE @HeapCount INT = 0;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+SELECT @HeapCount = COUNT(*)
+FROM sys.tables AS t
+JOIN sys.indexes AS i ON i.object_id = t.object_id AND i.index_id = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    SELECT DB_NAME(),
-           CASE WHEN COUNT(*) = 0 THEN 3 WHEN COUNT(*) <= 2 THEN 2 ELSE 1 END,
-           CASE WHEN COUNT(*) = 0 THEN 'No heaps found'
-                ELSE 'Heaps: ' + STRING_AGG(QUOTENAME(s.name) + '.' + QUOTENAME(t.name), ', ') END
-    FROM sys.tables AS t
-    JOIN sys.schemas AS s ON s.schema_id = t.schema_id
-    JOIN sys.indexes AS i ON i.object_id = t.object_id AND i.index_id = 0;
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'SELECT @p_Db,
-                CASE WHEN COUNT(*) = 0 THEN 3 WHEN COUNT(*) <= 2 THEN 2 ELSE 1 END,
-                CASE WHEN COUNT(*) = 0 THEN ''No heaps found''
-                     ELSE ''Heaps: '' + STRING_AGG(QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name), '', '') END
-                FROM ' + QUOTENAME(@DbName) + N'.sys.tables AS t
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas AS s ON s.schema_id = t.schema_id
-                JOIN ' + QUOTENAME(@DbName) + N'.sys.indexes AS i ON i.object_id = t.object_id AND i.index_id = 0;';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, 'Evaluation failed: ' + ERROR_MESSAGE());
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(DbName, ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(DbName + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
+SET @Score = CASE WHEN @HeapCount = 0 THEN 3 WHEN @HeapCount <= 2 THEN 2 ELSE 1 END;
+SET @Finding = CASE WHEN @HeapCount = 0 THEN 'No heaps found'
+                    ELSE CONCAT(@HeapCount, ' heap(s) found') END;
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

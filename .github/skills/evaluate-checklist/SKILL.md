@@ -98,7 +98,12 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 2. Ask for the user's **Pass/Fail decision**. The verdict is theirs — never infer it, assume it,
    announce it, or argue for a different one.
 3. Ask **one** follow-up: what they inspected and what they found. Accept the answer as given.
-4. Call `resolve_review(id, decision, notes=<their own words>)`.
+4. Call `resolve_review(id, decision, notes=<their own words>)`. Use `decision="notapplicable"`
+   when what they report shows the control does not exist on this server at all — every value
+   absent, empty, zero or irrelevant to the item, so there is nothing to assess. That item is
+   excluded from every score, lands on the workbook's "Not Applicable Items" sheet and is reported
+   as **Not Applicable**, never as Pass or Fail; skip step 5 for it. A zero that itself proves
+   compliance is a Pass, not this.
 5. Call `enrich_result` for the same item with wording **you** derive from their evidence. Their
    raw words must never be left as the report Finding.
 

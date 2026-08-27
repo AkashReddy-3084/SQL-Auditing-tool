@@ -106,6 +106,13 @@ namespace SQLAuditor.Agents
                     "Missing SCRIPT_TYPE and could not infer from content");
             }
 
+            if (!string.Equals(response.Scope, "SERVER", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(response.Scope, "DATABASE", StringComparison.OrdinalIgnoreCase))
+            {
+                return Invalid(
+                    "Missing or invalid SCOPE; emit exactly SCOPE: SERVER or SCOPE: DATABASE");
+            }
+
 
             // ScriptName should exist after fallback generation
             if (string.IsNullOrWhiteSpace(response.ScriptName))
@@ -282,25 +289,36 @@ namespace SQLAuditor.Agents
             }
 
 
-            // ---- empty database set ---------------------------------------------
+            // ---- database execution scope ---------------------------------------
 
             if (string.Equals(scope, "DATABASE", StringComparison.OrdinalIgnoreCase))
             {
-                // Literals are stripped from Code by Tokenize, so match on the literal content.
-                if (!tokens.Literals.Exists(l => l.Trim().Equals("None", StringComparison.OrdinalIgnoreCase)))
+                if (!Regex.IsMatch(code, @"@DatabaseQueried\b[^;]{0,300}\bDB_NAME\s*\(", Opts))
                 {
                     return Invalid(
-                        "A DATABASE-scope script must set @DatabaseQueried = 'None' when no user " +
-                        "database qualifies, with @Finding = 'No database found to be queried' and " +
-                        "@Score = 0 so @Result derives to 'Fail'.");
+                        "A DATABASE-scope script must set @DatabaseQueried from DB_NAME(); " +
+                        "the backend selects and connects to each target database at runtime.");
                 }
 
-                if (!Regex.IsMatch(code, @"\b(ISNULL|COALESCE)\s*\(", Opts))
+                if (Regex.IsMatch(
+                    code,
+                    @"\b(FROM|JOIN)\s+(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)\b",
+                    Opts))
                 {
                     return Invalid(
-                        "A DATABASE-scope script must wrap its aggregates in ISNULL/COALESCE - " +
-                        "STRING_AGG and MIN return NULL over zero rows, which would leak NULL into " +
-                        "Result, Score, DatabaseQueried or Finding.");
+                        "A DATABASE-scope script must not discover targets through sys.databases; " +
+                        "query only the current database selected by the backend.");
+                }
+
+                var combinedLiterals = string.Join(" ", tokens.Literals);
+                if (Regex.IsMatch(
+                    combinedLiterals,
+                    @"\b(FROM|JOIN)\s+(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)\b",
+                    Opts))
+                {
+                    return Invalid(
+                        "A DATABASE-scope script must not build dynamic SQL that discovers " +
+                        "targets through sys.databases; query only the current database.");
                 }
             }
 

@@ -236,6 +236,10 @@ public static class AuditTools
             sb.AppendLine("     Do NOT assess whether the evidence is sufficient, do NOT ask for extra detail, and do NOT argue that");
             sb.AppendLine("     the item should stay NeedsReview. Re-ask ONLY if they supplied no observation at all.");
             sb.AppendLine("  4. Immediately call 'resolve_review' with the user's decision and their exact words in 'notes'.");
+            sb.AppendLine("     If what they report shows the control does not exist on this server at all — every value absent, empty,");
+            sb.AppendLine("     zero or irrelevant to the item — it is not assessable: call resolve_review with decision='notapplicable'");
+            sb.AppendLine("     and the reason in 'notes'. It is then excluded from every score and reported as Not Applicable, never as");
+            sb.AppendLine("     Pass or Fail, and needs no enrich_result call. A zero that itself proves compliance is a Pass, not this.");
             sb.AppendLine("  5. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
             sb.AppendLine("     finding (the actual state they observed), evidence (why it supports the outcome), riskImpact (the specific");
             sb.AppendLine("     consequence) and recommendation (targeted remediation). Use ONLY facts the user stated — invent nothing.");
@@ -254,7 +258,7 @@ public static class AuditTools
                     sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
                     sb.AppendLine(r.Evidence.Trim());
                 }
-                sb.AppendLine($"Ask for the Pass/Fail decision first, then the evidence, then call: resolve_review(id=\"{r.Id}\", decision=\"pass\" or \"fail\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
+                sb.AppendLine($"Ask for the Pass/Fail decision first, then the evidence, then call: resolve_review(id=\"{r.Id}\", decision=\"pass\", \"fail\" or \"notapplicable\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
                 sb.AppendLine($"Then call: enrich_result(id=\"{r.Id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\") derived from that evidence.");
             }
         }
@@ -717,20 +721,21 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass or fail (or needsreview). Requires the reviewer's own observation/evidence text for pass and fail decisions. Updates checklist_results.json and regenerates final_report.md and audit_report.xlsx in the current run directory. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass, fail, notapplicable (or needsreview). Requires the reviewer's own observation/evidence text for pass, fail and notapplicable decisions. 'notapplicable' records that the control does not exist on this server to be assessed, so the item is excluded from every score and reported as Not Applicable. Updates checklist_results.json and regenerates final_report.md and audit_report.xlsx in the current run directory. Use after 'evaluate' surfaces manual-review items.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
-        [Description("The decision: 'pass', 'fail', or 'needsreview'.")] string decision,
-        [Description("The reviewer's observation/evidence in their own words: what they inspected and what they found (document names, settings, values, counts). Required for 'pass' and 'fail'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null)
+        [Description("The decision: 'pass', 'fail', 'notapplicable', or 'needsreview'. Use 'notapplicable' only when every value the reviewer reports is absent, empty, zero or irrelevant, so there is nothing to assess; a zero that itself proves compliance is a Pass.")] string decision,
+        [Description("The reviewer's observation/evidence in their own words: what they inspected and what they found (document names, settings, values, counts). Required for 'pass', 'fail' and 'notapplicable'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null)
     {
         if (string.IsNullOrWhiteSpace(id))
             return Task.FromResult("Error: 'id' is required.");
         if (string.IsNullOrWhiteSpace(decision))
-            return Task.FromResult("Error: 'decision' is required (pass, fail, or needsreview).");
+            return Task.FromResult("Error: 'decision' is required (pass, fail, notapplicable, or needsreview).");
 
         // The reviewer's own words are the evidence of record, so a decision cannot be
         // filed without them.
-        var isDecision = decision.Trim().ToLowerInvariant() is "pass" or "p" or "yes" or "y" or "fail" or "f" or "no" or "n";
+        var isDecision = decision.Trim().ToLowerInvariant() is "pass" or "p" or "yes" or "y" or "fail" or "f" or "no" or "n"
+            or "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a";
         if (isDecision && !IsUsableEvidence(notes))
             return Task.FromResult(
                 $"Error: 'notes' must contain the reviewer's actual observation for [{id}] — what they checked and what they found. "
@@ -738,12 +743,20 @@ public static class AuditTools
 
         var auditor = new Auditor(string.Empty);
         if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
+        {
+            if (NotApplicableEvidence.IsNotApplicableOutcome(newOutcome))
+                return Task.FromResult(
+                    $"Updated [{id}] -> {newOutcome}. results/checklist_results.json, results/final_report.md and results/audit_report.xlsx regenerated. "
+                    + "The item is excluded from every score and is listed on the 'Not Applicable Items' sheet — report it as Not Applicable, never as Pass or Fail. "
+                    + "No enrich_result call is needed for it.");
+
             return Task.FromResult(
                 $"Updated [{id}] -> {newOutcome}. Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}. "
                 + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the reviewer's evidence above — finding, evidence, riskImpact and recommendation — using only facts the reviewer stated.");
+        }
 
         return Task.FromResult(
-            $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+            $"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/notapplicable/needsreview.");
     }
 
     // A restatement of the verdict carries no information about what was inspected.

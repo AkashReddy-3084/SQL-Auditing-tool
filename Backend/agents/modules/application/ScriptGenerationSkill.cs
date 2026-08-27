@@ -435,6 +435,7 @@ public static class ScriptGenerationSkill
         merged[checklistId] = new
         {
             script_file = scriptFile,
+            scope = response.Scope,
             IsAdminCheck = response.IsAdminCheck,
             IsDocumentationCheck = response.IsDocumentationCheck,
             MCP_Feasibility = response.McpFeasibility
