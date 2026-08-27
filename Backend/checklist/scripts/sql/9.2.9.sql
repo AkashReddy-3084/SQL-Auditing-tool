@@ -1,45 +1,56 @@
 -- Checklist: AG / cluster health and replica synchronization state actively monitored - unhealthy or not-synchronizing replicas alerted
 -- Scope: SERVER
--- Scoring: 3 = all database replicas HEALTHY and an AG-health alert exists (or Azure SQL DB platform-managed); 2 = healthy but no alert configured, or an alert exists but a replica is unhealthy; 1 = an unhealthy/not-synchronizing replica exists and no alert configured; 0 = no AG configured and not Azure SQL Database
+-- Scoring: 3 = AGs exist, no unhealthy databases are reported, and AG alerts plus enabled alerts are present; 2 = AGs exist with no unhealthy databases or relevant alerts; 1 = AGs exist but unhealthy databases are reported without relevant alerts; 0 = no AG or evidence is unavailable
+-- NOTE: Automated evidence confirms metadata and alert definitions; alert routing and operational response require human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
-DECLARE @Finding NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
+DECLARE @Finding NVARCHAR(MAX) = N'AG health and alert evidence unavailable';
+DECLARE @AvailabilityGroupCount INT = 0;
+DECLARE @UnhealthyDatabaseCount INT = 0;
+DECLARE @AgAlertCount INT = 0;
+DECLARE @EnabledAlertCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    SET @Score = 3;
-    SET @Finding = 'Azure SQL Database: replication health monitoring is platform-managed';
-END
-ELSE
-BEGIN
-    DECLARE @AgCount INT = 0, @UnhealthyReplicaCount INT = 0, @TotalReplicaDbCount INT = 0, @AgAlertCount INT = 0;
+BEGIN TRY
+    SELECT @AvailabilityGroupCount = COUNT(*)
+    FROM sys.availability_groups;
 
-    IF OBJECT_ID('sys.availability_groups') IS NOT NULL
-    BEGIN
-        SELECT @AgCount = COUNT(*) FROM sys.availability_groups;
+    SELECT @UnhealthyDatabaseCount = COUNT(*)
+    FROM sys.dm_hadr_database_replica_states
+    WHERE synchronization_health_desc <> N'HEALTHY';
 
-        SELECT @TotalReplicaDbCount = COUNT(*) FROM sys.dm_hadr_database_replica_states;
+    SELECT @AgAlertCount = COUNT(*)
+    FROM msdb.dbo.sysalerts
+    WHERE name LIKE N'%availab%'
+       OR name LIKE N'%replica%'
+       OR name LIKE N'%sync%';
 
-        SELECT @UnhealthyReplicaCount = COUNT(*)
-        FROM sys.dm_hadr_database_replica_states
-        WHERE synchronization_health_desc <> 'HEALTHY';
-    END
+    SELECT @EnabledAlertCount = COUNT(*)
+    FROM msdb.dbo.sysalerts
+    WHERE enabled = 1;
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-    IF OBJECT_ID('msdb.dbo.sysalerts') IS NOT NULL
-        SELECT @AgAlertCount = COUNT(*) FROM msdb.dbo.sysalerts
-        WHERE (name LIKE '%availability%' OR name LIKE '%AG%' OR message_id IN (1480, 35262, 35264))
-          AND has_notification > 0;
+SET @Score = CASE
+    WHEN @ReadError = 1 OR @AvailabilityGroupCount = 0 THEN 0
+    WHEN @UnhealthyDatabaseCount = 0 AND @AgAlertCount > 0 AND @EnabledAlertCount > 0 THEN 3
+    WHEN @UnhealthyDatabaseCount = 0 OR @AgAlertCount > 0 OR @EnabledAlertCount > 0 THEN 2
+    WHEN @UnhealthyDatabaseCount > 0 THEN 1
+    ELSE 0
+END;
 
-    SET @Score = CASE WHEN ISNULL(@AgCount,0) = 0 THEN 0
-                      WHEN ISNULL(@UnhealthyReplicaCount,0) = 0 AND ISNULL(@AgAlertCount,0) > 0 THEN 3
-                      WHEN ISNULL(@UnhealthyReplicaCount,0) = 0 OR ISNULL(@AgAlertCount,0) > 0 THEN 2
-                      ELSE 1 END;
-    SET @Finding = CASE WHEN ISNULL(@AgCount,0) = 0 THEN 'No Availability Group configured'
-                        ELSE CONCAT('Database replicas total = ', ISNULL(@TotalReplicaDbCount,0), ', unhealthy/not-synchronizing = ', ISNULL(@UnhealthyReplicaCount,0), ', AG-health alerts configured = ', ISNULL(@AgAlertCount,0)) END;
-END
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'Availability Groups = ', @AvailabilityGroupCount,
+    N'; unhealthy database replicas = ', @UnhealthyDatabaseCount,
+    N'; AG-related alerts = ', @AgAlertCount,
+    N'; enabled alerts = ', @EnabledAlertCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more AG health sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
