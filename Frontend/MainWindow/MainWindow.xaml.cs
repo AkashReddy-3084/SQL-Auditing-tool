@@ -61,6 +61,7 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.List<(string Area, SQLAuditor.Lib.ChecklistItem Item)>? _loadedStructure;
         private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
         private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
+        private System.Collections.Generic.HashSet<string> _mcpFeasibleItemIds = new(StringComparer.OrdinalIgnoreCase);
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
         private int _manualIndex = -1;
         // Checklist position per item id, so manual items generated in parallel stay in order.
@@ -240,6 +241,7 @@ namespace SQLAuditor.Wpf
 
                 // Ensure checklist is loaded
                 System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
+                _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
@@ -277,6 +279,15 @@ namespace SQLAuditor.Wpf
                                             // script_file is null (non-feasible item)
                                             mappingFile[prop.Name] = null;
                                         }
+                                    }
+
+                                    if ((!prop.Value.TryGetProperty("script_file", out var mappedScript)
+                                         || mappedScript.ValueKind == System.Text.Json.JsonValueKind.Null
+                                         || (mappedScript.ValueKind == System.Text.Json.JsonValueKind.String && string.IsNullOrWhiteSpace(mappedScript.GetString())))
+                                        && prop.Value.TryGetProperty("MCP_Feasibility", out var mcpCheck)
+                                        && mcpCheck.ValueKind == System.Text.Json.JsonValueKind.True)
+                                    {
+                                        _mcpFeasibleItemIds.Add(prop.Name);
                                     }
                                 }
                             }
@@ -380,7 +391,7 @@ namespace SQLAuditor.Wpf
                     }
                     else
                     {
-                        type = _isVerified && _auditor != null ? "AI-MCP" : "AI-Manual";
+                        type = _mcpFeasibleItemIds.Contains(it.Id) ? "AI-MCP" : "AI-Manual";
 
                         // persist into maps
                         if (_itemTypeMap != null) _itemTypeMap[it.Id] = type;
@@ -407,7 +418,7 @@ namespace SQLAuditor.Wpf
 
                     // populate mapping tree hierarchically: DisplayType -> Area -> Category -> Item (with counts)
                     MappingTree.Items.Clear();
-                    var normalized = mappingRows.Select(r => new { DisplayType = (bool)r.Copied ? "Copied from last runs" : (((string)r.Type) == "Script" ? "Script" : "AI (MCP/Manual)"), Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
+                    var normalized = mappingRows.Select(r => new { DisplayType = (bool)r.Copied ? "Copied from last runs" : (string)r.Type, Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
                     var byType = normalized.GroupBy(r => r.DisplayType).OrderBy(t => t.Key);
                     foreach (var typeGrp in byType)
                     {
@@ -536,7 +547,7 @@ namespace SQLAuditor.Wpf
                     {
                         initialTechnique = "Script";
                     }
-                    else if (_isVerified && _auditor != null)
+                    else if (_isVerified && _auditor != null && _mcpFeasibleItemIds.Contains(pair.Item.Id))
                     {
                         initialTechnique = "AI-MCP";
                     }

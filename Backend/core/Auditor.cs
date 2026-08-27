@@ -867,6 +867,7 @@ WHERE d.name = DB_NAME();";
             // load deterministic mapping if present
             var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
             var scriptScopes = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var mcpFeasibleItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // Items whose compliance can only be judged from external documentation.
             var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // Items needing elevated rights: the script is still generated, but the operator runs it.
@@ -895,6 +896,13 @@ WHERE d.name = DB_NAME();";
                             var scriptFile = prop.Value.TryGetProperty("script_file", out var sf) ? sf.GetString() : null;
                             if (!string.IsNullOrWhiteSpace(scriptFile))
                                 mapping[prop.Name] = new[] { scriptFile! };
+
+                            if (string.IsNullOrWhiteSpace(scriptFile)
+                                && prop.Value.TryGetProperty("MCP_Feasibility", out var mcpCheck)
+                                && mcpCheck.ValueKind == JsonValueKind.True)
+                            {
+                                mcpFeasibleItems.Add(prop.Name);
+                            }
 
                             if (!prop.Value.TryGetProperty("scope", out var scriptScope))
                                 prop.Value.TryGetProperty("Scope", out scriptScope);
@@ -1328,6 +1336,8 @@ WHERE d.name = DB_NAME();";
             var manualQueue = System.Threading.Channels.Channel.CreateUnbounded<ChecklistItem>();
 
             bool CanTryMcp(ChecklistItem it) =>
+                mcpFeasibleItems.Contains(it.Id)
+                &&
                 _mcpEvaluator != null
                 && !string.IsNullOrWhiteSpace(_connectionString)
                 && !IsDocumentationCheck(it)
