@@ -1035,6 +1035,13 @@ namespace SQLAuditor.Wpf
                     continue;
                 }
 
+                var status = statusEntry.Status ?? string.Empty;
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
+                {
+                    continue;
+                }
+
                 if (_manualStateMap != null
                     && _manualStateMap.TryGetValue(pair.Key, out var state)
                     && state.IsSubmitted)
@@ -1833,7 +1840,8 @@ namespace SQLAuditor.Wpf
 
                 var technique = statusEntry.Technique;
                 var status = statusEntry.Status;
-                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status))
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
                 {
                     continue;
                 }
