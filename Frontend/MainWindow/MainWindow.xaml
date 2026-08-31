@@ -241,6 +241,7 @@
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage2Label" Text="2  Checklist" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage3Label" Text="3  Evaluate" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage4Label" Text="4  Summary" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Button x:Name="ExitHeaderBtn" Content="Exit" Style="{StaticResource DangerButton}" Click="ExitHeaderBtn_Click" Margin="12,0,0,0" MinWidth="90" Visibility="Collapsed" />
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -580,7 +581,7 @@
                             </Border>
 
                             <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-                                <Button x:Name="ExitBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitBtn_Click" />
+                                <Button x:Name="ExitSummaryBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitSummaryBtn_Click" />
                             </StackPanel>
                         </Grid>
                     </ScrollViewer>

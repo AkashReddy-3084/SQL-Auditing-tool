@@ -76,7 +76,9 @@ namespace SQLAuditor.Wpf
         private bool _isLlmVerified = false;
         private Auditor? _auditor;
         private System.Threading.CancellationTokenSource? _evaluationCts;
+        private System.Threading.CancellationTokenSource? _scriptGenerationCts;
         private bool _isEvaluating = false;
+        private bool _isGeneratingScripts = false;
         private bool _allowTabChange = false;
         private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
@@ -1946,29 +1948,71 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void ExitBtn_Click(object sender, RoutedEventArgs e)
+        private bool HasActiveOperationInProgress()
         {
-            try
+            return _isEvaluating || _isGeneratingScripts;
+        }
+
+        private void ResetChecklistSessionStateForExit()
+        {
+            _checklistLoaded = false;
+            _loadedItems = null;
+            _loadedStructure = null;
+            _itemTypeMap = null;
+            _itemScriptMap = null;
+            _selectedIds = null;
+            _evalItemMap = null;
+            _evalStatusMap = null;
+            _manualQueue = null;
+            _manualInstructions = null;
+            _manualStateMap = null;
+            _manualIndex = -1;
+            _copiedManualIds.Clear();
+            _historicalManualIds.Clear();
+            ChecklistTree.Items.Clear();
+            MappingTree.Items.Clear();
+            Log("Checklist state refreshed on exit.");
+        }
+
+        private void HandleExitNavigation()
+        {
+            if (HasActiveOperationInProgress())
             {
-                if (_isEvaluating)
+                var currentPage = MainTabs.SelectedIndex == 0 ? "Login" : MainTabs.SelectedIndex == 1 ? "Checklist" : MainTabs.SelectedIndex == 2 ? "Evaluate" : "Summary";
+                var result = MessageBox.Show(
+                    $"A {currentPage} operation is still in progress. Do you want to cancel it and exit?",
+                    "Exit with active operation",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result != MessageBoxResult.Yes)
                 {
-                    var choice = MessageBox.Show(
-                        "An evaluation is still running. Exit anyway?",
-                        "Exit SQL Auditor",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning);
-                    if (choice != MessageBoxResult.Yes) return;
-
-                    try { _evaluationCts?.Cancel(); } catch { }
+                    return;
                 }
+            }
 
-                try { _progressWatcherCts?.Cancel(); } catch { }
-            }
-            catch { }
-            finally
+            CancelActiveEvaluationIfNeeded();
+            _scriptGenerationCts?.Cancel();
+            _isGeneratingScripts = false;
+
+            if (MainTabs.SelectedIndex == 1)
             {
-                Application.Current.Shutdown();
+                ResetChecklistSessionStateForExit();
             }
+
+            var destination = MainTabs.SelectedIndex == 1 ? 0 : 1;
+            SetTabIndex(destination);
+            UpdateStageIndicators();
+        }
+
+        private void ExitHeaderBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
+        }
+
+        private void ExitSummaryBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
         }
 
         private async Task EnsureAuditor(string fqdn)
@@ -2034,6 +2078,22 @@ namespace SQLAuditor.Wpf
                 MainTabs.SelectedIndex = idx;
             }
             finally { _allowTabChange = false; }
+        }
+
+        private void CancelActiveEvaluationIfNeeded()
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                try { _pendingUserInput.TrySetCanceled(); } catch { }
+            }
+
+            if (_evaluationCts != null && !_evaluationCts.IsCancellationRequested)
+            {
+                try { _evaluationCts.Cancel(); } catch { }
+            }
+
+            _isEvaluating = false;
+            Log("Evaluation cancelled by exit request.");
         }
 
         private void InvalidateSqlVerification()
@@ -2465,6 +2525,8 @@ namespace SQLAuditor.Wpf
         private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
         {
             GenerateScriptsBtn.IsEnabled = false;
+            _isGeneratingScripts = true;
+            _scriptGenerationCts = new System.Threading.CancellationTokenSource();
 
             try
             {
@@ -2579,6 +2641,9 @@ namespace SQLAuditor.Wpf
             }
             finally
             {
+                _isGeneratingScripts = false;
+                _scriptGenerationCts?.Dispose();
+                _scriptGenerationCts = null;
                 GenerateScriptsBtn.IsEnabled = _checklistLoaded;
             }
         }
@@ -2641,6 +2706,7 @@ namespace SQLAuditor.Wpf
                 Stage2Label.FontWeight = MainTabs.SelectedIndex == 1 ? FontWeights.Bold : FontWeights.Normal;
                 Stage3Label.FontWeight = MainTabs.SelectedIndex == 2 ? FontWeights.Bold : FontWeights.Normal;
                 Stage4Label.FontWeight = MainTabs.SelectedIndex == 3 ? FontWeights.Bold : FontWeights.Normal;
+                ExitHeaderBtn.Visibility = MainTabs.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
 
                 // Allow loading checklist at any time (user action required)
                 LoadChecklistBtn.IsEnabled = true;
