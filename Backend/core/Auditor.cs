@@ -833,11 +833,8 @@ WHERE d.name = DB_NAME();";
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
-<<<<<<< HEAD
             var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
             _mcpEvaluator?.ResetSnapshotCache();
-=======
->>>>>>> origin/Integrate-Script-Generator-Agent
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
 
@@ -1637,16 +1634,12 @@ WHERE d.name = DB_NAME();";
             };
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
 
-<<<<<<< HEAD
             var resultsDir = AuditOutputPaths.CurrentRunDirectory;
-=======
             // Nothing about the control could be assessed, so it is excluded from every score -
             // the same standing a script- or MCP-evaluated item gets when its evidence declares
             // it not applicable.
             var isNotApplicable = NotApplicableEvidence.IsNotApplicableOutcome(outcome);
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
->>>>>>> origin/Integrate-Script-Generator-Agent
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath)) return false;
 
