@@ -18,8 +18,8 @@
       "type": "stdio",
       // Portable path: ${workspaceFolder} resolves to wherever this repo is
       // cloned, so it works on any machine/username. Build the server first:
-      //   dotnet build "Backend/agents/modules/IDE/SQLAuditor.Mcp.csproj"
-      "command": "${workspaceFolder}\\Backend\\agents\\modules\\IDE\\bin\\Debug\\net8.0\\SQLAuditor.Mcp.exe",
+      //   dotnet build "Backend/IDE/SQLAuditor.Mcp.csproj"
+      "command": "${workspaceFolder}\\Backend\\IDE\\bin\\Debug\\net8.0\\SQLAuditor.Mcp.exe",
       // Run from the repo folder so the engine can locate the checklist and
       // write results/ (final_report.md, checklist_results.json).
       "cwd": "${workspaceFolder}"

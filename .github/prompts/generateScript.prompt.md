@@ -20,7 +20,7 @@ Follow the repository skill `.github/skills/generate-script/SKILL.md` exactly. I
    call the `generate_scripts` tool on the `sql-auditor` MCP server with `batch=1`. The tool
    parses single IDs, comma-separated lists and ranges itself — do not pre-expand them and
    do not reformat them. Only ask a question if no checklist ID was supplied at all.
-3. Use the MCP tools, not `tools/sql-auditor.ps1` and not file-editing tools.
+3. Use the MCP tools, not `Backend/CLI/sql-auditor.ps1` and not file-editing tools.
 4. The tool serves **one batch of 10 items at a time** and defaults to **subagent mode**: it
    returns a dispatch manifest, not the scripts. Issue every `runSubagent` call it lists **in a
    single message** so the items are generated concurrently in independent sessions. Each

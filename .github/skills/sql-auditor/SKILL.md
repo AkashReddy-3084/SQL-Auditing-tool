@@ -15,7 +15,7 @@ results. It makes **no LLM/API calls** and does **not** read `.env`, `PROVIDER_B
 or to supply any LLM configuration.
 
 All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper script
-`tools/sql-auditor.ps1`, which locates or builds `SQLAuditor.exe` automatically.
+`Backend/CLI/sql-auditor.ps1`, which locates or builds `SQLAuditor.exe` automatically.
 
 > **Always show the manual verification steps.** After running `evaluate`, your first
 > response must present the full Manual Verification Steps (objective, numbered steps, and
@@ -34,20 +34,20 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 
 - **evaluate** — run the evaluation engine (no LLM) and surface Needs Review items:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 evaluate --copilot --manual-results <last-runs|fresh> --items <ids> --server <host> [--user <name>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results <last-runs|fresh> --items <ids> --server <host> [--user <name>]
   ```
   `--manual-results` is **required** and must come from the user (see step 1 below).
 - **generate_report** — refresh the historical manual results and render the final outputs:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_report
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report
   ```
 - **resolve_review** — record a decision for one Needs Review item:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview> --notes "<rationale>"
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview> --notes "<rationale>"
   ```
 - **enrich_result** — record the audit wording you authored for one script-evaluated item:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence-file "<path>" --risk "<riskImpact>" --recommendation "<recommendation>"
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence-file "<path>" --risk "<riskImpact>" --recommendation "<recommendation>"
   ```
   Every field also has a file form — `--finding-file`, `--evidence-file`, `--risk-file`,
   `--recommendation-file` — and `resolve_review` has `--notes-file`. **A quote character inside
@@ -55,20 +55,20 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   above all) to a file and pass the path instead of the text.
 - **generate_scripts** — GENERATE audit scripts for checklist items (no LLM endpoint, no SQL Server):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_scripts --items <ids>
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items <ids>
   ```
 - **save_generated_script** — validate and save one script you generated (after generate_scripts):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file> [--validation-file <path-to-verdict-file>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file> [--validation-file <path-to-verdict-file>]
   ```
   Without `--validation-file` it prints the standard C1-C7 validation prompt and saves nothing.
 - **load_checklist** — list the checklist structure (read-only):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --dump-checklist
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 --dump-checklist
   ```
 - **show_reports** — print the generated report (add `--kind json` for raw results):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --show-reports
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 --show-reports
   ```
 
 ## Workflow (drive this end to end)
@@ -179,30 +179,30 @@ are needed.
    `---CORRECTED_SCRIPT_END---`. Nothing is written to disk until a verdict is supplied. If it
    reports `VALIDATION FAILED` or `VALIDATION REJECTED`, correct the script and save again
    (retry up to 3 times). On success it writes the script under
-   `Backend/checklist/scripts/` and updates
-   `Backend/checklist/deterministic-script-mapping.json` and
+   `Backend/checklists/Scripts/` and updates
+   `Backend/checklists/deterministic-script-mapping.json` and
    `Backend/results/execution-results.json`.
 
 ## Examples
 
 ```powershell
 # Evaluate two controls against a local server (Windows auth, fresh manual evaluation)
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 evaluate --copilot --manual-results fresh --items 1.1.1,3.1.4 --server localhost
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results fresh --items 1.1.1,3.1.4 --server localhost
 
 # Re-run reusing the manual results recorded by the previous audit
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost
 
 # Record a decision after reviewing with the user
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
 
 # Generate audit scripts for two controls (no server needed), then save one
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_scripts --items 1.1.2,3.1.1
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt --validation-file .\results\3.1.1.verdict.txt
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items 1.1.2,3.1.1
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt --validation-file .\results\3.1.1.verdict.txt
 
 # Show the final report
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 generate_report
-powershell -ExecutionPolicy Bypass -File tools\sql-auditor.ps1 --show-reports
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 --show-reports
 ```
 
 ## Notes

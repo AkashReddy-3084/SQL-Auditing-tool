@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\core\SQLAuditor.Lib.csproj" />
+    <ProjectReference Include="..\Application\core\SQLAuditor.Lib.csproj" />
   </ItemGroup>
 
   <ItemGroup>

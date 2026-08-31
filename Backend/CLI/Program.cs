@@ -103,7 +103,7 @@ namespace SQLAuditor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("1) Run deterministic scripts (from Backend/checklist/tools/sql)");
+                Console.WriteLine("1) Run deterministic scripts (from Backend/checklists/Scripts/sql)");
                 Console.WriteLine("2) Run single script file");
                 Console.WriteLine("3) Show implementation mapping file");
                 Console.WriteLine("4) Run checklist evaluation (script/AI/User input)");

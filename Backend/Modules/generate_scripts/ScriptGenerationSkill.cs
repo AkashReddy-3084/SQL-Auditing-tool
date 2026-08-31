@@ -15,7 +15,7 @@ namespace SQLAuditor.Lib;
 /// Shared "generate scripts" skill for the IDE (MCP) and CLI hosts. Unlike the WPF app —
 /// which drives <see cref="ScriptGeneratorAgent"/> against a configured LLM endpoint —
 /// GitHub Copilot is the AI here, so this helper makes NO LLM/API calls. It runs the same
-/// pipeline on the same four prompt templates in Backend/agents/prompts
+/// pipeline on the same four prompt templates in Backend/Modules/generate_scripts/prompts
 /// (script_generator_system.txt, script_generator_user.txt, script_validation_system.txt,
 /// script_validation_user.txt), plus <see cref="ScriptOutputValidator"/>, the
 /// <see cref="ScriptGenerationResponse"/> parser and the exact on-disk layout that
@@ -40,7 +40,7 @@ public static class ScriptGenerationSkill
             {
                 foreach (var name in new[] { "master-checklist.json", "master_checklist.json" })
                 {
-                    var candidate = Path.Combine(dir.FullName, "Backend", "checklist", name);
+                    var candidate = Path.Combine(dir.FullName, "Backend", "checklists", name);
                     if (File.Exists(candidate))
                         return Path.Combine(dir.FullName, "Backend");
                 }
@@ -49,7 +49,7 @@ public static class ScriptGenerationSkill
         }
 
         throw new DirectoryNotFoundException(
-            "Cannot locate the repository root (Backend/checklist/master-checklist.json not found). "
+            "Cannot locate the repository root (Backend/checklists/master-checklist.json not found). "
             + "Run from the SQL-Auditing-tool folder.");
     }
 
@@ -59,7 +59,7 @@ public static class ScriptGenerationSkill
     /// and script_validation_user.txt.
     /// </summary>
     public static string ResolvePromptsDir() =>
-        Path.Combine(ResolveBasePath(), "agents", "prompts");
+        Path.Combine(ResolveBasePath(), "Modules", "generate_scripts", "prompts");
 
     // Missing template is a hard failure: silently falling back would let the host answer from
     // its own reasoning instead of the standard schema and validation rules.
@@ -251,8 +251,8 @@ public static class ScriptGenerationSkill
             return $"Error: no generated response supplied for '{checklistId}'. Generate the script first, then save its full raw output.";
 
         var basePath = ResolveBasePath();
-        var sqlDir = Path.Combine(basePath, "checklist", "scripts", "sql");
-        var ps1Dir = Path.Combine(basePath, "checklist", "scripts", "ps1");
+        var sqlDir = Path.Combine(basePath, "checklists", "Scripts", "sql");
+        var ps1Dir = Path.Combine(basePath, "checklists", "Scripts", "ps1");
         var resultsDir = Path.Combine(basePath, "results");
         Directory.CreateDirectory(sqlDir);
         Directory.CreateDirectory(ps1Dir);
@@ -361,7 +361,7 @@ public static class ScriptGenerationSkill
         await File.WriteAllTextAsync(scriptPath, response.ScriptContent, cancellationToken);
 
         // STEP — update mapping + execution-results (same shapes the agent writes).
-        var relativeScriptFile = $"Backend/checklist/scripts/{response.ScriptType}/{filename}";
+        var relativeScriptFile = $"Backend/checklists/Scripts/{response.ScriptType}/{filename}";
         UpsertMapping(basePath, checklistId, relativeScriptFile, response);
 
         await UpsertExecutionResultAsync(resultsDir, new ExecutionResultEntry
@@ -406,7 +406,7 @@ public static class ScriptGenerationSkill
     private static void UpsertMapping(
         string basePath, string checklistId, string? scriptFile, ScriptGenerationResponse response)
     {
-        var mappingPath = Path.Combine(basePath, "checklist", "deterministic-script-mapping.json");
+        var mappingPath = Path.Combine(basePath, "checklists", "deterministic-script-mapping.json");
 
         var mapping = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(mappingPath))

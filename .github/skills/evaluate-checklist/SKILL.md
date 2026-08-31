@@ -11,7 +11,7 @@ scores them and writes the report files — it makes **no LLM calls**. Everythin
 its configured model to do, you do here: author the audit wording for script-evaluated items and
 act as the reviewer for items the scripts could not decide.
 
-Use the **MCP tools**. Do **not** shell out to `tools/sql-auditor.ps1` — that wrapper is for
+Use the **MCP tools**. Do **not** shell out to `Backend/CLI/sql-auditor.ps1` — that wrapper is for
 Copilot CLI and bypasses this flow.
 
 > **Evaluation, not generation.** Never call `generate_scripts` or `save_generated_script` here.

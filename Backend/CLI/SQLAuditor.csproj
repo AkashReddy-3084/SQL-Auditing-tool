@@ -14,12 +14,7 @@
 
   <!-- The Exe only provides the entry point; all engine types come from the Lib. -->
   <ItemGroup>
-    <Compile Remove="Auditor.cs" />
-    <Compile Remove="AuditOutputPaths.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="SQLAuditor.Lib.csproj" />
+    <ProjectReference Include="..\Application\core\SQLAuditor.Lib.csproj" />
   </ItemGroup>
 
 </Project>

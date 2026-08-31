@@ -11,6 +11,15 @@ internal static class PromptTemplateStore
     // Loaded from every evaluation stage at once, so the cache must tolerate concurrent writes.
     private static readonly ConcurrentDictionary<string, string> Cache = new(StringComparer.OrdinalIgnoreCase);
 
+    // Each prompt lives with the module that owns it, so a template is looked up across them.
+    private static readonly string[] PromptDirectories =
+    {
+        Path.Combine("Backend", "Modules", "evaluate", "AI-MCP", "prompts"),
+        Path.Combine("Backend", "Modules", "evaluate", "AI-Manual", "prompts"),
+        Path.Combine("Backend", "Modules", "evaluate", "Script", "prompts"),
+        Path.Combine("Backend", "Modules", "generate_scripts", "prompts"),
+    };
+
     public static string Render(string fileName, IReadOnlyDictionary<string, string> variables)
     {
         var template = Load(fileName);
@@ -37,11 +46,15 @@ internal static class PromptTemplateStore
         var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
         while (dir != null)
         {
-            var candidate = Path.Combine(dir.FullName, "Backend", "agents", "prompts", fileName);
-            if (File.Exists(candidate)) return candidate;
+            foreach (var promptDirectory in PromptDirectories)
+            {
+                var candidate = Path.Combine(dir.FullName, promptDirectory, fileName);
+                if (File.Exists(candidate)) return candidate;
+            }
+
             dir = dir.Parent;
         }
 
-        return Path.Combine(Directory.GetCurrentDirectory(), "Backend", "agents", "prompts", fileName);
+        return Path.Combine(Directory.GetCurrentDirectory(), PromptDirectories[0], fileName);
     }
 }

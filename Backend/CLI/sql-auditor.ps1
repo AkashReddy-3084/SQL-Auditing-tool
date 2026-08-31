@@ -5,13 +5,14 @@ Param(
 
 # Resolve paths
 $scriptDir = [string](Split-Path -Parent $MyInvocation.MyCommand.Definition)
-$repoRoot = [string]((Get-Item $scriptDir).Parent.FullName)
+# This script lives in Backend/CLI, so the repository root is two levels up.
+$repoRoot = [string]((Get-Item $scriptDir).Parent.Parent.FullName)
 
 function Write-Usage {
-    Write-Host "Usage: .\tools\sql-auditor.ps1 [<args for SQLAuditor.exe or dotnet run>]"
+    Write-Host "Usage: .\Backend\CLI\sql-auditor.ps1 [<args for SQLAuditor.exe or dotnet run>]"
     Write-Host "Examples:"
-    Write-Host "  .\tools\sql-auditor.ps1 evaluate --items 1.1.2,3.1.2 --server myserver\\instance"
-    Write-Host "  .\tools\sql-auditor.ps1 --dump-checklist"
+    Write-Host "  .\Backend\CLI\sql-auditor.ps1 evaluate --items 1.1.2,3.1.2 --server myserver\\instance"
+    Write-Host "  .\Backend\CLI\sql-auditor.ps1 --dump-checklist"
 }
 
 if ($Args -eq $null -or $Args.Length -eq 0) {
@@ -21,7 +22,7 @@ if ($Args -eq $null -or $Args.Length -eq 0) {
 
 # Candidate exe location (project targets net8.0)
 $exeCandidates = @()
-$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','core','bin','Debug','net8.0','SQLAuditor.exe')
+$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','CLI','bin','Debug','net8.0','SQLAuditor.exe')
 
 $exePath = $null
 foreach ($p in $exeCandidates) {
@@ -47,9 +48,9 @@ if ($exePath) {
 
 # If exe not found, try building the project
 if (-not $exePath) {
-    $proj = Join-Path $repoRoot "Backend\core\SQLAuditor.csproj"
+    $proj = Join-Path $repoRoot "Backend\CLI\SQLAuditor.csproj"
     if (Test-Path $proj) {
-        Write-Host "SQLAuditor.exe not found. Running 'dotnet build' for Backend/core..."
+        Write-Host "SQLAuditor.exe not found. Running 'dotnet build' for Backend/CLI..."
         & dotnet build $proj -c Debug
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "dotnet build failed (exit $LASTEXITCODE). Will attempt 'dotnet run' instead."
@@ -67,13 +68,13 @@ if ($exePath) {
     exit $LASTEXITCODE
 } else {
     # Fallback to dotnet run (requires .NET SDK)
-    $proj = Join-Path $repoRoot "Backend\core\SQLAuditor.csproj"
+    $proj = Join-Path $repoRoot "Backend\CLI\SQLAuditor.csproj"
     if (Test-Path $proj) {
         Write-Host "Launching via 'dotnet run --project $proj -- [args]'" -ForegroundColor Cyan
         & dotnet run --project $proj -- @Args
         exit $LASTEXITCODE
     } else {
-        Write-Error "Could not find SQLAuditor.exe or project file at Backend/core. Ensure you are in the repository root."
+        Write-Error "Could not find SQLAuditor.exe or project file at Backend/CLI. Ensure you are in the repository root."
         exit 2
     }
 }

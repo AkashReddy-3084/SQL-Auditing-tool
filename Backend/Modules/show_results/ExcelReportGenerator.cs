@@ -84,7 +84,7 @@ public sealed class ChecklistCatalog
         {
             foreach (var name in new[] { "master-checklist.json", "master_checklist.json" })
             {
-                var candidate = Path.Combine(dir.FullName, "Backend", "checklist", name);
+                var candidate = Path.Combine(dir.FullName, "Backend", "checklists", name);
                 if (File.Exists(candidate)) return Load(candidate);
             }
             dir = dir.Parent;

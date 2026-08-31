@@ -77,7 +77,7 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
 3. **Checklist** — select the controls to evaluate.
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
-5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklist/scripts/`.
+5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklists/Scripts/`.
 6. **Summary** — generates the scored report and lets you export it.
 7. **Export Manual CSV + Generate** — after evaluation finishes, exports every selected manual check and its verification guidance to CSV. Unanswered manual checks are recorded as **Skipped**, excluded from all scores, and retained in the generated Markdown and Excel reports for audit transparency. Submitted and previously copied manual decisions are preserved.
 
@@ -110,15 +110,15 @@ spirit.
 ### Build
 
 ```powershell
-dotnet build Backend/core/SQLAuditor.csproj
+dotnet build Backend/CLI/SQLAuditor.csproj
 ```
 
-This produces `Backend/core/bin/Debug/net8.0/SQLAuditor.exe`.
+This produces `Backend/CLI/bin/Debug/net8.0/SQLAuditor.exe`.
 
 ### Run an evaluation
 
 ```powershell
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate [options]
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe evaluate [options]
 ```
 
 Any option not supplied is prompted for interactively (SQL Server, then login details, then
@@ -147,22 +147,22 @@ Examples:
 
 ```powershell
 # Fully interactive (prompts for the manual-results source, server, auth, and items)
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe evaluate
 
 # Non-interactive with flags
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results fresh
 
 # Reuse the manual results recorded by the previous audit
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results last-runs
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe evaluate --items 1.1.2,3.1.2 --server localhost --manual-results last-runs
 
 # Copilot CLI mode: surface Needs Review items for Copilot to review
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost --manual-results fresh
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe evaluate --copilot --items 1.1.2,3.1.2 --server localhost --manual-results fresh
 
 # Render the reports once the evaluation is complete
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe generate_report
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe generate_report
 
 # List the checklist structure without running an evaluation
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe --dump-checklist
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe --dump-checklist
 ```
 
 ### Manual review and output
@@ -186,16 +186,16 @@ failed, `2` usage/validation error, `3` unexpected error.
 ### Generate audit scripts
 
 ```powershell
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
-Backend\core\bin\Debug\net8.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
 ```
 
 This is **generation, not evaluation**: no SQL Server, no credentials, no LLM settings.
-`generate_scripts` prints the generator system prompt from `Backend/agents/prompts/` plus one
+`generate_scripts` prints the generator system prompt from `Backend/Modules/generate_scripts/prompts/` plus one
 filled request per item; Copilot CLI (or you) answers it, and `save_generated_script` runs the
 rest of the pipeline — the deterministic format gate, the C1-C7 validation prompt, the verdict
-and any corrected script — before writing to `Backend/checklist/scripts/{sql,ps1}/` and
-updating `Backend/checklist/deterministic-script-mapping.json` and
+and any corrected script — before writing to `Backend/checklists/Scripts/{sql,ps1}/` and
+updating `Backend/checklists/deterministic-script-mapping.json` and
 `Backend/results/execution-results.json`. Without `--validation-file` the save command prints
 the validation prompt and saves nothing.
 
@@ -252,7 +252,7 @@ the IDE flow.
 1. Build the MCP server:
 
    ```powershell
-   dotnet build Backend/agents/modules/IDE/SQLAuditor.Mcp.csproj
+   dotnet build Backend/IDE/SQLAuditor.Mcp.csproj
    ```
 
 2. Configure `.vscode/mcp.json` (at the workspace root). It launches the built server and
@@ -267,7 +267,7 @@ the IDE flow.
      "servers": {
        "sql-auditor": {
          "type": "stdio",
-         "command": "<absolute path>/Backend/agents/modules/IDE/bin/Debug/net8.0/SQLAuditor.Mcp.exe",
+         "command": "<absolute path>/Backend/IDE/bin/Debug/net8.0/SQLAuditor.Mcp.exe",
          "cwd": "<absolute path>/SQL-Auditing-tool"
        }
      }
@@ -335,7 +335,7 @@ The `results/` folder is git-ignored, as its directory names and logs can contai
 
 ## Note on the console project
 
-`Backend/core/SQLAuditor.csproj` builds the console executable used by the
+`Backend/CLI/SQLAuditor.csproj` builds the console executable used by the
 [CLI](#command-line-interface-cli) above (it also provides a lightweight interactive menu
 when run with no arguments).
 

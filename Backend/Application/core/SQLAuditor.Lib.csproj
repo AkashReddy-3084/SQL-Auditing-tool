@@ -12,17 +12,9 @@
     <PackageReference Include="ClosedXML" Version="0.105.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
   </ItemGroup>
+  <!-- Feature modules build into the engine library; the CLI and IDE hosts have their own projects. -->
   <ItemGroup>
-    <Compile Include="..\agents\**\*.cs" Exclude="..\agents\ScriptGeneratingAgent\**" />
-  </ItemGroup>
-  <!-- Program.cs is the console entry point owned by the Exe project only. -->
-  <ItemGroup>
-    <Compile Remove="Program.cs" />
-  </ItemGroup>
-  <!-- Interface host code (CLI/IDE) has its own projects. -->
-  <ItemGroup>
-    <Compile Remove="..\agents\modules\CLI\**\*.cs" />
-    <Compile Remove="..\agents\modules\IDE\**\*.cs" />
+    <Compile Include="..\..\Modules\**\*.cs" />
   </ItemGroup>
 
 </Project>

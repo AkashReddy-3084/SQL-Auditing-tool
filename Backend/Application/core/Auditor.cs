@@ -397,12 +397,12 @@ WHERE d.name = DB_NAME();";
         {
             var repoRoot = FindRepoRoot();
             if (repoRoot == null) throw new FileNotFoundException("Checklist not found in repository root.");
-            // Prefer JSON master checklist under Backend/checklist/master_checklist.json when present
+            // Prefer JSON master checklist under Backend/checklists/master_checklist.json when present
             string[] lines;
-            var jsonPath = Path.Combine(repoRoot, "Backend", "checklist", "master_checklist.json");
-            var jsonPathAlt = Path.Combine(repoRoot, "Backend", "checklist", "master-checklist.json");
+            var jsonPath = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.json");
+            var jsonPathAlt = Path.Combine(repoRoot, "Backend", "checklists", "master-checklist.json");
             var checklistCandidate = Path.Combine(repoRoot, "SQL", "02-audit-checklist.md");
-            var mappingPath = Path.Combine(repoRoot, "Backend", "checklist", "master_checklist.md");
+            var mappingPath = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.md");
             // accept either master_checklist.json or master-checklist.json
             var effectiveJson = File.Exists(jsonPath) ? jsonPath : (File.Exists(jsonPathAlt) ? jsonPathAlt : null);
             if (effectiveJson != null)
@@ -480,7 +480,7 @@ WHERE d.name = DB_NAME();";
             else
             {
                 if (!File.Exists(mappingPath)) mappingPath = Path.Combine(repoRoot, "implementation-tracking.md");
-                if (!File.Exists(mappingPath)) throw new FileNotFoundException("Checklist file not found at SQL/02-audit-checklist.md or Backend/checklist/master_checklist.md/implementation-tracking.md or Backend/checklist/master_checklist.json");
+                if (!File.Exists(mappingPath)) throw new FileNotFoundException("Checklist file not found at SQL/02-audit-checklist.md or Backend/checklists/master_checklist.md/implementation-tracking.md or Backend/checklists/master_checklist.json");
                 lines = await File.ReadAllLinesAsync(mappingPath);
             }
             var result = new System.Collections.Generic.List<(string, ChecklistItem[])>();
@@ -574,10 +574,10 @@ WHERE d.name = DB_NAME();";
             var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
             while (dir != null)
             {
-                var checklistMd = Path.Combine(dir.FullName, "Backend", "checklist", "master_checklist.md");
-                var checklistMdAlt = Path.Combine(dir.FullName, "Backend", "checklist", "master-checklist.md");
-                var checklistJson = Path.Combine(dir.FullName, "Backend", "checklist", "master_checklist.json");
-                var checklistJsonAlt = Path.Combine(dir.FullName, "Backend", "checklist", "master-checklist.json");
+                var checklistMd = Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.md");
+                var checklistMdAlt = Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.md");
+                var checklistJson = Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.json");
+                var checklistJsonAlt = Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.json");
                 if (File.Exists(checklistMd) || File.Exists(checklistMdAlt) || File.Exists(checklistJson) || File.Exists(checklistJsonAlt)) return dir.FullName;
                 var candidate = Path.Combine(dir.FullName, "implementation-tracking.md");
                 if (File.Exists(candidate)) return dir.FullName;
@@ -592,7 +592,7 @@ WHERE d.name = DB_NAME();";
             while (dir != null)
             {
                 // Prefer curated backend scripts folder when present
-                var checklistCandidate = Path.Combine(dir.FullName, "Backend", "checklist", "scripts", "sql");
+                var checklistCandidate = Path.Combine(dir.FullName, "Backend", "checklists", "Scripts", "sql");
                 if (Directory.Exists(checklistCandidate)) return checklistCandidate;
                 var backendCandidate = Path.Combine(dir.FullName, "Backend", "scripts", "sql");
                 if (Directory.Exists(backendCandidate)) return backendCandidate;
@@ -749,9 +749,9 @@ WHERE d.name = DB_NAME();";
         {
             var repoRoot = FindRepoRoot();
             if (repoRoot == null) { Console.WriteLine("Repository root not found"); return; }
-            var mapping = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
+            var mapping = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
             if (File.Exists(mapping)) { Console.WriteLine(File.ReadAllText(mapping)); return; }
-            var legacy = Path.Combine(repoRoot, "Backend", "checklist", "master_checklist.md");
+            var legacy = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.md");
             if (File.Exists(legacy)) { Console.WriteLine(File.ReadAllText(legacy)); return; }
             var fallback = Path.Combine(repoRoot, "implementation-tracking.md");
             if (File.Exists(fallback)) Console.WriteLine(File.ReadAllText(fallback));
@@ -762,7 +762,7 @@ WHERE d.name = DB_NAME();";
         // IMPORTANT: This API is reserved for the UI "Generate Scripts" operator action only.
         // The Generate Scripts button in the checklist UI is currently disabled; do NOT call
         // this method from any automated runtime paths. Keep this method as the single
-        // intentional writer for scripts under Backend/checklist/scripts/sql and for the
+        // intentional writer for scripts under Backend/checklists/Scripts/sql and for the
         // deterministic mapping. Any other code that modifies files under scripts/sql
         // must be removed or refactored to call this method only via the operator-driven UI.
         // This method intentionally performs file writes (script + mapping) and is best
@@ -771,7 +771,7 @@ WHERE d.name = DB_NAME();";
         public async Task<string> SaveGeneratedScriptAsync(string checklistId, string scriptText, string? suggestedFileName = null)
         {
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-            var scriptsDir = Path.Combine(repoRoot, "Backend", "checklist", "scripts", "sql");
+            var scriptsDir = Path.Combine(repoRoot, "Backend", "checklists", "Scripts", "sql");
             Directory.CreateDirectory(scriptsDir);
             var safeId = System.Text.RegularExpressions.Regex.Replace(checklistId ?? "unknown", "[^a-zA-Z0-9_.-]", "_");
             var fileName = string.IsNullOrWhiteSpace(suggestedFileName)? $"{safeId}.sql" : suggestedFileName;
@@ -781,7 +781,7 @@ WHERE d.name = DB_NAME();";
             // Update deterministic mapping
             try
             {
-                var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
+                var mapPath = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
                 var mappingDict = new System.Collections.Generic.Dictionary<string, JsonElement>();
                 if (File.Exists(mapPath))
                 {
@@ -794,7 +794,7 @@ WHERE d.name = DB_NAME();";
                     catch { mappingDict = new(); }
                 }
 
-                var rel = Path.Combine("Backend", "checklist", "scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
+                var rel = Path.Combine("Backend", "checklists", "Scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
                 var scope = GetDeclaredScriptScope(scriptText);
                 var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, scope, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
                 mappingDict[checklistId] = newEntry;
@@ -875,7 +875,7 @@ WHERE d.name = DB_NAME();";
             var adminItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                var mapPath = Path.Combine(repoRoot, "Backend", "checklist", "deterministic-script-mapping.json");
+                var mapPath = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
                 if (File.Exists(mapPath))
                 {
                     var mapJson = File.ReadAllText(mapPath);
@@ -944,7 +944,7 @@ WHERE d.name = DB_NAME();";
                     }
                 }
 
-                // Normalize any legacy SQL/scripts/checks references to Backend/checklist/scripts/sql
+                // Normalize script paths written before the Backend/checklists restructure.
                 var keys = mapping.Keys.ToArray();
                 foreach (var k in keys)
                 {
@@ -952,7 +952,8 @@ WHERE d.name = DB_NAME();";
                     if (arr == null) continue;
                     var normalized = arr
                         .Where(s => !string.IsNullOrWhiteSpace(s))
-                        .Select(s => s.Replace("Backend/checklist/tools/sql/", "Backend/checklist/scripts/sql/"))
+                        .Select(s => s.Replace("Backend/checklist/tools/sql/", "Backend/checklists/Scripts/sql/")
+                                      .Replace("Backend/checklist/scripts/", "Backend/checklists/Scripts/"))
                         .Distinct()
                         .ToArray();
                     mapping[k] = normalized;

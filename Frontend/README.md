@@ -1,8 +1,6 @@
-Frontend folder: logical grouping for UI projects.
+Frontend folder: the WPF desktop host.
 
- - MainWindow: contains the WPF project (current path: Frontend/MainWindow)
-- Checklist: UI components for checklist selection and mapping
-- Evaluate: Evaluation UI components and progress views
-- SummaryReport: Report rendering and export
+- `MainWindow`: the `SQLAuditor.Wpf` project — login and database selection, checklist selection,
+  evaluation progress, manual review, and the summary/report view.
 
-Note: Projects are currently left in place to avoid breaking builds. To fully move projects here, confirm and I will update csproj paths and namespaces.
+It references `Backend/Application/core/SQLAuditor.Lib.csproj` for all engine behaviour.

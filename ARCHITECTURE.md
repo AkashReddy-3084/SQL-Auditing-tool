@@ -42,8 +42,8 @@ graph LR
     subgraph DATA["Configuration and Assets"]
       CHK["master-checklist.json"]
       MAP["deterministic-script-mapping.json"]
-      SQLS["Backend/checklist/scripts/sql"]
-      PR["Backend/agents/prompts"]
+      SQLS["Backend/checklists/Scripts/sql"]
+      PR["Backend/Modules/generate_scripts/prompts"]
     end
 
     subgraph EXT["External Systems"]
@@ -195,28 +195,29 @@ the merged results rather than their arrival order.
 
 ## Main Modules and Responsibilities
 
-- `Backend/core/Auditor.cs`
+- `Backend/Application/core/Auditor.cs`
   - Core orchestrator for checklist loading, pipeline execution, and result persistence.
   - Normalizes SQL connection variants, discovers user databases, routes scripts by scope, and
     coordinates Script/AI flows.
 
-- `Backend/agents/modules/reporting/SummaryReportGenerator.cs` and `ExcelReportGenerator.cs`
+- `Backend/Modules/show_results/SummaryReportGenerator.cs` and `ExcelReportGenerator.cs`
   - Share the score calculator and render Markdown and Excel from persisted checklist results.
 
-- `Backend/agents/modules/SqlServerMcpEvaluator.cs`
+- `Backend/Modules/evaluate/AI-MCP/SqlServerMcpEvaluator.cs`
   - Collects SQL snapshot and performs model-based evaluation for AI-MCP.
   - Handles provider call, response parsing, and feasibility checks.
 
-- `Backend/agents/modules/ManualStepsGenerator.cs`
+- `Backend/Modules/evaluate/AI-Manual/ManualStepsGenerator.cs`
   - Generates actionable manual validation steps for AI-Manual workflow.
 
-- `Backend/agents/modules/EvaluationDecisionService.cs`
+- `Backend/Modules/evaluate/EvaluationDecisionService.cs`
   - Applies deterministic outcome rules over evidence.
 
-- `Backend/agents/modules/PromptTemplateStore.cs`
-  - Resolves and renders prompt templates from `Backend/agents/prompts/`.
+- `Backend/Application/core/PromptTemplateStore.cs`
+  - Resolves and renders prompt templates. Each prompt lives with the module that owns it, so
+    lookup searches the per-module `prompts/` folders.
 
-- `Backend/agents/modules/application/HistoricalManualResultsStore.cs`
+- `Backend/Modules/evaluate/AI-Manual/HistoricalManualResultsStore.cs`
   - Reads/writes `results/historical_last_run.json` (manual and AI-Manual results keyed by
     checklist ID) so completed manual evaluations can be reused by a later run.
   - Refreshed only at report generation; shared by WPF, CLI and IDE/MCP.
@@ -225,17 +226,39 @@ the merged results rather than their arrival order.
   - Implements staged UX and user-driven evaluation lifecycle.
   - Handles checklist selection, manual evidence capture, and summary rendering.
 
+## Repository Layout
+
+```text
+Backend/
+  Application/core/   Auditor, AuditOutputPaths, provider + prompt infrastructure, SQLAuditor.Lib
+  Modules/
+    evaluate/         shared outcome rules and result enrichment
+      Script/         deterministic SQL execution, result parsing, script enrichment
+      AI-MCP/         snapshot-based model evaluation
+      AI-Manual/      manual guidance, manual enrichment, historical reuse
+    generate_scripts/ generation pipeline, models, prompts, authoring tools
+    show_results/     Markdown and Excel report generation
+  CLI/                console host (SQLAuditor.exe) and sql-auditor.ps1 launcher
+  IDE/                MCP server plus one SKILL.md per tool
+  checklists/         master checklist, deterministic mapping, Scripts/{sql,ps1}
+Frontend/MainWindow/  WPF desktop host
+```
+
+Each feature module owns its own `prompts/` folder. The three host projects (`CLI`, `IDE`,
+`Frontend`) reference `Backend/Application/core/SQLAuditor.Lib.csproj`, which compiles
+`Backend/Modules/**`, so a module has exactly one implementation and one owner.
+
 ## Data and File Boundaries
 
-- Checklist definition: `Backend/checklist/master-checklist.json`.
-- Deterministic mapping: `Backend/checklist/deterministic-script-mapping.json`.
+- Checklist definition: `Backend/checklists/master-checklist.json`.
+- Deterministic mapping: `Backend/checklists/deterministic-script-mapping.json`.
 - Runtime database selection: in-memory only; WPF passes selected names to `Auditor`. It is not
   written into scripts, mappings, result files, or provider configuration.
-- SQL script assets: `Backend/checklist/scripts/sql/`.
-- Prompt templates: `Backend/agents/prompts/`.
+- SQL script assets: `Backend/checklists/Scripts/sql/`.
+- Prompt templates: `prompts/` inside each owning module.
 - Runtime artifacts: `results/`.
 
 ## Deployment/Execution Modes
 
-- Console mode (`Backend/core/Program.cs`): interactive CLI for script and checklist evaluation.
+- Console mode (`Backend/CLI/Program.cs`): interactive CLI for script and checklist evaluation.
 - Desktop mode (`Frontend/MainWindow/SQLAuditor.Wpf.csproj`): guided, staged execution with manual queue and summary UX.

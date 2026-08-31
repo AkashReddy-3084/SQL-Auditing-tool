@@ -47,7 +47,7 @@ namespace SQLAuditor.Agents
             _mappingPath =
                 Path.Combine(
                     basePath,
-                    "checklist",
+                    "checklists",
                     "deterministic-script-mapping.json");
         }
 
@@ -148,15 +148,15 @@ namespace SQLAuditor.Agents
             var sqlDir =
                 Path.Combine(
                     _basePath,
-                    "checklist",
-                    "scripts",
+                    "checklists",
+                    "Scripts",
                     "sql");
 
             var ps1Dir =
                 Path.Combine(
                     _basePath,
-                    "checklist",
-                    "scripts",
+                    "checklists",
+                    "Scripts",
                     "ps1");
 
             var resultsDir =
@@ -200,7 +200,7 @@ namespace SQLAuditor.Agents
                 checklist = LoadChecklist(
                     Path.Combine(
                         _basePath,
-                        "checklist",
+                        "checklists",
                         "master-checklist.json"));
             }
 
@@ -677,7 +677,7 @@ namespace SQLAuditor.Agents
                     result.Generated = true;
 
                     result.ScriptFile =
-                        $"Backend/checklist/scripts/" +
+                        $"Backend/checklists/Scripts/" +
                         $"{response.ScriptType}/{filename}";
 
                     result.Scope = response.Scope;

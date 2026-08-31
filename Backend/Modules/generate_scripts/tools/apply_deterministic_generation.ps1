@@ -12,11 +12,11 @@ param([string[]]$ChecklistIds = @())
 Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-# `generation` is under Backend/checklist/scripts/generation — compute checklist dir
-$scriptsDir = Split-Path -Parent $scriptDir
-$checklistDir = Split-Path -Parent $scriptsDir
-$backendDir = Split-Path -Parent $checklistDir
+# This script lives in Backend/Modules/generate_scripts/tools.
+$backendDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $scriptDir))
 $workspaceRoot = Split-Path -Parent $backendDir
+$checklistDir = Join-Path $backendDir 'checklists'
+$scriptsDir = Join-Path $checklistDir 'Scripts'
 $mappingPath = Join-Path $checklistDir 'deterministic-script-mapping.json'
 if (-not (Test-Path $mappingPath)) { Write-Error "Mapping not found: $mappingPath"; exit 2 }
 
@@ -384,7 +384,7 @@ foreach ($key in $keys) {
     if ($checklistDescriptions.ContainsKey($key)) { $descriptionText = $checklistDescriptions[$key] }
     $outputFileName = Get-OutputFileName $key $fallbackName $descriptionText
     $full = Join-Path $sqlDir $outputFileName
-    $relativeTarget = 'Backend/checklist/scripts/sql/' + $outputFileName
+    $relativeTarget = 'Backend/checklists/Scripts/sql/' + $outputFileName
     $fileNameLower = $outputFileName.ToLower()
 
     $sql = Generate-SqlFor $key $fileNameLower

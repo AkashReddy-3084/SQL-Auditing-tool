@@ -12,7 +12,7 @@ scripts themselves are written by `sql-script-generator` subagents, one per chec
 each item gets its own isolated session exactly as the WPF app gives each item its own LLM
 request.
 
-Use the **MCP tools**. Do **not** shell out to `tools/sql-auditor.ps1` — that wrapper is for
+Use the **MCP tools**. Do **not** shell out to `Backend/CLI/sql-auditor.ps1` — that wrapper is for
 Copilot CLI and bypasses this flow.
 
 > **Generation, not evaluation.** Never call `evaluate`, never ask for a SQL Server name, a
@@ -111,8 +111,8 @@ item request you want to watch.
 
 | Path | Content |
 |------|---------|
-| `Backend/checklist/scripts/sql/<id>.sql` or `.../ps1/<id>.ps1` | The generated script (overwritten if it exists) |
-| `Backend/checklist/deterministic-script-mapping.json` | `script_file`, `IsAdminCheck`, `IsDocumentationCheck`, `MCP_Feasibility` for the ID (entry replaced) |
+| `Backend/checklists/Scripts/sql/<id>.sql` or `.../ps1/<id>.ps1` | The generated script (overwritten if it exists) |
+| `Backend/checklists/deterministic-script-mapping.json` | `script_file`, `IsAdminCheck`, `IsDocumentationCheck`, `MCP_Feasibility` for the ID (entry replaced) |
 | `Backend/results/execution-results.json` | The `Script Generated` / `Not Feasible` entry for the ID (entry replaced) |
 
 Overwrite is the intended behaviour and is handled by the tool — never edit these files by
@@ -123,7 +123,7 @@ server, so parallel subagents cannot corrupt them.
 
 - **One batch of 10 at a time**, matching `ScriptGeneratorAgent.RunAsync`. Never dispatch two
   batches at once and never take a bigger batch.
-- The prompt templates in `Backend/agents/prompts/` are the only source of the generation
+- The prompt templates in `Backend/Modules/generate_scripts/prompts/` are the only source of the generation
   and validation rules. If a template is missing the tool errors — surface that, do not
   improvise a replacement.
 - No LLM configuration is involved: `PROVIDER_BASE_URL`, `PROVIDER_API_KEY` and `MODEL` are
@@ -132,10 +132,10 @@ server, so parallel subagents cannot corrupt them.
 
 ## Reference implementation
 
-- `Backend/agents/modules/ScriptGeneratorAgent.cs` — batch-of-10 orchestration, retries, persistence
-- `Backend/agents/modules/ChecklistItemProcessor.cs` — response and verdict parsing
-- `Backend/agents/modules/ScriptOutputValidator.cs` — deterministic format/read-only gate
-- `Backend/agents/modules/application/ScriptGenerationSkill.cs` — the shared skill the MCP tools call
-- `Backend/agents/modules/IDE/AuditTools.cs` — the MCP tool definitions
+- `Backend/Modules/generate_scripts/ScriptGeneratorAgent.cs` — batch-of-10 orchestration, retries, persistence
+- `Backend/Modules/generate_scripts/ChecklistItemProcessor.cs` — response and verdict parsing
+- `Backend/Modules/generate_scripts/ScriptOutputValidator.cs` — deterministic format/read-only gate
+- `Backend/Modules/generate_scripts/ScriptGenerationSkill.cs` — the shared skill the MCP tools call
+- `Backend/IDE/AuditTools.cs` — the MCP tool definitions
 - `.github/agents/sql-script-generator.agent.md` — the per-item subagent contract
-- `Backend/agents/prompts/script_generator_{system,user}.txt`, `script_validation_{system,user}.txt`
+- `Backend/Modules/generate_scripts/prompts/script_generator_{system,user}.txt`, `script_validation_{system,user}.txt`

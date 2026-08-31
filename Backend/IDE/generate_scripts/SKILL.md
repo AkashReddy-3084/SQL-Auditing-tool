@@ -33,7 +33,7 @@ and no credentials.
 † Used by `get_item_generation_prompt` and `save_generated_script` inside the per-item subagent.
 
 ## Prompt templates (mandatory)
-Every stage runs on the standard templates in `Backend/agents/prompts/`; the host never
+Every stage runs on the standard templates in `Backend/Modules/generate_scripts/prompts/`; the host never
 substitutes its own reasoning. A missing or empty template is a hard error.
 
 | Stage      | System                          | User                          |
@@ -81,8 +81,8 @@ substitutes its own reasoning. A missing or empty template is a hard error.
 ## Output
 - Every feasible script outputs the four required fields: `Result`, `Score`,
   `DatabaseQueried`, and `Finding`.
-- Scripts saved under `Backend/checklist/scripts/{sql,ps1}/<id>.<type>`.
-- `Backend/checklist/deterministic-script-mapping.json` and
+- Scripts saved under `Backend/checklists/Scripts/{sql,ps1}/<id>.<type>`.
+- `Backend/checklists/deterministic-script-mapping.json` and
   `Backend/results/execution-results.json` updated per item.
 - Re-generating an ID **overwrites** its script file and replaces its mapping and
   execution-results entries, as in the WPF app.

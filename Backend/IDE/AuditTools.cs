@@ -550,7 +550,7 @@ public static class AuditTools
 
                 foreach (var type in new[] { "sql", "ps1" })
                 {
-                    var path = Path.Combine(basePath, "checklist", "scripts", type, $"{safeId}.{type}");
+                    var path = Path.Combine(basePath, "checklists", "Scripts", type, $"{safeId}.{type}");
                     if (File.Exists(path)) existing.Add($"{id} ({type})");
                 }
             }
@@ -626,7 +626,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "get_item_generation_prompt")]
-    [Description("Return the generator system prompt plus the filled request for ONE checklist item, built from Backend/agents/prompts/script_generator_system.txt and script_generator_user.txt. This is the entry point for the 'sql-script-generator' subagent: it fetches its own item's prompt here instead of receiving it second-hand, so the canonical templates are never paraphrased. Author the raw response from what this returns, then save it with 'save_generated_script'. Needs no SQL Server and no credentials.")]
+    [Description("Return the generator system prompt plus the filled request for ONE checklist item, built from Backend/Modules/generate_scripts/prompts/script_generator_system.txt and script_generator_user.txt. This is the entry point for the 'sql-script-generator' subagent: it fetches its own item's prompt here instead of receiving it second-hand, so the canonical templates are never paraphrased. Author the raw response from what this returns, then save it with 'save_generated_script'. Needs no SQL Server and no credentials.")]
     public static async Task<string> GetItemGenerationPromptAsync(
         [Description("The single checklist item ID to generate a script for, e.g. '1.1.2'.")] string checklistId,
         CancellationToken cancellationToken = default)
@@ -661,7 +661,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "validate_generated_script")]
-    [Description("Return the standard C1-C7 review request for one script YOU generated, built from Backend/agents/prompts/script_validation_system.txt and script_validation_user.txt. Provide the checklist ID and the COMPLETE raw generator response. Review the script using ONLY the checks in the returned prompt, then call 'save_generated_script' with the resulting verdict. 'save_generated_script' returns this same prompt if called without a verdict, so nothing is saved until the review is done.")]
+    [Description("Return the standard C1-C7 review request for one script YOU generated, built from Backend/Modules/generate_scripts/prompts/script_validation_system.txt and script_validation_user.txt. Provide the checklist ID and the COMPLETE raw generator response. Review the script using ONLY the checks in the returned prompt, then call 'save_generated_script' with the resulting verdict. 'save_generated_script' returns this same prompt if called without a verdict, so nothing is saved until the review is done.")]
     public static async Task<string> ValidateGeneratedScriptAsync(
         [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
         [Description("The COMPLETE raw generator output for this item, exactly as produced from the generator prompt.")] string response,
@@ -676,7 +676,7 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "save_generated_script")]
-    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts' or 'get_item_generation_prompt'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklist/deterministic-script-mapping.json and Backend/results/execution-results.json. Writes are serialised, so parallel subagents can each call this safely. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
+    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts' or 'get_item_generation_prompt'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklists/deterministic-script-mapping.json and Backend/results/execution-results.json. Writes are serialised, so parallel subagents can each call this safely. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
     public static async Task<string> SaveGeneratedScriptAsync(
         [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
         [Description("The COMPLETE raw generator output for this item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string response,
