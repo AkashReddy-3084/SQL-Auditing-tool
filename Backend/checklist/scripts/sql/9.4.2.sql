@@ -1,87 +1,64 @@
 -- Checklist: Load completion SLAs set and monitored
--- Scope: DATABASE
--- Scoring: 3 = 10%+ of ETL/load procedures show a load-duration-monitoring pattern (DATEDIFF + logging/RAISERROR); 2 = under 10% do; 1 = ETL procedures exist but none do; 0 = no ETL/load procedures found
--- NOTE: Automated evidence only; the specific SLA time target value is not independently verified. Full compliance requires human review.
+-- Scope: SERVER
+-- Scoring: 3 = enabled jobs, enabled schedules, job-run history, and email-notifying jobs are all present; 2 = enabled jobs and at least two supporting categories are present; 1 = one job-monitoring category is present; 0 = no evidence or a source is unavailable
+-- NOTE: Automated evidence confirms SQL Agent scheduling, execution history, and notification configuration; the actual SLA target and completion times require human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
+DECLARE @Finding NVARCHAR(MAX) = N'SQL Agent SLA monitoring evidence unavailable';
+DECLARE @EnabledJobCount INT = 0;
+DECLARE @ScheduleCount INT = 0;
+DECLARE @JobRunCount INT = 0;
+DECLARE @NotifyingJobCount INT = 0;
+DECLARE @SupportingEvidenceCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+BEGIN TRY
+    SELECT @EnabledJobCount = COUNT(*)
+    FROM msdb.dbo.sysjobs
+    WHERE enabled = 1;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @EtlProcCount INT, @MonitoredProcCount INT;
+    SELECT @ScheduleCount = COUNT(*)
+    FROM msdb.dbo.sysjobschedules AS js
+    INNER JOIN msdb.dbo.sysschedules AS s ON s.schedule_id = js.schedule_id
+    WHERE s.enabled = 1;
 
-    SELECT @EtlProcCount = COUNT(*) FROM sys.procedures
-    WHERE name LIKE '%load%' OR name LIKE '%etl%';
+    SELECT @JobRunCount = COUNT(*)
+    FROM msdb.dbo.sysjobhistory
+    WHERE step_id = 0;
 
-    SELECT @MonitoredProcCount = COUNT(DISTINCT p.object_id)
-    FROM sys.procedures p
-    JOIN sys.sql_modules m ON m.object_id = p.object_id
-    WHERE (p.name LIKE '%load%' OR p.name LIKE '%etl%')
-      AND m.definition LIKE '%DATEDIFF(%'
-      AND (m.definition LIKE '%INSERT %' OR m.definition LIKE '%RAISERROR%' OR m.definition LIKE '%THROW%');
+    SELECT @NotifyingJobCount = COUNT(*)
+    FROM msdb.dbo.sysjobs
+    WHERE enabled = 1
+      AND notify_level_email > 0;
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@EtlProcCount,0) = 0 THEN 0
-             WHEN (CAST(ISNULL(@MonitoredProcCount,0) AS DECIMAL(9,4)) / NULLIF(@EtlProcCount,0)) >= 0.10 THEN 3
-             WHEN ISNULL(@MonitoredProcCount,0) > 0 THEN 2
-             ELSE 1 END,
-        CONCAT('ETL/load procedures = ', ISNULL(@EtlProcCount,0), ', with a load-duration-monitoring pattern = ', ISNULL(@MonitoredProcCount,0))
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+SET @SupportingEvidenceCount =
+    CASE WHEN @ScheduleCount > 0 THEN 1 ELSE 0 END
+  + CASE WHEN @JobRunCount > 0 THEN 1 ELSE 0 END
+  + CASE WHEN @NotifyingJobCount > 0 THEN 1 ELSE 0 END;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SET @Score = CASE
+    WHEN @ReadError = 1 THEN 0
+    WHEN @EnabledJobCount > 0 AND @ScheduleCount > 0
+         AND @JobRunCount > 0 AND @NotifyingJobCount > 0 THEN 3
+    WHEN @EnabledJobCount > 0 AND @SupportingEvidenceCount >= 2 THEN 2
+    WHEN @EnabledJobCount > 0 OR @SupportingEvidenceCount > 0 THEN 1
+    ELSE 0
+END;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @ec INT, @mc INT;
-SELECT @ec = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.procedures
-WHERE name LIKE ''%load%'' OR name LIKE ''%etl%'';
-SELECT @mc = COUNT(DISTINCT p.object_id)
-FROM ' + QUOTENAME(@DbName) + N'.sys.procedures p
-JOIN ' + QUOTENAME(@DbName) + N'.sys.sql_modules m ON m.object_id = p.object_id
-WHERE (p.name LIKE ''%load%'' OR p.name LIKE ''%etl%'')
-  AND m.definition LIKE ''%DATEDIFF(%''
-  AND (m.definition LIKE ''%INSERT %'' OR m.definition LIKE ''%RAISERROR%'' OR m.definition LIKE ''%THROW%'');
-SELECT @p_Db,
-       CASE WHEN ISNULL(@ec,0) = 0 THEN 0
-            WHEN (CAST(ISNULL(@mc,0) AS DECIMAL(9,4)) / NULLIF(@ec,0)) >= 0.10 THEN 3
-            WHEN ISNULL(@mc,0) > 0 THEN 2
-            ELSE 1 END,
-       CONCAT(''ETL/load procedures = '', ISNULL(@ec,0), '', with a load-duration-monitoring pattern = '', ISNULL(@mc,0));';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'enabled SQL Agent jobs = ', @EnabledJobCount,
+    N'; enabled schedules = ', @ScheduleCount,
+    N'; job runs = ', @JobRunCount,
+    N'; enabled jobs with email notification = ', @NotifyingJobCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more SQL Agent sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

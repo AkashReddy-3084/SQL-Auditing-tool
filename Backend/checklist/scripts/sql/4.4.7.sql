@@ -1,129 +1,65 @@
+-- Checklist: Archival/purge process exists for aged data
+-- Scope: SERVER
+-- Scoring: 3 = purge modules, archive tables, purge jobs, and partition schemes are all evidenced; 2 = at least two evidence categories are present; 1 = one category is present; 0 = no evidence or a source is unavailable
+-- NOTE: Automated evidence uses SQL text and object-name patterns; retention periods and process suitability require human review.
+
 SET NOCOUNT ON;
 
-DECLARE @Result nvarchar(20) = N'Fail';
-DECLARE @Score int = 0;
-DECLARE @DatabaseQueried nvarchar(128) = N'msdb';
-DECLARE @Finding nvarchar(max);
+DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
+DECLARE @Finding NVARCHAR(MAX) = N'Archival and purge evidence unavailable';
+DECLARE @PurgeModuleCount INT = 0;
+DECLARE @ArchiveTableCount INT = 0;
+DECLARE @PurgeJobCount INT = 0;
+DECLARE @PartitionSchemeCount INT = 0;
+DECLARE @EvidenceCategoryCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-CREATE TABLE #ArchivalPurgeJobs
-(
-    JobName sysname NOT NULL,
-    JobEnabled bit NOT NULL,
-    StepId int NOT NULL,
-    StepName sysname NOT NULL
-);
+BEGIN TRY
+    SELECT @PurgeModuleCount = COUNT(*)
+    FROM sys.sql_modules
+    WHERE definition LIKE N'%DELETE%'
+      AND (definition LIKE N'%archive%' OR definition LIKE N'%purge%' OR definition LIKE N'%retention%');
 
-IF DB_ID(N'msdb') IS NULL
-BEGIN
-    SET @Finding = N'The msdb database is unavailable, so SQL Agent archival and purge process metadata could not be inspected.';
-END
-ELSE
-BEGIN
-    BEGIN TRY
-        DECLARE @Sql nvarchar(max) = N'
-            INSERT INTO #ArchivalPurgeJobs (JobName, JobEnabled, StepId, StepName)
-            SELECT DISTINCT
-                j.name,
-                j.enabled,
-                s.step_id,
-                s.step_name
-            FROM msdb.dbo.sysjobs AS j
-            INNER JOIN msdb.dbo.sysjobsteps AS s
-                ON s.job_id = j.job_id
-            CROSS APPLY
-            (
-                SELECT
-                    LOWER(COALESCE(j.name, N'''')) AS JobNameLower,
-                    LOWER(COALESCE(s.step_name, N'''')) AS StepNameLower,
-                    LOWER(COALESCE(s.command, N'''')) AS CommandLower
-            ) AS normalized
-            WHERE
-                normalized.JobNameLower LIKE N''%archiv%''
-                OR normalized.StepNameLower LIKE N''%archiv%''
-                OR normalized.CommandLower LIKE N''%archiv%''
-                OR normalized.JobNameLower LIKE N''%purge%''
-                OR normalized.StepNameLower LIKE N''%purge%''
-                OR normalized.CommandLower LIKE N''%purge%''
-                OR normalized.JobNameLower LIKE N''%retention%''
-                OR normalized.StepNameLower LIKE N''%retention%''
-                OR normalized.CommandLower LIKE N''%retention%''
-                OR (
-                    (
-                        normalized.JobNameLower LIKE N''%cleanup%''
-                        OR normalized.StepNameLower LIKE N''%cleanup%''
-                        OR normalized.CommandLower LIKE N''%delete%''
-                    )
-                    AND (
-                        normalized.CommandLower LIKE N''%dateadd%''
-                        OR normalized.CommandLower LIKE N''%datediff%''
-                        OR normalized.CommandLower LIKE N''%older than%''
-                        OR normalized.CommandLower LIKE N''%createdate%''
-                        OR normalized.CommandLower LIKE N''%modifieddate%''
-                    )
-                );';
+    SELECT @ArchiveTableCount = COUNT(*)
+    FROM sys.tables
+    WHERE is_ms_shipped = 0
+      AND (name LIKE N'%archive%' OR name LIKE N'%history%' OR name LIKE N'%[_]hist');
 
-        EXEC sys.sp_executesql @Sql;
+    SELECT @PurgeJobCount = COUNT(*)
+    FROM msdb.dbo.sysjobsteps
+    WHERE command LIKE N'%purge%'
+       OR command LIKE N'%archive%'
+       OR command LIKE N'%retention%';
 
-        DECLARE @EnabledCount int =
-        (
-            SELECT COUNT(DISTINCT JobName)
-            FROM #ArchivalPurgeJobs
-            WHERE JobEnabled = 1
-        );
-        DECLARE @DisabledCount int =
-        (
-            SELECT COUNT(DISTINCT JobName)
-            FROM #ArchivalPurgeJobs
-            WHERE JobEnabled = 0
-        );
-        DECLARE @Examples nvarchar(1200);
+    SELECT @PartitionSchemeCount = COUNT(*)
+    FROM sys.partition_schemes;
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-        SELECT @Examples = STUFF
-        (
-            (
-                SELECT TOP (10)
-                    N'; ' + QUOTENAME(matches.JobName) + N' / ' + QUOTENAME(matches.StepName)
-                FROM #ArchivalPurgeJobs AS matches
-                ORDER BY matches.JobEnabled DESC, matches.JobName, matches.StepId
-                FOR XML PATH(N''), TYPE
-            ).value(N'.', N'nvarchar(1200)'),
-            1,
-            2,
-            N''
-        );
+SET @EvidenceCategoryCount =
+    CASE WHEN @PurgeModuleCount > 0 THEN 1 ELSE 0 END
+  + CASE WHEN @ArchiveTableCount > 0 THEN 1 ELSE 0 END
+  + CASE WHEN @PurgeJobCount > 0 THEN 1 ELSE 0 END
+  + CASE WHEN @PartitionSchemeCount > 0 THEN 1 ELSE 0 END;
 
-        IF @EnabledCount > 0
-        BEGIN
-            SET @Score = 3;
-            SET @Finding = CONCAT(
-                N'Found ', @EnabledCount, N' enabled SQL Agent job(s) with archival or age-based purge evidence',
-                CASE WHEN @DisabledCount > 0 THEN CONCAT(N' and ', @DisabledCount, N' disabled matching job(s)') ELSE N'' END,
-                N'. Examples: ', COALESCE(@Examples, N'none'), N'.'
-            );
-        END
-        ELSE IF @DisabledCount > 0
-        BEGIN
-            SET @Score = 2;
-            SET @Finding = CONCAT(
-                N'Found ', @DisabledCount, N' SQL Agent job(s) with archival or age-based purge evidence, but all matching jobs are disabled. Examples: ',
-                COALESCE(@Examples, N'none'), N'.'
-            );
-        END
-        ELSE
-        BEGIN
-            SET @Finding = N'No SQL Agent job step was found with evidence of archival, purge, retention, or age-based deletion activity.';
-        END;
-    END TRY
-    BEGIN CATCH
-        SET @Score = 0;
-        SET @Finding = CONCAT(N'Unable to inspect SQL Agent archival and purge metadata: ', ERROR_MESSAGE());
-    END CATCH;
+SET @Score = CASE
+    WHEN @ReadError = 1 THEN 0
+    WHEN @EvidenceCategoryCount >= 4 THEN 3
+    WHEN @EvidenceCategoryCount >= 2 THEN 2
+    WHEN @EvidenceCategoryCount = 1 THEN 1
+    ELSE 0
 END;
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'purge modules = ', @PurgeModuleCount,
+    N'; archive/history tables = ', @ArchiveTableCount,
+    N'; purge/retention jobs = ', @PurgeJobCount,
+    N'; partition schemes = ', @PartitionSchemeCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more archival sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
-SELECT
-    @Result AS Result,
-    @Score AS Score,
-    @DatabaseQueried AS DatabaseQueried,
-    @Finding AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

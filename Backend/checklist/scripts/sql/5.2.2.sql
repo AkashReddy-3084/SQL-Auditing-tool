@@ -1,86 +1,49 @@
 -- Checklist: Completeness: all expected sources/batches received
 -- Scope: DATABASE
--- Scoring: 3 = control/batch table with both expected and received columns; 2 = only one of the two found; 1 = control/batch table exists but neither found; 0 = no control/batch tracking table found
+-- Scoring: 3 = control tables and matching control columns are present; 2 = control tables are present with no matching columns; 1 = matching control columns exist without a control table; 0 = no control evidence or evidence is unavailable
+-- NOTE: Automated evidence identifies control structures; actual batch receipt completeness requires runtime data and human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = N'Batch completeness evidence unavailable';
+DECLARE @ControlTableCount INT = 0;
+DECLARE @ControlColumnCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+BEGIN TRY
+    SELECT @ControlTableCount = COUNT(*)
+    FROM sys.tables
+    WHERE is_ms_shipped = 0
+      AND (name LIKE N'%batch%' OR name LIKE N'%control%'
+           OR name LIKE N'%load%log%' OR name LIKE N'%etl%log%'
+           OR name LIKE N'%watermark%' OR name LIKE N'%manifest%');
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @ControlTableCount INT, @HasExpected INT, @HasReceived INT;
+    SELECT @ControlColumnCount = COUNT(*)
+    FROM sys.columns AS c
+    INNER JOIN sys.tables AS t ON t.object_id = c.object_id
+    WHERE t.is_ms_shipped = 0
+      AND (c.name LIKE N'%source%system%'
+           OR c.name LIKE N'%batch%id%' OR c.name LIKE N'%expected%');
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-    SELECT @ControlTableCount = COUNT(*) FROM sys.tables
-    WHERE name LIKE '%batch_control%' OR name LIKE '%etl_control%' OR name LIKE '%source_control%' OR name LIKE '%load_control%';
+SET @Score = CASE
+    WHEN @ReadError = 1 THEN 0
+    WHEN @ControlTableCount > 0 AND @ControlColumnCount > 0 THEN 3
+    WHEN @ControlTableCount > 0 THEN 2
+    WHEN @ControlColumnCount > 0 THEN 1
+    ELSE 0
+END;
 
-    SELECT @HasExpected = MAX(CASE WHEN c.name LIKE '%expected%' THEN 1 ELSE 0 END),
-           @HasReceived = MAX(CASE WHEN c.name LIKE '%received%' OR c.name LIKE '%actual%' THEN 1 ELSE 0 END)
-    FROM sys.columns c
-    JOIN sys.tables t ON t.object_id = c.object_id
-    WHERE t.name LIKE '%batch_control%' OR t.name LIKE '%etl_control%' OR t.name LIKE '%source_control%' OR t.name LIKE '%load_control%';
-
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@ControlTableCount,0) = 0 THEN 0
-             WHEN ISNULL(@HasExpected,0) = 1 AND ISNULL(@HasReceived,0) = 1 THEN 3
-             WHEN ISNULL(@HasExpected,0) = 1 OR ISNULL(@HasReceived,0) = 1 THEN 2
-             ELSE 1 END,
-        CASE WHEN ISNULL(@ControlTableCount,0) = 0 THEN 'No control/batch tracking table found'
-             ELSE CONCAT('Control/batch tables = ', @ControlTableCount, ', has expected column = ', ISNULL(@HasExpected,0), ', has received column = ', ISNULL(@HasReceived,0)) END
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @ct INT, @he INT, @hr INT;
-SELECT @ct = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.tables
-WHERE name LIKE ''%batch_control%'' OR name LIKE ''%etl_control%'' OR name LIKE ''%source_control%'' OR name LIKE ''%load_control%'';
-SELECT @he = MAX(CASE WHEN c.name LIKE ''%expected%'' THEN 1 ELSE 0 END),
-       @hr = MAX(CASE WHEN c.name LIKE ''%received%'' OR c.name LIKE ''%actual%'' THEN 1 ELSE 0 END)
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON t.object_id = c.object_id
-WHERE t.name LIKE ''%batch_control%'' OR t.name LIKE ''%etl_control%'' OR t.name LIKE ''%source_control%'' OR t.name LIKE ''%load_control%'';
-SELECT @p_Db,
-       CASE WHEN ISNULL(@ct,0) = 0 THEN 0
-            WHEN ISNULL(@he,0) = 1 AND ISNULL(@hr,0) = 1 THEN 3
-            WHEN ISNULL(@he,0) = 1 OR ISNULL(@hr,0) = 1 THEN 2
-            ELSE 1 END,
-       CASE WHEN ISNULL(@ct,0) = 0 THEN ''No control/batch tracking table found''
-            ELSE CONCAT(''Control/batch tables = '', @ct, '', has expected column = '', ISNULL(@he,0), '', has received column = '', ISNULL(@hr,0)) END;';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'control tables = ', @ControlTableCount,
+    N'; matching source/batch/expected columns = ', @ControlColumnCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more catalog sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

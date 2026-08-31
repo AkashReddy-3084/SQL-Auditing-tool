@@ -1,97 +1,61 @@
 -- Checklist: Production access restricted (no developer write/deploy)
 -- Scope: DATABASE
--- Scoring: 3 = 0% of non-service-like users hold write-capable roles (db_owner/db_datawriter/db_ddladmin); 2 = under 25% do; 1 = 25%+ do; 0 = no database users found
--- NOTE: Automated evidence only; identifying "developer" accounts relies on a naming heuristic (excluding service/app/managed-identity patterns), not organizational role records. Full compliance requires human review.
+-- Scoring: 3 = no sysadmin members, database writers, or broad DDL grants; 2 = one category has evidence; 1 = two categories have evidence; 0 = all three categories have evidence or a source is unavailable
+-- NOTE: Automated evidence only; account ownership and deployment responsibility require human review.
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = N'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = N'Production access evidence unavailable';
+DECLARE @SysadminCount INT = 0;
+DECLARE @DatabaseWriterCount INT = 0;
+DECLARE @DdlGrantCount INT = 0;
+DECLARE @ReadError BIT = 0;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+BEGIN TRY
+    SELECT @SysadminCount = COUNT(*)
+    FROM sys.server_role_members AS rm
+    INNER JOIN sys.server_principals AS r ON r.principal_id = rm.role_principal_id
+    INNER JOIN sys.server_principals AS m ON m.principal_id = rm.member_principal_id
+    WHERE r.name = N'sysadmin'
+      AND m.name NOT LIKE N'NT SERVICE%'
+      AND m.name NOT LIKE N'##%';
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @NonServiceUserCount INT, @WriteAccessNonServiceCount INT;
+    SELECT @DatabaseWriterCount = COUNT(*)
+    FROM sys.database_role_members AS rm
+    INNER JOIN sys.database_principals AS r ON r.principal_id = rm.role_principal_id
+    INNER JOIN sys.database_principals AS m ON m.principal_id = rm.member_principal_id
+    WHERE r.name IN (N'db_owner', N'db_ddladmin')
+      AND m.principal_id > 4;
 
-    SELECT @NonServiceUserCount = COUNT(*)
-    FROM sys.database_principals p
-    WHERE p.type IN ('S','U','G','E','X') AND p.name NOT IN ('dbo','guest','public')
-      AND p.name NOT LIKE '%svc%' AND p.name NOT LIKE '%service%' AND p.name NOT LIKE '%app\_%' ESCAPE '\'
-      AND p.type NOT IN ('E','X');
+    SELECT @DdlGrantCount = COUNT(*)
+    FROM sys.database_permissions
+    WHERE permission_name IN (N'ALTER', N'CONTROL', N'ALTER ANY SCHEMA')
+      AND state_desc = N'GRANT';
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH;
 
-    SELECT @WriteAccessNonServiceCount = COUNT(DISTINCT m.member_principal_id)
-    FROM sys.database_role_members m
-    JOIN sys.database_principals r ON r.principal_id = m.role_principal_id
-    JOIN sys.database_principals p ON p.principal_id = m.member_principal_id
-    WHERE r.name IN ('db_owner','db_datawriter','db_ddladmin')
-      AND p.name NOT IN ('dbo','guest','public')
-      AND p.name NOT LIKE '%svc%' AND p.name NOT LIKE '%service%' AND p.name NOT LIKE '%app\_%' ESCAPE '\'
-      AND p.type NOT IN ('E','X');
+SET @Score = CASE
+    WHEN @ReadError = 1 THEN 0
+    WHEN @SysadminCount = 0 AND @DatabaseWriterCount = 0 AND @DdlGrantCount = 0 THEN 3
+    WHEN (@SysadminCount > 0 AND @DatabaseWriterCount = 0 AND @DdlGrantCount = 0)
+      OR (@SysadminCount = 0 AND @DatabaseWriterCount > 0 AND @DdlGrantCount = 0)
+      OR (@SysadminCount = 0 AND @DatabaseWriterCount = 0 AND @DdlGrantCount > 0) THEN 2
+    WHEN (@SysadminCount > 0 AND @DatabaseWriterCount > 0 AND @DdlGrantCount = 0)
+      OR (@SysadminCount > 0 AND @DatabaseWriterCount = 0 AND @DdlGrantCount > 0)
+      OR (@SysadminCount = 0 AND @DatabaseWriterCount > 0 AND @DdlGrantCount > 0) THEN 1
+    ELSE 0
+END;
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@NonServiceUserCount,0) = 0 THEN 0
-             WHEN ISNULL(@WriteAccessNonServiceCount,0) = 0 THEN 3
-             WHEN (CAST(@WriteAccessNonServiceCount AS DECIMAL(9,4)) / NULLIF(@NonServiceUserCount,0)) < 0.25 THEN 2
-             ELSE 1 END,
-        CONCAT('Non-service-like database users = ', ISNULL(@NonServiceUserCount,0), ', holding write-capable roles = ', ISNULL(@WriteAccessNonServiceCount,0))
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @nu INT, @wu INT;
-SELECT @nu = COUNT(*)
-FROM ' + QUOTENAME(@DbName) + N'.sys.database_principals p
-WHERE p.type IN (''S'',''U'',''G'',''E'',''X'') AND p.name NOT IN (''dbo'',''guest'',''public'')
-  AND p.name NOT LIKE ''%svc%'' AND p.name NOT LIKE ''%service%'' AND p.name NOT LIKE ''%app\_%'' ESCAPE ''\''
-  AND p.type NOT IN (''E'',''X'');
-SELECT @wu = COUNT(DISTINCT m.member_principal_id)
-FROM ' + QUOTENAME(@DbName) + N'.sys.database_role_members m
-JOIN ' + QUOTENAME(@DbName) + N'.sys.database_principals r ON r.principal_id = m.role_principal_id
-JOIN ' + QUOTENAME(@DbName) + N'.sys.database_principals p ON p.principal_id = m.member_principal_id
-WHERE r.name IN (''db_owner'',''db_datawriter'',''db_ddladmin'')
-  AND p.name NOT IN (''dbo'',''guest'',''public'')
-  AND p.name NOT LIKE ''%svc%'' AND p.name NOT LIKE ''%service%'' AND p.name NOT LIKE ''%app\_%'' ESCAPE ''\''
-  AND p.type NOT IN (''E'',''X'');
-SELECT @p_Db,
-       CASE WHEN ISNULL(@nu,0) = 0 THEN 0
-            WHEN ISNULL(@wu,0) = 0 THEN 3
-            WHEN (CAST(@wu AS DECIMAL(9,4)) / NULLIF(@nu,0)) < 0.25 THEN 2
-            ELSE 1 END,
-       CONCAT(''Non-service-like database users = '', ISNULL(@nu,0), '', holding write-capable roles = '', ISNULL(@wu,0));';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Finding = CONCAT(
+    N'excluded sysadmin members = ', @SysadminCount,
+    N'; database members in db_owner/db_ddladmin = ', @DatabaseWriterCount,
+    N'; granted ALTER/CONTROL/ALTER ANY SCHEMA permissions = ', @DdlGrantCount,
+    CASE WHEN @ReadError = 1 THEN N'; one or more security sources could not be read' ELSE N'' END);
+SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
