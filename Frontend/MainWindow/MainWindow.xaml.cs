@@ -597,6 +597,7 @@ namespace SQLAuditor.Wpf
             }
 
             RenderEvaluationTree();
+            UpdateEvaluationProgressDisplay();
             ShowManualAtIndex();
             Log("Starting evaluation...");
 
@@ -698,8 +699,10 @@ namespace SQLAuditor.Wpf
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
                 await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
+                UpdateEvaluationProgressDisplay();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
@@ -762,8 +765,10 @@ namespace SQLAuditor.Wpf
                     return;
                 }
                 var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
+                UpdateEvaluationProgressDisplay();
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
@@ -1361,7 +1366,40 @@ namespace SQLAuditor.Wpf
             {
                 _treeRenderQueued = false;
                 RenderEvaluationTree();
+                UpdateEvaluationProgressDisplay();
             }));
+        }
+
+        private static bool IsTerminalEvaluationStatus(string status)
+        {
+            return string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Skipped", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Complete", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Error", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateEvaluationProgressDisplay()
+        {
+            if (_evalItemMap == null || _evalStatusMap == null)
+            {
+                EvalProgressBar.Value = 0;
+                EvalProgressBar.Maximum = 1;
+                EvalProgressText.Text = "0 / 0";
+                return;
+            }
+
+            var total = _evalItemMap.Count;
+            var finished = _evalStatusMap.Count(kvp => _evalItemMap.ContainsKey(kvp.Key) && IsTerminalEvaluationStatus(kvp.Value.Status));
+            var max = Math.Max(total, 1);
+
+            EvalProgressBar.Minimum = 0;
+            EvalProgressBar.Maximum = max;
+            EvalProgressBar.Value = Math.Min(finished, max);
+            EvalProgressText.Text = $"{finished} / {total}";
         }
 
         private void RenderEvaluationTree()
