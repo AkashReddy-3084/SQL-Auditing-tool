@@ -152,7 +152,7 @@ internal sealed class SqlServerMcpEvaluator
                 model = _model,
                 messages = new[]
                 {
-                    new { role = "system", content = PromptTemplateStore.Load("mcp_system_prompt.txt") },
+                    new { role = "system", content = "Reply with OK." },
                     new { role = "user", content = "Health check" }
                 }
             };
@@ -548,6 +548,9 @@ internal sealed class SqlServerMcpEvaluator
         return "NeedsReview";
     }
 
+    // The template puts the run-constant server name and snapshot ahead of the per-item text so
+    // every item after the first shares the same prompt prefix and can hit the provider's prefix
+    // cache. Keep that ordering when editing mcp_user_prompt.txt.
     private static string BuildPrompt(ChecklistItem item, string sqlSnapshot, string sqlServerName)
     {
         return PromptTemplateStore.Render(
@@ -703,15 +706,22 @@ ORDER BY DbName;",
         var row = 0;
         while (await rdr.ReadAsync(cancellationToken) && row < maxRows)
         {
-            var cols = new List<string>();
-            for (int i = 0; i < rdr.FieldCount; i++)
+            // The snapshot is re-sent with every checklist item, so the column names are written
+            // once as a header rather than repeated on each row.
+            if (row == 0)
             {
-                var key = rdr.GetName(i);
-                var value = rdr.IsDBNull(i) ? "NULL" : Convert.ToString(rdr.GetValue(i)) ?? string.Empty;
-                cols.Add($"{key}={value}");
+                var names = new List<string>(rdr.FieldCount);
+                for (int i = 0; i < rdr.FieldCount; i++) names.Add(rdr.GetName(i));
+                sb.AppendLine("columns: " + string.Join(" | ", names));
             }
 
-            sb.AppendLine(string.Join("; ", cols));
+            var cols = new List<string>(rdr.FieldCount);
+            for (int i = 0; i < rdr.FieldCount; i++)
+            {
+                cols.Add(rdr.IsDBNull(i) ? "NULL" : CompactValue(rdr.GetValue(i)));
+            }
+
+            sb.AppendLine(string.Join(" | ", cols));
             row++;
         }
 
@@ -735,11 +745,21 @@ ORDER BY DbName;",
         for (int i = 0; i < rdr.FieldCount; i++)
         {
             var key = rdr.GetName(i);
-            var value = rdr.IsDBNull(i) ? "NULL" : Convert.ToString(rdr.GetValue(i)) ?? string.Empty;
+            var value = rdr.IsDBNull(i) ? "NULL" : CompactValue(rdr.GetValue(i));
             sb.AppendLine($"{key}: {value}");
         }
 
         sb.AppendLine();
         await rdr.CloseAsync();
+    }
+
+    /// <summary>
+    /// Flattens a snapshot value onto one line. Multi-line banners such as @@VERSION otherwise
+    /// carry newlines and tab runs into every per-item prompt without adding information.
+    /// </summary>
+    private static string CompactValue(object? value)
+    {
+        var text = Convert.ToString(value) ?? string.Empty;
+        return Regex.Replace(text, "\\s+", " ").Trim();
     }
 }

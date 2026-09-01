@@ -1,28 +1,11 @@
-Checklist Item: {{CHECKLIST_ITEM_ID}}
-Description: {{CHECKLIST_ITEM_DESCRIPTION}}
-Verification: {{CHECKLIST_ITEM_VERIFICATION}}
 SQL Server: {{SQL_SERVER_NAME}}
 SQL Snapshot:
 {{SQL_SNAPSHOT}}
 
-Assess the checklist item using ONLY the SQL snapshot.
+Assess the checklist item below using ONLY the snapshot above, applying the feasibility, Not Applicable and field rules from the system prompt.
 
-Evaluation rules:
-1. First determine feasibility from available snapshot signals.
-2. If snapshot includes relevant object/code indicators (for example module counts, TRY/CATCH usage counts, THROW/RAISERROR usage, NOCOUNT usage, cursor/while usage, deprecated type counts), treat as potentially feasible.
-3. Use feasible=false only when key required signals are absent.
-4. When feasible=true, commit to a verdict that matches the score: outcome=Pass when score >= 2, outcome=Fail when score < 2. If confidence is too limited to score the item, set feasible=false rather than hedging the outcome.
-5. Before choosing Pass or Fail, check whether the snapshot holds ANY supporting artefact for this item. If every value that bears on the item is absent - irrelevant, NULL, empty, zero, "none" or "not found" - the control does not exist here to be assessed: set outcome="Not Applicable", keep feasible=true, and start evidence with the exact words "Not Applicable." followed by one sentence of your own reasoning naming what you looked for. A zero that itself proves compliance (for example "0 unauthorised logins") is real evidence, not "Not Applicable".
-6. Never copy these instructions in the response.
+Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
 
-Report fields (fill all of them so the summary report renders correctly):
-1. score: integer 0-3 (0 = not implemented, 1 = partial, 2 = implemented, 3 = best practice). Default to 0 when the snapshot shows no supporting evidence.
-2. implementationStatus: the label matching the score (Not Implemented | Partial | Implemented | Best Practice).
-3. severity: Critical | High | Medium | Low | Informational, aligned with the size of the gap; use Informational for a Not Applicable item.
-4. finding: one concise sentence stating the observed state.
-5. recommendation: remediation guidance when score < 2; empty string when score >= 2 or when the outcome is Not Applicable.
-6. effort: Low | Medium | High.
-7. riskImpact: short phrase describing the risk if the gap is not addressed.
-8. scoreImpact: integer equal to (3 - score); use 0 for a Not Applicable item.
-
-Return strict JSON only with keys: outcome, evidence, feasible, reasoning, score, implementationStatus, severity, finding, recommendation, effort, riskImpact, scoreImpact.
+Return strict JSON only with keys: outcome, feasible, score, severity, finding, evidence, recommendation, effort, riskImpact.
