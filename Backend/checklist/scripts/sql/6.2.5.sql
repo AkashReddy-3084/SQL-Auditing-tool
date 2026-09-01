@@ -1,86 +1,81 @@
 -- Checklist: Row-Level Security implemented where multi-tenant/segmented access is required
 -- Scope: DATABASE
--- Scoring: 3 = no tenant-key columns found (N/A) or all tenant-key tables covered by an active RLS policy; 2 = an active RLS policy exists but coverage is partial; 1 = tenant-key columns exist but no active RLS policy found; 0 = evaluation could not be run
+-- Scoring: 3 = no tenant/segment key columns exist, or every such table is covered by an enabled security policy; 2 = under 25% of those tables are uncovered; 1 = 25% or more are uncovered while an enabled policy exists; 0 = tenant/segment key columns exist with no enabled security policy, or metadata unreadable
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Row-Level Security metadata was not readable in this database';
+DECLARE @Policies INT = 0;
+DECLARE @Enabled INT = 0;
+DECLARE @Predicates INT = 0;
+DECLARE @TenantTables INT = 0;
+DECLARE @Uncovered INT = 0;
+DECLARE @Names NVARCHAR(MAX) = 'none';
+DECLARE @Ratio DECIMAL(9, 4) = 0;
+DECLARE @Failed BIT = 0;
+DECLARE @Protected TABLE (ObjectId INT PRIMARY KEY);
+DECLARE @Tenant TABLE (ObjectId INT PRIMARY KEY, FullName NVARCHAR(400));
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+BEGIN TRY
+    SELECT @Policies = COUNT(*),
+           @Enabled = ISNULL(SUM(CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END), 0)
+    FROM sys.security_policies;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @TenantTableCount INT, @RlsCoveredTableCount INT;
+    SELECT @Predicates = COUNT(*) FROM sys.security_predicates;
 
-    SELECT @TenantTableCount = COUNT(DISTINCT c.object_id)
-    FROM sys.columns c
-    JOIN sys.tables t ON t.object_id = c.object_id
-    WHERE c.name LIKE '%tenant_id%' OR c.name LIKE '%org_id%' OR c.name LIKE '%customer_id%';
+    INSERT INTO @Protected (ObjectId)
+    SELECT DISTINCT sp.target_object_id
+    FROM sys.security_predicates AS sp
+    JOIN sys.security_policies AS p ON p.object_id = sp.object_id AND p.is_enabled = 1;
 
-    SELECT @RlsCoveredTableCount = COUNT(DISTINCT sp.target_object_id)
-    FROM sys.security_predicates sp
-    JOIN sys.security_policies pol ON pol.object_id = sp.object_id AND pol.is_enabled = 1;
+    INSERT INTO @Tenant (ObjectId, FullName)
+    SELECT t.object_id, CONCAT(s.name, '.', t.name)
+    FROM sys.tables AS t
+    JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+    WHERE t.is_ms_shipped = 0
+      AND EXISTS (SELECT 1
+                  FROM sys.columns AS c
+                  WHERE c.object_id = t.object_id
+                    AND REPLACE(LOWER(c.name), '_', '') IN
+                        ('tenant', 'tenantid', 'orgid', 'organizationid', 'customerid',
+                         'clientid', 'ownerid', 'accountid', 'companyid', 'subscriberid'));
+END TRY
+BEGIN CATCH
+    SET @Failed = 1;
+END CATCH
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@TenantTableCount,0) = 0 THEN 3
-             WHEN ISNULL(@RlsCoveredTableCount,0) = 0 THEN 1
-             WHEN @RlsCoveredTableCount >= @TenantTableCount THEN 3
-             ELSE 2 END,
-        CASE WHEN ISNULL(@TenantTableCount,0) = 0 THEN 'No tenant/segmentation-key columns found - RLS not applicable'
-             ELSE CONCAT('Tables with tenant-key columns = ', @TenantTableCount, ', covered by an active RLS policy = ', ISNULL(@RlsCoveredTableCount,0)) END
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+SELECT @TenantTables = COUNT(*),
+       @Uncovered = ISNULL(SUM(CASE WHEN g.ObjectId IS NULL THEN 1 ELSE 0 END), 0)
+FROM @Tenant AS x
+LEFT JOIN @Protected AS g ON g.ObjectId = x.ObjectId;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SELECT @Names = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), x.FullName), ', '), 'none')
+FROM @Tenant AS x
+LEFT JOIN @Protected AS g ON g.ObjectId = x.ObjectId
+WHERE g.ObjectId IS NULL;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @tt INT, @rc INT;
-SELECT @tt = COUNT(DISTINCT c.object_id)
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON t.object_id = c.object_id
-WHERE c.name LIKE ''%tenant_id%'' OR c.name LIKE ''%org_id%'' OR c.name LIKE ''%customer_id%'';
-SELECT @rc = COUNT(DISTINCT sp.target_object_id)
-FROM ' + QUOTENAME(@DbName) + N'.sys.security_predicates sp
-JOIN ' + QUOTENAME(@DbName) + N'.sys.security_policies pol ON pol.object_id = sp.object_id AND pol.is_enabled = 1;
-SELECT @p_Db,
-       CASE WHEN ISNULL(@tt,0) = 0 THEN 3
-            WHEN ISNULL(@rc,0) = 0 THEN 1
-            WHEN @rc >= @tt THEN 3
-            ELSE 2 END,
-       CASE WHEN ISNULL(@tt,0) = 0 THEN ''No tenant/segmentation-key columns found - RLS not applicable''
-            ELSE CONCAT(''Tables with tenant-key columns = '', @tt, '', covered by an active RLS policy = '', ISNULL(@rc,0)) END;';
+SET @Ratio = CASE WHEN @TenantTables = 0 THEN 0
+                  ELSE CONVERT(DECIMAL(9, 4), @Uncovered) / NULLIF(@TenantTables, 0) END;
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
+SET @Score = CASE
+    WHEN @Failed = 1 THEN 0
+    WHEN @TenantTables = 0 OR @Uncovered = 0 THEN 3
+    WHEN @Enabled = 0 THEN 0
+    WHEN ISNULL(@Ratio, 1) < 0.25 THEN 2
+    ELSE 1 END;
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
+SET @Finding = CASE
+    WHEN @Failed = 1 THEN CONCAT('Row-Level Security metadata could not be read in ', @DatabaseQueried)
+    ELSE CONCAT('security policies = ', @Policies,
+                ' (enabled = ', @Enabled, '), security predicates = ', @Predicates,
+                ', tables carrying a tenant/segment key column = ', @TenantTables,
+                ', of those with no enabled policy = ', @Uncovered,
+                CASE WHEN @Uncovered = 0 THEN '' ELSE CONCAT(' (', LEFT(@Names, 400), ')') END)
+    END;
 
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

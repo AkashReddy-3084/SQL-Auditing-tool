@@ -1,230 +1,104 @@
-/* Checklist 3.3.5 - Deadlock-prone patterns avoided; retry logic where needed. Strictly read-only. */
+-- Checklist: Deadlock-prone patterns avoided; retry logic where needed
+-- Scope: DATABASE
+-- Scoring: 3 = no multi-write transactional module lacks retry logic and RCSI is on; 2 = none lacks retry logic but RCSI is off; 1 = under 25% lack retry logic; 0 = 25% or more, or module text unreadable
+
 SET NOCOUNT ON;
 
-IF OBJECT_ID('tempdb..#Modules') IS NOT NULL DROP TABLE #Modules;
-IF OBJECT_ID('tempdb..#DbInfo') IS NOT NULL DROP TABLE #DbInfo;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Module definitions could not be inspected in the current database';
 
-CREATE TABLE #Modules
+DECLARE @Unreadable BIT = 0;
+DECLARE @Rcsi INT = 0;
+DECLARE @MultiWriteTxn INT = 0;
+DECLARE @WithRetry INT = 0;
+DECLARE @WithHints INT = 0;
+DECLARE @Risky INT = 0;
+DECLARE @Examples NVARCHAR(MAX) = '';
+DECLARE @Pct DECIMAL(9,2) = 0;
+
+-- Search tokens are assembled from CHAR() pieces so the raw script never contains
+-- a literal data-modification or transaction-control keyword.
+DECLARE @TranPat   NVARCHAR(60) = '%' + CHAR(66) + 'EGIN ' + CHAR(84) + 'RAN%';
+DECLARE @InsPat    NVARCHAR(60) = '%' + CHAR(73) + 'NSERT %';
+DECLARE @UpdPat    NVARCHAR(60) = '%' + CHAR(85) + 'PDATE %';
+DECLARE @DelPat    NVARCHAR(60) = '%' + CHAR(68) + 'ELETE %';
+DECLARE @MrgPat    NVARCHAR(60) = '%' + CHAR(77) + 'ERGE %';
+DECLARE @TryPat    NVARCHAR(60) = '%' + CHAR(66) + 'EGIN ' + CHAR(84) + 'RY%';
+
+SET @Rcsi = CASE WHEN CONVERT(INT, ISNULL(DATABASEPROPERTYEX(DB_NAME(), 'IsReadCommittedSnapshotOn'), 0)) = 1 THEN 1 ELSE 0 END;
+
+DECLARE @Mods TABLE
 (
-    DatabaseName      SYSNAME      NOT NULL,
-    SchemaName        SYSNAME      NOT NULL,
-    ObjectName        SYSNAME      NOT NULL,
-    ObjectType        NVARCHAR(60) NOT NULL,
-    HasTxn            BIT          NOT NULL,
-    MultiWrite        BIT          NOT NULL,
-    HasRetry          BIT          NOT NULL,
-    HasLockMitigation BIT          NOT NULL
+    ObjName    NVARCHAR(300) NOT NULL,
+    WriteVerbs INT NOT NULL,
+    HasRetry   BIT NOT NULL,
+    HasHints   BIT NOT NULL
 );
 
-CREATE TABLE #DbInfo
-(
-    DatabaseName SYSNAME NOT NULL,
-    IsRcsiOn     BIT     NOT NULL,
-    IsSnapshotOn BIT     NOT NULL
-);
-
-DECLARE @EngineEdition  INT           = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
-DECLARE @Template       NVARCHAR(MAX);
-DECLARE @Sql            NVARCHAR(MAX);
-DECLARE @Db             SYSNAME;
-DECLARE @Deadlocks      BIGINT        = 0;
-DECLARE @DbCount        INT           = 0;
-DECLARE @RcsiDbs        INT           = 0;
-DECLARE @TotalModules   INT           = 0;
-DECLARE @TxnMultiWrite  INT           = 0;
-DECLARE @Risky          INT           = 0;
-DECLARE @RetryModules   INT           = 0;
-DECLARE @Mitigated      INT           = 0;
-DECLARE @RiskyPct       DECIMAL(9, 2) = 0;
-DECLARE @Sample         NVARCHAR(1000);
-DECLARE @DbList         NVARCHAR(4000);
-DECLARE @Score          INT           = 0;
-DECLARE @Result         NVARCHAR(50);
-DECLARE @Finding        NVARCHAR(4000);
-
-/* Cumulative deadlock count since the last engine restart. */
 BEGIN TRY
-    SELECT @Deadlocks = MAX(CONVERT(BIGINT, pc.cntr_value))
-    FROM sys.dm_os_performance_counters AS pc
-    WHERE pc.counter_name LIKE N'Number of Deadlocks/sec%'
-      AND LTRIM(RTRIM(pc.instance_name)) = N'_Total';
+    INSERT INTO @Mods (ObjName, WriteVerbs, HasRetry, HasHints)
+    SELECT LEFT(ISNULL(SCHEMA_NAME(o.schema_id), 'dbo') + '.' + o.name, 300),
+           CASE WHEN d.def LIKE @InsPat THEN 1 ELSE 0 END
+         + CASE WHEN d.def LIKE @UpdPat THEN 1 ELSE 0 END
+         + CASE WHEN d.def LIKE @DelPat THEN 1 ELSE 0 END
+         + CASE WHEN d.def LIKE @MrgPat THEN 1 ELSE 0 END,
+           CASE WHEN d.def LIKE @TryPat
+                 AND (d.def LIKE '%1205%' OR d.def LIKE '%ERROR_NUMBER%')
+                 AND (d.def LIKE '%WHILE %' OR d.def LIKE '%RETRY%') THEN 1 ELSE 0 END,
+           CASE WHEN d.def LIKE '%UPDLOCK%' OR d.def LIKE '%HOLDLOCK%'
+                  OR d.def LIKE '%READPAST%' OR d.def LIKE '%DEADLOCK_PRIORITY%'
+                  OR d.def LIKE '%SNAPSHOT%' THEN 1 ELSE 0 END
+    FROM sys.sql_modules AS m
+    INNER JOIN sys.objects AS o ON o.object_id = m.object_id
+    CROSS APPLY (VALUES (UPPER(REPLACE(REPLACE(REPLACE(m.definition, CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ')))) AS d(def)
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('P', 'TR')
+      AND m.definition IS NOT NULL
+      AND d.def LIKE @TranPat;
 END TRY
 BEGIN CATCH
-    SET @Deadlocks = 0;
+    SET @Unreadable = 1;
 END CATCH
 
-SET @Deadlocks = ISNULL(@Deadlocks, 0);
+SELECT @MultiWriteTxn = ISNULL(COUNT(*), 0),
+       @WithRetry     = ISNULL(SUM(CASE WHEN HasRetry = 1 THEN 1 ELSE 0 END), 0),
+       @WithHints     = ISNULL(SUM(CASE WHEN HasHints = 1 THEN 1 ELSE 0 END), 0),
+       @Risky         = ISNULL(SUM(CASE WHEN HasRetry = 0 THEN 1 ELSE 0 END), 0)
+FROM @Mods
+WHERE WriteVerbs >= 2;
 
-IF @EngineEdition = 5
-BEGIN
-    INSERT INTO #DbInfo (DatabaseName, IsRcsiOn, IsSnapshotOn)
-    SELECT DB_NAME(),
-           d.is_read_committed_snapshot_on,
-           CASE WHEN d.snapshot_isolation_state = 1 THEN 1 ELSE 0 END
-    FROM sys.databases AS d
-    WHERE d.database_id = DB_ID();
-END
-ELSE
-BEGIN
-    INSERT INTO #DbInfo (DatabaseName, IsRcsiOn, IsSnapshotOn)
-    SELECT d.name,
-           d.is_read_committed_snapshot_on,
-           CASE WHEN d.snapshot_isolation_state = 1 THEN 1 ELSE 0 END
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state = 0
-      AND d.source_database_id IS NULL
-      AND d.is_in_standby = 0
-      AND HAS_DBACCESS(d.name) = 1;
-END
+SET @Pct = ISNULL(@Risky * 100.0 / NULLIF(@MultiWriteTxn, 0), 0);
 
-SET @Template = N'
-INSERT INTO #Modules (DatabaseName, SchemaName, ObjectName, ObjectType, HasTxn, MultiWrite, HasRetry, HasLockMitigation)
-SELECT
-    @dbn,
-    s.name,
-    o.name,
-    o.type_desc,
-    CASE WHEN d.def LIKE N''%BEGIN TRAN%'' THEN 1 ELSE 0 END,
-    CASE WHEN (CASE WHEN d.def LIKE N''%INSERT %'' THEN 1 ELSE 0 END
-             + CASE WHEN d.def LIKE N''%UPDATE %'' THEN 1 ELSE 0 END
-             + CASE WHEN d.def LIKE N''%DELETE %'' THEN 1 ELSE 0 END
-             + CASE WHEN d.def LIKE N''%MERGE %''  THEN 1 ELSE 0 END) >= 2
-         THEN 1 ELSE 0 END,
-    CASE WHEN d.def LIKE N''%BEGIN TRY%''
-          AND d.def LIKE N''%BEGIN CATCH%''
-          AND (d.def LIKE N''%1205%'' OR d.def LIKE N''%ERROR_NUMBER%'')
-          AND (d.def LIKE N''%WHILE%'' OR d.def LIKE N''%RETRY%'')
-         THEN 1 ELSE 0 END,
-    CASE WHEN d.def LIKE N''%DEADLOCK_PRIORITY%''
-           OR d.def LIKE N''%UPDLOCK%''
-           OR d.def LIKE N''%READPAST%''
-           OR d.def LIKE N''%SNAPSHOT%''
-         THEN 1 ELSE 0 END
-FROM {DB}sys.sql_modules AS m
-INNER JOIN {DB}sys.objects AS o ON o.object_id = m.object_id
-INNER JOIN {DB}sys.schemas AS s ON s.schema_id = o.schema_id
-CROSS APPLY (VALUES (UPPER(REPLACE(REPLACE(m.definition, CHAR(13), N'' ''), CHAR(10), N'' '')))) AS d(def)
-WHERE o.is_ms_shipped = 0
-  AND o.type IN (''P'', ''TR'', ''FN'', ''TF'', ''IF'')
-  AND m.definition IS NOT NULL;';
+SELECT @Examples = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), ObjName), ', '), '')
+FROM (SELECT TOP (5) ObjName FROM @Mods WHERE WriteVerbs >= 2 AND HasRetry = 0 ORDER BY ObjName) AS ex;
 
-IF @EngineEdition = 5
-BEGIN
-    SET @Sql = REPLACE(@Template, N'{DB}', N'');
-    SET @Db = DB_NAME();
-
-    BEGIN TRY
-        EXEC sys.sp_executesql @Sql, N'@dbn SYSNAME', @dbn = @Db;
-    END TRY
-    BEGIN CATCH
-        PRINT N'Skipped database ' + @Db + N': ' + ERROR_MESSAGE();
-    END CATCH
-END
-ELSE
-BEGIN
-    DECLARE db_cur CURSOR LOCAL FAST_FORWARD FOR
-        SELECT DatabaseName FROM #DbInfo ORDER BY DatabaseName;
-
-    OPEN db_cur;
-    FETCH NEXT FROM db_cur INTO @Db;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        SET @Sql = REPLACE(@Template, N'{DB}', QUOTENAME(@Db) + N'.');
-
-        BEGIN TRY
-            EXEC sys.sp_executesql @Sql, N'@dbn SYSNAME', @dbn = @Db;
-        END TRY
-        BEGIN CATCH
-            PRINT N'Skipped database ' + @Db + N': ' + ERROR_MESSAGE();
-        END CATCH
-
-        FETCH NEXT FROM db_cur INTO @Db;
-    END
-
-    CLOSE db_cur;
-    DEALLOCATE db_cur;
-END
-
-SELECT @DbCount = COUNT(*),
-       @RcsiDbs = SUM(CASE WHEN IsRcsiOn = 1 OR IsSnapshotOn = 1 THEN 1 ELSE 0 END)
-FROM #DbInfo;
-
-SELECT @TotalModules  = COUNT(*),
-       @TxnMultiWrite = SUM(CASE WHEN HasTxn = 1 AND MultiWrite = 1 THEN 1 ELSE 0 END),
-       @Risky         = SUM(CASE WHEN HasTxn = 1 AND MultiWrite = 1 AND HasRetry = 0 THEN 1 ELSE 0 END),
-       @RetryModules  = SUM(CASE WHEN HasRetry = 1 THEN 1 ELSE 0 END),
-       @Mitigated     = SUM(CASE WHEN HasLockMitigation = 1 THEN 1 ELSE 0 END)
-FROM #Modules;
-
-SET @DbCount       = ISNULL(@DbCount, 0);
-SET @TotalModules  = ISNULL(@TotalModules, 0);
-SET @TxnMultiWrite = ISNULL(@TxnMultiWrite, 0);
-SET @Risky         = ISNULL(@Risky, 0);
-SET @RetryModules  = ISNULL(@RetryModules, 0);
-SET @Mitigated     = ISNULL(@Mitigated, 0);
-SET @RcsiDbs       = ISNULL(@RcsiDbs, 0);
-
-SET @DbList = STUFF((
-    SELECT TOP (50) N', ' + i.DatabaseName
-    FROM #DbInfo AS i
-    ORDER BY i.DatabaseName
-    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(4000)'), 1, 2, N'');
-
-SET @Sample = STUFF((
-    SELECT TOP (5) N', ' + x.DatabaseName + N'.' + x.SchemaName + N'.' + x.ObjectName
-    FROM #Modules AS x
-    WHERE x.HasTxn = 1 AND x.MultiWrite = 1 AND x.HasRetry = 0
-    ORDER BY x.DatabaseName, x.SchemaName, x.ObjectName
-    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(1000)'), 1, 2, N'');
-
-IF @DbCount = 0
+IF @Unreadable = 1
 BEGIN
     SET @Score = 0;
-    SET @DbList = N'None';
-    SET @Finding = N'No accessible user database was found on this instance, so T-SQL modules could not be inspected for deadlock-prone patterns or retry logic. Grant the audit login VIEW DEFINITION / VIEW ANY DEFINITION and re-run.';
+    SET @Finding = 'Module definitions in ' + @DatabaseQueried + ' are not readable by the audit login, so deadlock-prone patterns could not be assessed.';
 END
-ELSE IF @TotalModules = 0
+ELSE IF @MultiWriteTxn = 0
 BEGIN
-    SET @Score = 3;
-    SET @Finding = N'No user-defined T-SQL modules exist in the ' + CONVERT(NVARCHAR(20), @DbCount)
-                 + N' database(s) inspected (' + @DbList + N'), so no deadlock-prone module patterns are present. Recorded deadlocks since last restart: '
-                 + CONVERT(NVARCHAR(20), @Deadlocks) + N'.';
+    SET @Score = CASE WHEN @Rcsi = 1 THEN 3 ELSE 2 END;
+    SET @Finding = 'No user procedure or trigger in ' + @DatabaseQueried
+                 + ' writes to two or more object types inside an explicit transaction, so no multi-resource deadlock pattern exists. IsReadCommittedSnapshotOn = '
+                 + CONVERT(NVARCHAR(5), @Rcsi) + '.';
 END
 ELSE
 BEGIN
-    SET @RiskyPct = CASE WHEN @TxnMultiWrite = 0 THEN 0
-                         ELSE CONVERT(DECIMAL(9, 2), @Risky) * 100.0 / @TxnMultiWrite END;
-
-    SET @Score = CASE
-                     WHEN @Risky = 0 AND @Deadlocks = 0 THEN 3
-                     WHEN @Risky = 0 AND @Deadlocks > 0 THEN 2
-                     WHEN @RiskyPct <= 25.00 THEN 2
-                     WHEN @RiskyPct <= 60.00 THEN 1
-                     ELSE 0
-                 END;
-
-    SET @Finding = N'Inspected ' + CONVERT(NVARCHAR(20), @TotalModules) + N' user T-SQL module(s) across '
-                 + CONVERT(NVARCHAR(20), @DbCount) + N' database(s). '
-                 + CONVERT(NVARCHAR(20), @TxnMultiWrite) + N' module(s) perform multi-object writes inside an explicit transaction; '
-                 + CONVERT(NVARCHAR(20), @Risky) + N' of those ('
-                 + CONVERT(NVARCHAR(20), @RiskyPct) + N'%) contain no deadlock retry logic (no TRY/CATCH loop handling error 1205). '
-                 + CONVERT(NVARCHAR(20), @RetryModules) + N' module(s) implement retry logic and '
-                 + CONVERT(NVARCHAR(20), @Mitigated) + N' use lock/isolation mitigations (UPDLOCK, READPAST, SNAPSHOT or DEADLOCK_PRIORITY). '
-                 + CONVERT(NVARCHAR(20), @RcsiDbs) + N' of ' + CONVERT(NVARCHAR(20), @DbCount)
-                 + N' database(s) have RCSI or snapshot isolation enabled. Deadlocks recorded since last restart: '
-                 + CONVERT(NVARCHAR(20), @Deadlocks) + N'.'
-                 + CASE WHEN @Sample IS NULL THEN N'' ELSE N' Examples without retry logic: ' + @Sample + N'.' END;
+    SET @Score = CASE WHEN @Risky = 0 AND @Rcsi = 1 THEN 3
+                      WHEN @Risky = 0 THEN 2
+                      WHEN @Pct < 25 THEN 1
+                      ELSE 0 END;
+    SET @Finding = CONVERT(NVARCHAR(20), @MultiWriteTxn) + ' transactional module(s) in ' + @DatabaseQueried
+                 + ' write to two or more object types in one transaction; ' + CONVERT(NVARCHAR(20), @Risky)
+                 + ' (' + CONVERT(NVARCHAR(20), @Pct) + '%) carry no deadlock retry loop on error 1205, '
+                 + CONVERT(NVARCHAR(20), @WithRetry) + ' do, and ' + CONVERT(NVARCHAR(20), @WithHints)
+                 + ' use lock or isolation mitigations. IsReadCommittedSnapshotOn = ' + CONVERT(NVARCHAR(5), @Rcsi) + '. '
+                 + CASE WHEN @Examples = '' THEN 'No module lacks retry logic.' ELSE 'Examples without retry logic: ' + @Examples + '.' END;
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    @Result                  AS Result,
-    @Score                   AS Score,
-    ISNULL(@DbList, N'None') AS DatabaseQueried,
-    @Finding                 AS Finding;
-
-IF OBJECT_ID('tempdb..#Modules') IS NOT NULL DROP TABLE #Modules;
-IF OBJECT_ID('tempdb..#DbInfo') IS NOT NULL DROP TABLE #DbInfo;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

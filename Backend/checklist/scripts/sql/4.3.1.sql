@@ -1,58 +1,80 @@
+-- Checklist: Every table has an appropriate clustered index (or deliberate heap justification)
+-- Scope: DATABASE
+-- Scoring: 3 = no heaps; 2 = under 5% of user tables are heaps; 1 = under 25%; 0 = 25% or more, or tables unreadable
+
+SET NOCOUNT ON;
+
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
-DECLARE @Score INT = 3;
+DECLARE @Finding NVARCHAR(MAX) = 'User tables could not be inspected in the current database';
 
-IF @DatabaseQueried IN ('master', 'model', 'msdb', 'tempdb')
-BEGIN
-    SET @DatabaseQueried = 'None';
-    SET @Score = 0;
-    DECLARE @ResultSkipped VARCHAR(50);
-    SET @ResultSkipped = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-    SELECT 
-        @ResultSkipped AS [Result],
-        @Score AS [Score],
-        @DatabaseQueried AS [DatabaseQueried],
-        'No database found to be queried' AS [Finding];
-    RETURN;
-END
+DECLARE @Unreadable BIT = 0;
+DECLARE @TotalTables INT = 0;
+DECLARE @HeapCount INT = 0;
+DECLARE @HeapRows BIGINT = 0;
+DECLARE @Examples NVARCHAR(MAX) = '';
+DECLARE @Pct DECIMAL(9,2) = 0;
 
-DECLARE @Findings TABLE (
-    FindingText NVARCHAR(MAX)
+DECLARE @Heaps TABLE
+(
+    TableName NVARCHAR(300) NOT NULL,
+    RowCnt    BIGINT NOT NULL
 );
 
-INSERT INTO @Findings (FindingText)
-SELECT 
-    'Table ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name) + ' is a heap (no clustered index) with ' + CAST(ISNULL(MAX(p.rows), 0) AS NVARCHAR(20)) + ' rows.'
-FROM sys.tables t
-JOIN sys.schemas s ON t.schema_id = s.schema_id
-JOIN sys.indexes i ON t.object_id = i.object_id
-JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-WHERE i.type = 0 -- Heap
-  AND t.is_ms_shipped = 0
-  AND p.rows > 0
-GROUP BY s.name, t.name;
+BEGIN TRY
+    SELECT @TotalTables = ISNULL(COUNT(*), 0)
+    FROM sys.tables AS t
+    WHERE t.is_ms_shipped = 0;
 
-IF EXISTS (SELECT 1 FROM @Findings)
+    INSERT INTO @Heaps (TableName, RowCnt)
+    SELECT LEFT(ISNULL(SCHEMA_NAME(t.schema_id), 'dbo') + '.' + t.name, 300),
+           ISNULL((SELECT SUM(p.rows) FROM sys.partitions AS p
+                   WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)), 0)
+    FROM sys.tables AS t
+    WHERE t.is_ms_shipped = 0
+      AND NOT EXISTS (SELECT 1 FROM sys.indexes AS i
+                      WHERE i.object_id = t.object_id AND i.index_id = 1)
+      AND NOT EXISTS (SELECT 1 FROM sys.indexes AS cs
+                      WHERE cs.object_id = t.object_id AND cs.type IN (5, 6));
+END TRY
+BEGIN CATCH
+    SET @Unreadable = 1;
+END CATCH
+
+SELECT @HeapCount = ISNULL(COUNT(*), 0),
+       @HeapRows  = ISNULL(SUM(RowCnt), 0)
+FROM @Heaps;
+
+SELECT @Examples = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), TableName + ' (' + CONVERT(NVARCHAR(20), RowCnt) + ' rows)'), ', '), '')
+FROM (SELECT TOP (5) TableName, RowCnt FROM @Heaps ORDER BY RowCnt DESC, TableName) AS ex;
+
+SET @Pct = ISNULL(@HeapCount * 100.0 / NULLIF(@TotalTables, 0), 0);
+
+IF @Unreadable = 1
 BEGIN
-    SET @Score = 1;
+    SET @Score = 0;
+    SET @Finding = 'Table and index metadata in ' + @DatabaseQueried + ' is not readable by the audit login, so clustered index coverage could not be assessed.';
 END
-
-DECLARE @Result VARCHAR(50);
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-IF @Result = 'Pass'
+ELSE IF @TotalTables = 0
 BEGIN
-    SELECT 
-        @Result AS [Result],
-        @Score AS [Score],
-        @DatabaseQueried AS [DatabaseQueried],
-        'All checked tables have clustered indexes.' AS [Finding];
+    SET @Score = 3;
+    SET @Finding = 'No user tables found in ' + @DatabaseQueried + ', so there is no table without a clustered index.';
+END
+ELSE IF @HeapCount = 0
+BEGIN
+    SET @Score = 3;
+    SET @Finding = 'All ' + CONVERT(NVARCHAR(20), @TotalTables) + ' user table(s) in ' + @DatabaseQueried
+                 + ' carry a clustered rowstore or clustered columnstore index; no heap was found.';
 END
 ELSE
 BEGIN
-    SELECT 
-        @Result AS [Result],
-        @Score AS [Score],
-        @DatabaseQueried AS [DatabaseQueried],
-        FindingText AS [Finding]
-    FROM @Findings;
+    SET @Score = CASE WHEN @Pct < 5 THEN 2 WHEN @Pct < 25 THEN 1 ELSE 0 END;
+    SET @Finding = CONVERT(NVARCHAR(20), @HeapCount) + ' of ' + CONVERT(NVARCHAR(20), @TotalTables)
+                 + ' user table(s) in ' + @DatabaseQueried + ' (' + CONVERT(NVARCHAR(20), @Pct)
+                 + '%) are heaps with no clustered index and no columnstore index, holding '
+                 + CONVERT(NVARCHAR(30), @HeapRows) + ' row(s) in total. Largest heaps: ' + @Examples + '.';
 END
+
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

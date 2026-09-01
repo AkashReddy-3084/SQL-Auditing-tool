@@ -1,130 +1,78 @@
 -- Checklist: Environment separation exists (Dev / Test / Prod) with isolated instances or databases
 -- Scope: SERVER
--- Scoring: 3 = all three environments isolated; 2 = strong partial evidence; 1 = minimal or ambiguous evidence; 0 = no evidence
--- NOTE: Automated evidence only; full compliance requires human review when the score is below 3.
+-- Scoring: 3 = two or more distinct environment markers on databases and every user database classified; 2 = two or more database markers with some unclassified, or one database marker confirmed by the instance name; 1 = a single weak marker only; 0 = no environment marker found or no user database visible
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
-DECLARE @Finding NVARCHAR(MAX) = 'Environment separation evidence was not found';
-DECLARE @ServerName NVARCHAR(256) = CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName'));
-DECLARE @NormalizedServer NVARCHAR(300);
-DECLARE @DatabaseCount INT = 0;
-DECLARE @DatabaseEnvironmentCount INT = 0;
-DECLARE @ServerEnvironmentCount INT = 0;
-DECLARE @AmbiguousCount INT = 0;
-DECLARE @UnclassifiedCount INT = 0;
-DECLARE @DevDatabases NVARCHAR(MAX);
-DECLARE @TestDatabases NVARCHAR(MAX);
-DECLARE @ProdDatabases NVARCHAR(MAX);
-DECLARE @UnclassifiedDatabases NVARCHAR(MAX);
-DECLARE @ServerMarkers NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX) = 'No environment-separation evidence was collected';
+DECLARE @Server NVARCHAR(256) = ISNULL(CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName')), N'(unknown)');
+DECLARE @ServerNorm NVARCHAR(400) = N'';
+DECLARE @ServerEnv NVARCHAR(20) = N'none';
+DECLARE @DbCount INT = 0;
+DECLARE @EnvCount INT = 0;
+DECLARE @Unknown INT = 0;
+DECLARE @DevList NVARCHAR(MAX) = N'none';
+DECLARE @TestList NVARCHAR(MAX) = N'none';
+DECLARE @ProdList NVARCHAR(MAX) = N'none';
+DECLARE @UnknownList NVARCHAR(MAX) = N'none';
 
-CREATE TABLE #Databases (DbName SYSNAME NOT NULL, NormalizedName NVARCHAR(300) NOT NULL);
-CREATE TABLE #EnvironmentEvidence
-(
-    ObjectType NVARCHAR(10) NOT NULL,
-    ObjectName NVARCHAR(256) NOT NULL,
-    EnvironmentName NVARCHAR(10) NOT NULL
-);
+SET @ServerNorm = LOWER(N' ' + REPLACE(REPLACE(REPLACE(REPLACE(@Server, N'_', N' '), N'-', N' '), N'\', N' '), N'.', N' ') + N' ');
+SET @ServerEnv = CASE
+    WHEN @ServerNorm LIKE N'% dev %' OR @ServerNorm LIKE N'% development %' THEN N'Dev'
+    WHEN @ServerNorm LIKE N'% test %' OR @ServerNorm LIKE N'% qa %' OR @ServerNorm LIKE N'% uat %'
+         OR @ServerNorm LIKE N'% stage %' OR @ServerNorm LIKE N'% staging %' THEN N'Test'
+    WHEN @ServerNorm LIKE N'% prod %' OR @ServerNorm LIKE N'% production %' OR @ServerNorm LIKE N'% prd %' THEN N'Prod'
+    ELSE N'none' END;
 
-SET @NormalizedServer = LOWER(N' ' + REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-    ISNULL(@ServerName, N''), N'_', N' '), N'-', N' '), N'.', N' '), N'\', N' '), N'/', N' ') + N' ');
+CREATE TABLE #Db (DbName SYSNAME NOT NULL, Env NVARCHAR(10) NOT NULL);
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    INSERT INTO #Databases (DbName, NormalizedName)
-    SELECT DB_NAME(), LOWER(N' ' + REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-        DB_NAME(), N'_', N' '), N'-', N' '), N'.', N' '), N'\', N' '), N'/', N' ') + N' ');
-END
-ELSE
-BEGIN
-    INSERT INTO #Databases (DbName, NormalizedName)
-    SELECT name, LOWER(N' ' + REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-        name, N'_', N' '), N'-', N' '), N'.', N' '), N'\', N' '), N'/', N' ') + N' ')
-    FROM sys.databases
-    WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-END
+BEGIN TRY
+    INSERT INTO #Db (DbName, Env)
+    SELECT d.name,
+           CASE WHEN n.nm LIKE N'% dev %' OR n.nm LIKE N'% development %' THEN N'Dev'
+                WHEN n.nm LIKE N'% test %' OR n.nm LIKE N'% qa %' OR n.nm LIKE N'% uat %'
+                     OR n.nm LIKE N'% stage %' OR n.nm LIKE N'% staging %' THEN N'Test'
+                WHEN n.nm LIKE N'% prod %' OR n.nm LIKE N'% production %' OR n.nm LIKE N'% prd %' THEN N'Prod'
+                ELSE N'Unknown' END
+    FROM sys.databases AS d
+    CROSS APPLY (SELECT LOWER(N' ' + REPLACE(REPLACE(REPLACE(REPLACE(d.name, N'_', N' '), N'-', N' '), N'\', N' '), N'.', N' ') + N' ') AS nm) AS n
+    WHERE d.database_id > 4 AND d.state = 0;
+END TRY
+BEGIN CATCH
+    SET @Finding = N'Unable to enumerate user databases: ' + ERROR_MESSAGE();
+END CATCH;
 
-INSERT INTO #EnvironmentEvidence (ObjectType, ObjectName, EnvironmentName)
-SELECT 'Database', DbName, 'Dev' FROM #Databases
-WHERE NormalizedName LIKE N'% dev %' OR NormalizedName LIKE N'% development %';
+SELECT @DbCount = COUNT(*),
+       @Unknown = ISNULL(SUM(CASE WHEN Env = N'Unknown' THEN 1 ELSE 0 END), 0),
+       @EnvCount = COUNT(DISTINCT CASE WHEN Env <> N'Unknown' THEN Env END)
+FROM #Db;
 
-INSERT INTO #EnvironmentEvidence (ObjectType, ObjectName, EnvironmentName)
-SELECT 'Database', DbName, 'Test' FROM #Databases
-WHERE NormalizedName LIKE N'% test %' OR NormalizedName LIKE N'% qa %'
-   OR NormalizedName LIKE N'% uat %' OR NormalizedName LIKE N'% stage %'
-   OR NormalizedName LIKE N'% staging %';
-
-INSERT INTO #EnvironmentEvidence (ObjectType, ObjectName, EnvironmentName)
-SELECT 'Database', DbName, 'Prod' FROM #Databases
-WHERE NormalizedName LIKE N'% prod %' OR NormalizedName LIKE N'% production %';
-
-INSERT INTO #EnvironmentEvidence (ObjectType, ObjectName, EnvironmentName)
-SELECT 'Server', ISNULL(@ServerName, N'(unknown)'), EnvironmentName
-FROM (VALUES
-    ('Dev', CASE WHEN @NormalizedServer LIKE N'% dev %' OR @NormalizedServer LIKE N'% development %' THEN 1 ELSE 0 END),
-    ('Test', CASE WHEN @NormalizedServer LIKE N'% test %' OR @NormalizedServer LIKE N'% qa %'
-                  OR @NormalizedServer LIKE N'% uat %' OR @NormalizedServer LIKE N'% stage %'
-                  OR @NormalizedServer LIKE N'% staging %' THEN 1 ELSE 0 END),
-    ('Prod', CASE WHEN @NormalizedServer LIKE N'% prod %' OR @NormalizedServer LIKE N'% production %' THEN 1 ELSE 0 END)
-) AS markers(EnvironmentName, IsPresent)
-WHERE IsPresent = 1;
-
-SELECT @DatabaseCount = COUNT(*) FROM #Databases;
-SELECT @DatabaseEnvironmentCount = COUNT(DISTINCT EnvironmentName)
-FROM #EnvironmentEvidence WHERE ObjectType = 'Database';
-SELECT @ServerEnvironmentCount = COUNT(DISTINCT EnvironmentName)
-FROM #EnvironmentEvidence WHERE ObjectType = 'Server';
-SELECT @AmbiguousCount = COUNT(*) FROM
-(
-    SELECT ObjectName FROM #EnvironmentEvidence
-    WHERE ObjectType = 'Database' GROUP BY ObjectName HAVING COUNT(DISTINCT EnvironmentName) > 1
-) AS ambiguous;
-SELECT @UnclassifiedCount = COUNT(*) FROM #Databases AS d
-WHERE NOT EXISTS (SELECT 1 FROM #EnvironmentEvidence AS e
-                  WHERE e.ObjectType = 'Database' AND e.ObjectName = d.DbName);
-
-SELECT @DevDatabases = STRING_AGG(CONVERT(NVARCHAR(MAX), ObjectName), N', ')
-FROM #EnvironmentEvidence WHERE ObjectType = 'Database' AND EnvironmentName = 'Dev';
-SELECT @TestDatabases = STRING_AGG(CONVERT(NVARCHAR(MAX), ObjectName), N', ')
-FROM #EnvironmentEvidence WHERE ObjectType = 'Database' AND EnvironmentName = 'Test';
-SELECT @ProdDatabases = STRING_AGG(CONVERT(NVARCHAR(MAX), ObjectName), N', ')
-FROM #EnvironmentEvidence WHERE ObjectType = 'Database' AND EnvironmentName = 'Prod';
-SELECT @UnclassifiedDatabases = STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), N', ')
-FROM #Databases AS d WHERE NOT EXISTS
-    (SELECT 1 FROM #EnvironmentEvidence AS e WHERE e.ObjectType = 'Database' AND e.ObjectName = d.DbName);
-SELECT @ServerMarkers = STRING_AGG(CONVERT(NVARCHAR(MAX), EnvironmentName), N', ')
-FROM #EnvironmentEvidence WHERE ObjectType = 'Server';
+SELECT @DevList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), N', '), 300), N'none') FROM #Db WHERE Env = N'Dev';
+SELECT @TestList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), N', '), 300), N'none') FROM #Db WHERE Env = N'Test';
+SELECT @ProdList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), N', '), 300), N'none') FROM #Db WHERE Env = N'Prod';
+SELECT @UnknownList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), N', '), 300), N'none') FROM #Db WHERE Env = N'Unknown';
 
 SET @Score = CASE
-    WHEN @DatabaseCount = 0 THEN 0
-    WHEN @AmbiguousCount > 0 THEN 1
-    WHEN @DatabaseEnvironmentCount = 3 AND @UnclassifiedCount = 0 THEN 3
-    WHEN @DatabaseEnvironmentCount >= 2 THEN 2
-    WHEN @DatabaseEnvironmentCount = 1 AND @ServerEnvironmentCount = 1
-         AND EXISTS
-         (
-             SELECT 1
-             FROM #EnvironmentEvidence AS database_evidence
-             JOIN #EnvironmentEvidence AS server_evidence
-               ON server_evidence.EnvironmentName = database_evidence.EnvironmentName
-              AND server_evidence.ObjectType = 'Server'
-             WHERE database_evidence.ObjectType = 'Database'
-         ) THEN 2
-    WHEN @DatabaseEnvironmentCount > 0 OR @ServerEnvironmentCount > 0 THEN 1
-    ELSE 0
-END;
+    WHEN @DbCount = 0 THEN 0
+    WHEN @EnvCount >= 2 AND @Unknown = 0 THEN 3
+    WHEN @EnvCount >= 2 THEN 2
+    WHEN @EnvCount = 1 AND @ServerEnv <> N'none' THEN 2
+    WHEN @EnvCount = 1 OR @ServerEnv <> N'none' THEN 1
+    ELSE 0 END;
 
-SET @Finding = CASE WHEN @DatabaseCount = 0 THEN 'No online user database found to inspect'
-    ELSE CONCAT('Server = ', ISNULL(@ServerName, N'(unknown)'),
-        '; server markers = ', ISNULL(@ServerMarkers, N'none'),
-        '; Dev databases = ', ISNULL(@DevDatabases, N'none'),
-        '; Test databases = ', ISNULL(@TestDatabases, N'none'),
-        '; Prod databases = ', ISNULL(@ProdDatabases, N'none'),
-        '; unclassified databases = ', ISNULL(@UnclassifiedDatabases, N'none'),
-        '; ambiguous database count = ', @AmbiguousCount)
-END;
+IF @DbCount > 0
+    SET @Finding = CONCAT(N'Instance ', @Server, N' (instance name marker = ', @ServerEnv, N'); ',
+        @DbCount, N' user database(s); distinct environment markers = ', @EnvCount,
+        N'; Dev = ', @DevList, N'; Test/UAT = ', @TestList, N'; Prod = ', @ProdList,
+        N'; unclassified = ', @UnknownList);
+ELSE IF @Finding = N'No environment-separation evidence was collected'
+    SET @Finding = CONCAT(N'No user database is visible on instance ', @Server,
+        N' (instance name marker = ', @ServerEnv, N')');
+
+DROP TABLE #Db;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

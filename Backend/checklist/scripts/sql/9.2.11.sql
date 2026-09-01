@@ -1,60 +1,76 @@
--- Checklist: Backup preference configured and validated across failover
+-- Checklist: Backup preference configured (backups taken from the preferred / secondary replica where used) and validated across failover
 -- Scope: SERVER
--- Scoring: 3 = Availability Groups, a non-NONE backup preference, prioritized replicas, and recent backups are all evidenced; 2 = Availability Groups and at least two supporting signals are present; 1 = one supporting signal is present; 0 = evidence is unavailable or no supporting configuration is found
--- NOTE: Automated evidence cannot prove that a failover drill was performed or that backup routing was observed during failover.
+-- Scoring: 3 = availability group preference set, prioritised replicas present and recent history written by a prioritised replica, or platform-managed on Azure SQL Database; 2 = availability group with two of those three signals, or no availability group in use and recent history exists; 1 = only one signal, or an availability group with no supporting evidence; 0 = no evidence at all
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'Availability and backup preference evidence unavailable';
-DECLARE @AvailabilityGroupCount INT = 0;
-DECLARE @BackupPreference INT = -1;
-DECLARE @PrioritizedReplicaCount INT = 0;
-DECLARE @RecentBackupCount INT = 0;
-DECLARE @EvidenceCount INT = 0;
-DECLARE @ReadError BIT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'Replica backup preference evidence was unavailable';
+DECLARE @Edition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @AgCount INT = 0;
+DECLARE @AgWithPref INT = 0;
+DECLARE @PriorityReplicas INT = 0;
+DECLARE @RecentHistory INT = 0;
+DECLARE @PreferredSource INT = 0;
+DECLARE @Signals INT = 0;
+DECLARE @PrefDesc NVARCHAR(400) = 'none';
+DECLARE @ReadNote NVARCHAR(300) = '';
+DECLARE @M TABLE (K NVARCHAR(40), V INT NULL, T NVARCHAR(400) NULL);
 
-BEGIN TRY
-    SELECT @AvailabilityGroupCount = COUNT(*)
-    FROM sys.availability_groups;
+IF @Edition = 5
+BEGIN
+    SET @Score = 3;
+    SET @Finding = 'Azure SQL Database (EngineEdition 5): automated backups and the replica they are taken from are selected and validated by the platform across failover; no availability replica backup preference is exposed to or configurable by the tenant.';
+END
+ELSE
+BEGIN
+    SET @Sql = N'
+SELECT ''AgCount'', COUNT(*), CONVERT(NVARCHAR(400), NULL) FROM sys.availability_groups
+UNION ALL SELECT ''AgWithPref'', COUNT(*), NULL FROM sys.availability_groups WHERE automated_backup_preference <> 0
+UNION ALL SELECT ''PriorityReplicas'', COUNT(*), NULL FROM sys.availability_replicas WHERE backup_priority > 0
+UNION ALL SELECT ''RecentHistory'', COUNT(*), NULL FROM msdb.dbo.backupset WHERE backup_finish_date > DATEADD(DAY, -30, GETDATE())
+UNION ALL SELECT ''PreferredSource'', COUNT(*), NULL FROM msdb.dbo.backupset AS b WHERE b.backup_finish_date > DATEADD(DAY, -30, GETDATE()) AND EXISTS (SELECT 1 FROM sys.availability_replicas AS r WHERE r.replica_server_name = b.server_name AND r.backup_priority > 0)
+UNION ALL SELECT ''PrefDesc'', NULL, ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(200), ag.name) + ''='' + ag.automated_backup_preference_desc, ''; '') FROM sys.availability_groups AS ag), ''none'')';
 
-    SELECT @BackupPreference = ISNULL(MAX(CONVERT(INT, automated_backup_preference)), -1)
-    FROM sys.availability_groups;
+    BEGIN TRY
+        INSERT INTO @M (K, V, T) EXEC sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @ReadNote = ' One or more availability or history sources could not be read: ' + LEFT(ISNULL(ERROR_MESSAGE(), ''), 150) + '.';
+    END CATCH;
 
-    SELECT @PrioritizedReplicaCount = COUNT(*)
-    FROM sys.availability_replicas
-    WHERE backup_priority > 0;
+    SELECT @AgCount = ISNULL(MAX(CASE WHEN K = 'AgCount' THEN V END), 0),
+           @AgWithPref = ISNULL(MAX(CASE WHEN K = 'AgWithPref' THEN V END), 0),
+           @PriorityReplicas = ISNULL(MAX(CASE WHEN K = 'PriorityReplicas' THEN V END), 0),
+           @RecentHistory = ISNULL(MAX(CASE WHEN K = 'RecentHistory' THEN V END), 0),
+           @PreferredSource = ISNULL(MAX(CASE WHEN K = 'PreferredSource' THEN V END), 0),
+           @PrefDesc = ISNULL(MAX(CASE WHEN K = 'PrefDesc' THEN T END), 'none')
+    FROM @M;
 
-    SELECT @RecentBackupCount = COUNT(*)
-    FROM msdb.dbo.backupset
-    WHERE backup_finish_date > DATEADD(DAY, -30, GETDATE());
-END TRY
-BEGIN CATCH
-    SET @ReadError = 1;
-END CATCH;
+    SET @Signals = CASE WHEN @AgWithPref > 0 THEN 1 ELSE 0 END
+                 + CASE WHEN @PriorityReplicas > 0 THEN 1 ELSE 0 END
+                 + CASE WHEN @PreferredSource > 0 THEN 1 ELSE 0 END;
 
-SET @EvidenceCount =
-    CASE WHEN @BackupPreference > 0 THEN 1 ELSE 0 END
-  + CASE WHEN @PrioritizedReplicaCount > 0 THEN 1 ELSE 0 END
-  + CASE WHEN @RecentBackupCount > 0 THEN 1 ELSE 0 END;
+    SET @Score = CASE
+        WHEN @AgCount > 0 AND @Signals = 3 THEN 3
+        WHEN @AgCount > 0 AND @Signals = 2 THEN 2
+        WHEN @AgCount = 0 AND @RecentHistory > 0 THEN 2
+        WHEN @AgCount > 0 OR @RecentHistory > 0 THEN 1
+        ELSE 0
+    END;
 
-SET @Score = CASE
-    WHEN @ReadError = 1 THEN 0
-    WHEN @AvailabilityGroupCount > 0 AND @BackupPreference > 0
-         AND @PrioritizedReplicaCount > 0 AND @RecentBackupCount > 0 THEN 3
-    WHEN @AvailabilityGroupCount > 0 AND @EvidenceCount >= 2 THEN 2
-    WHEN @EvidenceCount > 0 THEN 1
-    ELSE 0
-END;
+    SET @Finding = CONCAT(
+        'Availability groups = ', @AgCount, ' (preference: ', @PrefDesc, ')',
+        '; groups whose preference is not NONE = ', @AgWithPref,
+        '; replicas with backup_priority > 0 = ', @PriorityReplicas,
+        '; history rows in the last 30 days = ', @RecentHistory,
+        ', of which ', @PreferredSource, ' were written by a prioritised replica.',
+        CASE WHEN @AgCount = 0 THEN ' No availability group is present, so replica backup preference does not apply on this instance.' ELSE '' END,
+        @ReadNote);
+END
 
-SET @Finding = CONCAT(
-    N'Availability Groups = ', @AvailabilityGroupCount,
-    N'; automated backup preference = ', @BackupPreference,
-    N'; replicas with backup priority > 0 = ', @PrioritizedReplicaCount,
-    N'; backups in the last 30 days = ', @RecentBackupCount,
-    CASE WHEN @ReadError = 1 THEN N'; one or more availability or backup sources could not be read' ELSE N'' END);
-SET @Result = CASE WHEN @Score >= 2 THEN N'Pass' ELSE N'Fail' END;
-
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

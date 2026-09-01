@@ -1,90 +1,94 @@
 -- Checklist: No stringly-typed dates/numbers; correct temporal types
 -- Scope: DATABASE
--- Scoring: 3 = 0% of date/numeric-named columns are character-typed; 2 = under 25%; 1 = 25%+; 0 = no date/numeric-named columns found
+-- Scoring: 3 = no mistyped column; 2 = under 5% of user columns mistyped; 1 = under 25%; 0 = 25% or more, or column metadata unreadable
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Column metadata could not be inspected in the current database';
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE @Unreadable BIT = 0;
+DECLARE @TotalCols INT = 0;
+DECLARE @BadCols INT = 0;
+DECLARE @StringDates INT = 0;
+DECLARE @StringNumbers INT = 0;
+DECLARE @LegacyDateTime INT = 0;
+DECLARE @FloatMoney INT = 0;
+DECLARE @Examples NVARCHAR(MAX) = '';
+DECLARE @Pct DECIMAL(9,2) = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
+DECLARE @Bad TABLE
+(
+    ColRef NVARCHAR(400) NOT NULL,
+    Issue  VARCHAR(20) NOT NULL
+);
+
+BEGIN TRY
+    SELECT @TotalCols = ISNULL(COUNT(*), 0)
+    FROM sys.columns AS c
+    INNER JOIN sys.tables AS t ON t.object_id = c.object_id
+    WHERE t.is_ms_shipped = 0;
+
+    INSERT INTO @Bad (ColRef, Issue)
+    SELECT LEFT(ISNULL(SCHEMA_NAME(t.schema_id), 'dbo') + '.' + t.name + '.' + c.name + ' (' + ty.name + ')', 400),
+           CASE WHEN ty.name IN ('char', 'varchar', 'nchar', 'nvarchar')
+                     AND (c.name LIKE '%date%' OR c.name LIKE '%time%') THEN 'StringDate'
+                WHEN ty.name IN ('char', 'varchar', 'nchar', 'nvarchar') THEN 'StringNumber'
+                WHEN ty.name = 'datetime' THEN 'LegacyDateTime'
+                ELSE 'FloatMoney' END
+    FROM sys.columns AS c
+    INNER JOIN sys.tables AS t ON t.object_id = c.object_id
+    INNER JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+    WHERE t.is_ms_shipped = 0
+      AND ( (ty.name IN ('char', 'varchar', 'nchar', 'nvarchar')
+             AND (c.name LIKE '%date%' OR c.name LIKE '%time%' OR c.name LIKE '%amount%'
+                  OR c.name LIKE '%qty%' OR c.name LIKE '%quantity%' OR c.name LIKE '%price%'
+                  OR c.name LIKE '%number%' OR c.name LIKE '%[_]id'))
+            OR ty.name = 'datetime'
+            OR (ty.name IN ('float', 'real')
+                AND (c.name LIKE '%amount%' OR c.name LIKE '%price%'
+                     OR c.name LIKE '%cost%' OR c.name LIKE '%total%')) );
+END TRY
+BEGIN CATCH
+    SET @Unreadable = 1;
+END CATCH
+
+SELECT @BadCols        = ISNULL(COUNT(*), 0),
+       @StringDates    = ISNULL(SUM(CASE WHEN Issue = 'StringDate' THEN 1 ELSE 0 END), 0),
+       @StringNumbers  = ISNULL(SUM(CASE WHEN Issue = 'StringNumber' THEN 1 ELSE 0 END), 0),
+       @LegacyDateTime = ISNULL(SUM(CASE WHEN Issue = 'LegacyDateTime' THEN 1 ELSE 0 END), 0),
+       @FloatMoney     = ISNULL(SUM(CASE WHEN Issue = 'FloatMoney' THEN 1 ELSE 0 END), 0)
+FROM @Bad;
+
+SELECT @Examples = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), ColRef), ', '), '')
+FROM (SELECT TOP (5) ColRef, Issue FROM @Bad ORDER BY Issue, ColRef) AS ex;
+
+SET @Pct = ISNULL(@BadCols * 100.0 / NULLIF(@TotalCols, 0), 0);
+
+IF @Unreadable = 1
 BEGIN
-    DECLARE @NamedColumnCount INT, @StringlyTypedCount INT;
-
-    SELECT @NamedColumnCount = COUNT(*)
-    FROM sys.columns c
-    JOIN sys.tables t ON t.object_id = c.object_id
-    WHERE c.name LIKE '%date%' OR c.name LIKE '%amount%' OR c.name LIKE '%price%' OR c.name LIKE '%qty%' OR c.name LIKE '%quantity%' OR c.name LIKE '%total%';
-
-    SELECT @StringlyTypedCount = COUNT(*)
-    FROM sys.columns c
-    JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-    JOIN sys.tables t ON t.object_id = c.object_id
-    WHERE (c.name LIKE '%date%' OR c.name LIKE '%amount%' OR c.name LIKE '%price%' OR c.name LIKE '%qty%' OR c.name LIKE '%quantity%' OR c.name LIKE '%total%')
-      AND ty.name IN ('varchar','nvarchar','char','nchar');
-
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@NamedColumnCount,0) = 0 THEN 0
-             WHEN (CAST(ISNULL(@StringlyTypedCount,0) AS DECIMAL(9,4)) / NULLIF(@NamedColumnCount,0)) >= 0.25 THEN 1
-             WHEN ISNULL(@StringlyTypedCount,0) > 0 THEN 2
-             ELSE 3 END,
-        CONCAT('Date/numeric-named columns = ', ISNULL(@NamedColumnCount,0), ', character-typed = ', ISNULL(@StringlyTypedCount,0))
-    );
+    SET @Score = 0;
+    SET @Finding = 'Column metadata in ' + @DatabaseQueried + ' is not readable by the audit login, so temporal and numeric typing could not be assessed.';
+END
+ELSE IF @TotalCols = 0
+BEGIN
+    SET @Score = 3;
+    SET @Finding = 'No user table columns found in ' + @DatabaseQueried + ', so there is no stringly-typed date or number to report.';
 END
 ELSE
 BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
-
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @nc INT, @sc INT;
-SELECT @nc = COUNT(*)
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON t.object_id = c.object_id
-WHERE c.name LIKE ''%date%'' OR c.name LIKE ''%amount%'' OR c.name LIKE ''%price%'' OR c.name LIKE ''%qty%'' OR c.name LIKE ''%quantity%'' OR c.name LIKE ''%total%'';
-SELECT @sc = COUNT(*)
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-JOIN ' + QUOTENAME(@DbName) + N'.sys.types ty ON ty.user_type_id = c.user_type_id
-JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON t.object_id = c.object_id
-WHERE (c.name LIKE ''%date%'' OR c.name LIKE ''%amount%'' OR c.name LIKE ''%price%'' OR c.name LIKE ''%qty%'' OR c.name LIKE ''%quantity%'' OR c.name LIKE ''%total%'')
-  AND ty.name IN (''varchar'',''nvarchar'',''char'',''nchar'');
-SELECT @p_Db,
-       CASE WHEN ISNULL(@nc,0) = 0 THEN 0
-            WHEN (CAST(ISNULL(@sc,0) AS DECIMAL(9,4)) / NULLIF(@nc,0)) >= 0.25 THEN 1
-            WHEN ISNULL(@sc,0) > 0 THEN 2
-            ELSE 3 END,
-       CONCAT(''Date/numeric-named columns = '', ISNULL(@nc,0), '', character-typed = '', ISNULL(@sc,0));';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
+    SET @Score = CASE WHEN @BadCols = 0 THEN 3 WHEN @Pct < 5 THEN 2 WHEN @Pct < 25 THEN 1 ELSE 0 END;
+    SET @Finding = CONVERT(NVARCHAR(20), @BadCols) + ' of ' + CONVERT(NVARCHAR(20), @TotalCols)
+                 + ' user column(s) in ' + @DatabaseQueried + ' (' + CONVERT(NVARCHAR(20), @Pct)
+                 + '%) carry an unsuitable type: ' + CONVERT(NVARCHAR(20), @StringDates)
+                 + ' date/time-named column(s) stored as character data, ' + CONVERT(NVARCHAR(20), @StringNumbers)
+                 + ' numeric/identifier-named column(s) stored as character data, ' + CONVERT(NVARCHAR(20), @LegacyDateTime)
+                 + ' column(s) still using datetime instead of datetime2, and ' + CONVERT(NVARCHAR(20), @FloatMoney)
+                 + ' money-like column(s) using float/real. '
+                 + CASE WHEN @Examples = '' THEN 'No mistyped column found.' ELSE 'Examples: ' + @Examples + '.' END;
 END
 
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

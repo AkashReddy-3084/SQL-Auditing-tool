@@ -1,124 +1,77 @@
+-- Checklist: SLA breach triggers alerts
+-- Scope: SERVER
+-- Scoring: 3 = an SLA-relevant alert condition exists, is routed to an enabled operator with a delivery address, Database Mail is configured and scheduled jobs raise failure notifications; 2 = alerts reach an enabled operator but no SLA-specific condition or job hook is defined, or platform-managed on Azure SQL Database; 1 = alerts or job notifications exist but the delivery chain is broken; 0 = nothing would raise a notification
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @ServerName NVARCHAR(128) = ISNULL(CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)), N'(unknown)');
-DECLARE @Result NVARCHAR(50);
-DECLARE @Score INT;
-DECLARE @DatabaseQueried NVARCHAR(128);
-DECLARE @Finding NVARCHAR(4000);
-
-DECLARE @Metrics TABLE (MetricName NVARCHAR(64) NOT NULL, MetricValue INT NULL);
-
-DECLARE @TotalAlerts INT = 0;
-DECLARE @EnabledAlerts INT = 0;
-DECLARE @EnabledAlertsWithNotification INT = 0;
-DECLARE @EnabledSlaConditionAlerts INT = 0;
-DECLARE @EnabledOperatorsWithEmail INT = 0;
-DECLARE @DatabaseMailEnabled INT = 0;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'SLA breach alerting evidence was unavailable';
+DECLARE @Edition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @Alerts INT = 0;
+DECLARE @PerfAlerts INT = 0;
+DECLARE @SevAlerts INT = 0;
+DECLARE @AlertsToOperator INT = 0;
+DECLARE @Operators INT = 0;
 DECLARE @MailProfiles INT = 0;
+DECLARE @MailXps INT = 0;
+DECLARE @NotifyJobs INT = 0;
+DECLARE @ReadNote NVARCHAR(300) = '';
+DECLARE @M TABLE (K NVARCHAR(40), V INT NULL);
 
-IF @EngineEdition = 5
+IF @Edition = 5
 BEGIN
-    SET @DatabaseQueried = DB_NAME();
-    SET @Score = 1;
-    SET @Finding = N'Azure SQL Database (EngineEdition 5): SQL Server Agent alerts, operators and Database Mail do not exist in this deployment model, so SLA breach alerting cannot be evidenced from the engine. Confirm in the Azure portal that Azure Monitor alert rules and action groups are configured for the SLA metrics of this database (availability, DTU/vCore utilisation, storage, failed connections) and re-score manually.';
+    SET @Score = 2;
+    SET @Finding = 'Azure SQL Database (EngineEdition 5): SQL Server Agent alerts, operators and Database Mail do not exist, so SLA breach notification is delivered by platform Azure Monitor alert rules and action groups that are configured outside the engine.';
 END
 ELSE
 BEGIN
-    SET @DatabaseQueried = N'msdb';
+    SET @Sql = N'
+SELECT ''Alerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1
+UNION ALL SELECT ''PerfAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1 AND (performance_condition IS NOT NULL OR wmi_query IS NOT NULL)
+UNION ALL SELECT ''SevAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1 AND severity >= 16
+UNION ALL SELECT ''AlertsToOperator'', COUNT(DISTINCT a.id) FROM msdb.dbo.sysalerts AS a INNER JOIN msdb.dbo.sysnotifications AS n ON n.alert_id = a.id INNER JOIN msdb.dbo.sysoperators AS o ON o.id = n.operator_id WHERE a.enabled = 1 AND o.enabled = 1
+UNION ALL SELECT ''Operators'', COUNT(*) FROM msdb.dbo.sysoperators WHERE enabled = 1 AND ((email_address IS NOT NULL AND LTRIM(RTRIM(email_address)) <> '''') OR (pager_address IS NOT NULL AND LTRIM(RTRIM(pager_address)) <> ''''))
+UNION ALL SELECT ''MailProfiles'', COUNT(*) FROM msdb.dbo.sysmail_profile
+UNION ALL SELECT ''MailXps'', ISNULL((SELECT CONVERT(INT, c.value_in_use) FROM sys.configurations AS c WHERE c.name = ''Database Mail XPs''), 0)
+UNION ALL SELECT ''NotifyJobs'', COUNT(DISTINCT j.job_id) FROM msdb.dbo.sysjobs AS j INNER JOIN msdb.dbo.sysjobschedules AS js ON js.job_id = j.job_id INNER JOIN msdb.dbo.sysschedules AS s ON s.schedule_id = js.schedule_id AND s.enabled = 1 WHERE j.enabled = 1 AND (j.notify_level_email > 0 OR j.notify_level_eventlog > 0)';
 
     BEGIN TRY
-        INSERT INTO @Metrics (MetricName, MetricValue)
-        EXEC sp_executesql N'
-            SELECT ''TotalAlerts'', COUNT(*) FROM msdb.dbo.sysalerts
-            UNION ALL
-            SELECT ''EnabledAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1
-            UNION ALL
-            SELECT ''EnabledAlertsWithNotification'', COUNT(DISTINCT a.id)
-                FROM msdb.dbo.sysalerts AS a
-                INNER JOIN msdb.dbo.sysnotifications AS n ON n.alert_id = a.id
-                INNER JOIN msdb.dbo.sysoperators AS o ON o.id = n.operator_id
-                WHERE a.enabled = 1 AND o.enabled = 1
-            UNION ALL
-            SELECT ''EnabledSlaConditionAlerts'', COUNT(*)
-                FROM msdb.dbo.sysalerts
-                WHERE enabled = 1
-                  AND (performance_condition IS NOT NULL
-                       OR severity >= 16
-                       OR ISNULL(message_id, 0) > 0
-                       OR wmi_query IS NOT NULL)
-            UNION ALL
-            SELECT ''EnabledOperatorsWithEmail'', COUNT(*)
-                FROM msdb.dbo.sysoperators
-                WHERE enabled = 1
-                  AND email_address IS NOT NULL
-                  AND LTRIM(RTRIM(email_address)) <> ''''
-            UNION ALL
-            SELECT ''DatabaseMailEnabled'', ISNULL((SELECT CONVERT(INT, c.value_in_use)
-                                                    FROM sys.configurations AS c
-                                                    WHERE c.name = ''Database Mail XPs''), 0)
-            UNION ALL
-            SELECT ''MailProfiles'', COUNT(*) FROM msdb.dbo.sysmail_profile;';
-
-        SELECT @TotalAlerts                   = ISNULL(MAX(CASE WHEN MetricName = N'TotalAlerts' THEN MetricValue END), 0),
-               @EnabledAlerts                 = ISNULL(MAX(CASE WHEN MetricName = N'EnabledAlerts' THEN MetricValue END), 0),
-               @EnabledAlertsWithNotification = ISNULL(MAX(CASE WHEN MetricName = N'EnabledAlertsWithNotification' THEN MetricValue END), 0),
-               @EnabledSlaConditionAlerts     = ISNULL(MAX(CASE WHEN MetricName = N'EnabledSlaConditionAlerts' THEN MetricValue END), 0),
-               @EnabledOperatorsWithEmail     = ISNULL(MAX(CASE WHEN MetricName = N'EnabledOperatorsWithEmail' THEN MetricValue END), 0),
-               @DatabaseMailEnabled           = ISNULL(MAX(CASE WHEN MetricName = N'DatabaseMailEnabled' THEN MetricValue END), 0),
-               @MailProfiles                  = ISNULL(MAX(CASE WHEN MetricName = N'MailProfiles' THEN MetricValue END), 0)
-        FROM @Metrics;
-
-        IF @TotalAlerts = 0
-        BEGIN
-            SET @Score = 0;
-            SET @Finding = N'No SQL Server Agent alerts are defined on instance ' + @ServerName
-                + N'. An SLA breach (severity error, performance threshold or failure condition) would raise no automated notification to anyone.';
-        END
-        ELSE IF @EnabledAlertsWithNotification = 0
-                OR @EnabledOperatorsWithEmail = 0
-                OR @DatabaseMailEnabled = 0
-                OR @MailProfiles = 0
-        BEGIN
-            SET @Score = 1;
-            SET @Finding = N'The alert notification chain on instance ' + @ServerName + N' is broken: '
-                + CAST(@TotalAlerts AS NVARCHAR(10)) + N' alert(s) defined, '
-                + CAST(@EnabledAlerts AS NVARCHAR(10)) + N' enabled, '
-                + CAST(@EnabledAlertsWithNotification AS NVARCHAR(10)) + N' enabled alert(s) wired to an enabled operator, '
-                + CAST(@EnabledOperatorsWithEmail AS NVARCHAR(10)) + N' enabled operator(s) with an e-mail address, Database Mail XPs '
-                + CASE WHEN @DatabaseMailEnabled = 1 THEN N'enabled' ELSE N'disabled' END + N', '
-                + CAST(@MailProfiles AS NVARCHAR(10)) + N' Database Mail profile(s). An SLA breach would be logged but not delivered to an owner.';
-        END
-        ELSE IF @EnabledSlaConditionAlerts = 0
-        BEGIN
-            SET @Score = 2;
-            SET @Finding = N'Alert delivery works on instance ' + @ServerName + N' ('
-                + CAST(@EnabledAlertsWithNotification AS NVARCHAR(10)) + N' enabled alert(s) notify an enabled operator, '
-                + CAST(@EnabledOperatorsWithEmail AS NVARCHAR(10)) + N' operator(s) with e-mail, Database Mail enabled with '
-                + CAST(@MailProfiles AS NVARCHAR(10)) + N' profile(s)), but none of the enabled alerts covers an SLA-relevant condition: no performance-condition alert, no severity 16+ alert, no specific message-id alert and no WMI alert is defined.';
-        END
-        ELSE
-        BEGIN
-            SET @Score = 3;
-            SET @Finding = N'SLA breach alerting is in place on instance ' + @ServerName + N': '
-                + CAST(@EnabledSlaConditionAlerts AS NVARCHAR(10)) + N' enabled alert(s) cover SLA-relevant conditions, '
-                + CAST(@EnabledAlertsWithNotification AS NVARCHAR(10)) + N' enabled alert(s) notify an enabled operator, '
-                + CAST(@EnabledOperatorsWithEmail AS NVARCHAR(10)) + N' enabled operator(s) hold an e-mail address, Database Mail XPs is enabled and '
-                + CAST(@MailProfiles AS NVARCHAR(10)) + N' Database Mail profile(s) are configured.';
-        END
+        INSERT INTO @M (K, V) EXEC sp_executesql @Sql;
     END TRY
     BEGIN CATCH
-        SET @Score = 1;
-        SET @Finding = N'Unable to read the SQL Server Agent alerting configuration in msdb on instance ' + @ServerName + N': '
-            + ISNULL(ERROR_MESSAGE(), N'(no error message returned)')
-            + N' Re-run with a login holding SQLAgentReaderRole in msdb (and VIEW SERVER STATE) and verify SLA breach alerts manually.';
-    END CATCH
+        SET @ReadNote = ' One or more SQL Agent alerting sources could not be read: ' + LEFT(ISNULL(ERROR_MESSAGE(), ''), 150) + '.';
+    END CATCH;
+
+    SELECT @Alerts = ISNULL(MAX(CASE WHEN K = 'Alerts' THEN V END), 0),
+           @PerfAlerts = ISNULL(MAX(CASE WHEN K = 'PerfAlerts' THEN V END), 0),
+           @SevAlerts = ISNULL(MAX(CASE WHEN K = 'SevAlerts' THEN V END), 0),
+           @AlertsToOperator = ISNULL(MAX(CASE WHEN K = 'AlertsToOperator' THEN V END), 0),
+           @Operators = ISNULL(MAX(CASE WHEN K = 'Operators' THEN V END), 0),
+           @MailProfiles = ISNULL(MAX(CASE WHEN K = 'MailProfiles' THEN V END), 0),
+           @MailXps = ISNULL(MAX(CASE WHEN K = 'MailXps' THEN V END), 0),
+           @NotifyJobs = ISNULL(MAX(CASE WHEN K = 'NotifyJobs' THEN V END), 0)
+    FROM @M;
+
+    SET @Score = CASE
+        WHEN (@PerfAlerts > 0 OR @SevAlerts > 0) AND @AlertsToOperator > 0 AND @Operators > 0
+             AND @MailProfiles > 0 AND @MailXps = 1 AND @NotifyJobs > 0 THEN 3
+        WHEN @AlertsToOperator > 0 AND @Operators > 0 AND (@MailProfiles > 0 OR @NotifyJobs > 0) THEN 2
+        WHEN @Alerts > 0 OR @NotifyJobs > 0 THEN 1
+        ELSE 0
+    END;
+
+    SET @Finding = CONCAT(
+        'Enabled alerts = ', @Alerts, ', of which ', @PerfAlerts,
+        ' use a performance or WMI condition and ', @SevAlerts, ' cover severity 16 or above',
+        '; alerts wired to an enabled operator = ', @AlertsToOperator,
+        '; enabled operators with an email or pager address = ', @Operators,
+        '; Database Mail profiles = ', @MailProfiles, ' with Database Mail XPs = ', @MailXps,
+        '; scheduled jobs raising a failure notification = ', @NotifyJobs, '.',
+        CASE WHEN @Alerts = 0 AND @NotifyJobs = 0 THEN ' No alert or job notification exists, so an SLA breach would go unannounced.' ELSE '' END,
+        @ReadNote);
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    CAST(@Result AS NVARCHAR(50))           AS Result,
-    CAST(@Score AS INT)                     AS Score,
-    CAST(@DatabaseQueried AS NVARCHAR(128)) AS DatabaseQueried,
-    CAST(@Finding AS NVARCHAR(4000))        AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

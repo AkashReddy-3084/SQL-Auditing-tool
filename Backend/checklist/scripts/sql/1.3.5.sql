@@ -1,32 +1,81 @@
 -- Checklist: Connection strings use listener / failover-group endpoints (not a single node)
 -- Scope: SERVER
--- Scoring: 3 = AG listener detected; 2 = Azure PaaS logical-server/MI DNS endpoint (node identity already abstracted); 1 = Always On enabled but no listener configured; 0 = no listener/failover-group evidence and no HA infrastructure detected
--- NOTE: Automated evidence only; actual client connection-string usage cannot be verified from the server and requires human review.
+-- Scoring: 3 = AG listener or FCI virtual network name published; 2 = Azure managed endpoint already abstracts the node; 1 = HA replicas present but no abstracted endpoint; 0 = single standalone node
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
-DECLARE @Finding NVARCHAR(MAX) = 'No listener/failover-group evidence found';
+DECLARE @Finding NVARCHAR(MAX) = 'No listener or failover-group endpoint evidence could be collected';
+DECLARE @Engine INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
+DECLARE @Clustered INT = ISNULL(CONVERT(INT, SERVERPROPERTY('IsClustered')), 0);
+DECLARE @Hadr INT = ISNULL(CONVERT(INT, SERVERPROPERTY('IsHadrEnabled')), 0);
+DECLARE @ServerName NVARCHAR(256) = ISNULL(CONVERT(NVARCHAR(256), SERVERPROPERTY('ServerName')), 'unknown');
+DECLARE @Listeners INT = 0;
+DECLARE @ListenerNames NVARCHAR(MAX) = 'none';
+DECLARE @Replicas INT = 0;
+DECLARE @Sql NVARCHAR(MAX);
 
-IF SERVERPROPERTY('EngineEdition') IN (5, 8)
+IF @Engine = 5
 BEGIN
     SET @Score = 2;
-    SET @Finding = 'Azure logical server / MI DNS endpoint already abstracts the physical node; verify application connection strings target this endpoint or a configured failover group';
+    SET @Finding = CONCAT('Azure SQL Database: clients reach the logical server endpoint for ', @ServerName,
+        ', which already abstracts the physical node; a failover-group endpoint replaces that name when one is configured.');
 END
 ELSE
 BEGIN
-    DECLARE @IsHadrEnabled INT = ISNULL(CONVERT(INT, SERVERPROPERTY('IsHadrEnabled')), 0);
-    DECLARE @ListenerCount INT = 0;
+    BEGIN TRY
+        SET @Sql = N'SELECT @c = COUNT(*), @n = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), dns_name), '', ''), ''none'') FROM sys.availability_group_listeners;';
+        EXEC sys.sp_executesql @Sql, N'@c INT OUTPUT, @n NVARCHAR(MAX) OUTPUT', @c = @Listeners OUTPUT, @n = @ListenerNames OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SET @Listeners = 0;
+    END CATCH;
 
-    IF @IsHadrEnabled = 1
-        SELECT @ListenerCount = COUNT(*) FROM sys.availability_group_listeners;
+    BEGIN TRY
+        SET @Sql = N'SELECT @r = COUNT(*) FROM sys.availability_replicas;';
+        EXEC sys.sp_executesql @Sql, N'@r INT OUTPUT', @r = @Replicas OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SET @Replicas = 0;
+    END CATCH;
 
-    SET @Score = CASE
-        WHEN ISNULL(@ListenerCount,0) > 0 THEN 3
-        WHEN @IsHadrEnabled = 1 THEN 1
-        ELSE 0
-    END;
-    SET @Finding = CONCAT('IsHadrEnabled = ', @IsHadrEnabled, ', availability group listener count = ', ISNULL(@ListenerCount,0));
+    SET @Listeners = ISNULL(@Listeners, 0);
+    SET @Replicas = ISNULL(@Replicas, 0);
+    SET @ListenerNames = ISNULL(@ListenerNames, 'none');
+
+    IF @Listeners > 0
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = CONCAT(@Listeners, ' availability group listener endpoint(s) published: ', @ListenerNames,
+            '; availability replicas = ', @Replicas, '. A node-independent endpoint is available instead of ', @ServerName, '.');
+    END
+    ELSE IF @Clustered = 1
+    BEGIN
+        SET @Score = 3;
+        SET @Finding = CONCAT('Failover cluster instance detected (IsClustered = 1): the published endpoint ', @ServerName,
+            ' is the virtual network name, not a physical node. Availability group listeners = 0, replicas = ', @Replicas, '.');
+    END
+    ELSE IF @Engine = 8
+    BEGIN
+        SET @Score = 2;
+        SET @Finding = CONCAT('Azure SQL Managed Instance: the instance DNS endpoint for ', @ServerName,
+            ' abstracts the underlying node. Availability group listeners = 0, replicas = ', @Replicas,
+            '; a failover-group endpoint replaces that name when one is configured.');
+    END
+    ELSE IF @Hadr = 1 OR @Replicas >= 2
+    BEGIN
+        SET @Score = 1;
+        SET @Finding = CONCAT('Always On is enabled (IsHadrEnabled = ', @Hadr, ', availability replicas = ', @Replicas,
+            ') but no availability group listener exists, so clients can only name the single node ', @ServerName, '.');
+    END
+    ELSE
+    BEGIN
+        SET @Score = 0;
+        SET @Finding = CONCAT('Standalone instance ', @ServerName, ': IsHadrEnabled = ', @Hadr, ', IsClustered = ', @Clustered,
+            ', availability group listeners = 0, availability replicas = 0. Connection strings can only target this single node.');
+    END
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;

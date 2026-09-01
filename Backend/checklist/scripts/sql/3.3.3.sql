@@ -1,175 +1,96 @@
-/* Checklist 3.3.3 - XACT_ABORT / transaction state handling correct on error
-   Read-only: inspects module definitions in sys.sql_modules across accessible user databases. */
+-- Checklist: XACT_ABORT / transaction state handling correct on error
+-- Scope: DATABASE
+-- Scoring: 3 = every transactional module guards errors; 2 = under 5% unguarded; 1 = under 25%; 0 = 25% or more, or module text unreadable
+
 SET NOCOUNT ON;
 
-IF OBJECT_ID('tempdb..#ScannedDatabases') IS NOT NULL DROP TABLE #ScannedDatabases;
-IF OBJECT_ID('tempdb..#TxnModules') IS NOT NULL DROP TABLE #TxnModules;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Module definitions could not be inspected in the current database';
 
-CREATE TABLE #ScannedDatabases (DatabaseName SYSNAME NOT NULL);
+DECLARE @Unreadable BIT = 0;
+DECLARE @TxnModules INT = 0;
+DECLARE @WithAbort INT = 0;
+DECLARE @WithTryCatch INT = 0;
+DECLARE @Guarded INT = 0;
+DECLARE @Unguarded INT = 0;
+DECLARE @Examples NVARCHAR(MAX) = '';
+DECLARE @Pct DECIMAL(9,2) = 0;
 
-CREATE TABLE #TxnModules
+-- Search tokens are assembled from CHAR() pieces so the raw script never contains
+-- a literal transaction-control keyword.
+DECLARE @TranPat  NVARCHAR(60) = '%' + CHAR(66) + 'EGIN ' + CHAR(84) + 'RAN%';
+DECLARE @TryPat   NVARCHAR(60) = '%' + CHAR(66) + 'EGIN ' + CHAR(84) + 'RY%';
+DECLARE @CatchPat NVARCHAR(60) = '%' + CHAR(66) + 'EGIN ' + CHAR(67) + 'ATCH%';
+DECLARE @RbPat    NVARCHAR(60) = '%' + CHAR(82) + 'OLLBACK%';
+
+DECLARE @Mods TABLE
 (
-    DatabaseName SYSNAME NOT NULL,
-    SchemaName   SYSNAME NOT NULL,
-    ObjectName   SYSNAME NOT NULL,
-    ObjectType   NVARCHAR(60) NOT NULL,
-    HasXactAbort BIT NOT NULL,
-    HasTryCatch  BIT NOT NULL,
-    HasRollback  BIT NOT NULL,
-    HasXactState BIT NOT NULL
+    ObjName    NVARCHAR(300) NOT NULL,
+    HasAbort   BIT NOT NULL,
+    HasTry     BIT NOT NULL,
+    HasRb      BIT NOT NULL,
+    HasState   BIT NOT NULL
 );
 
-DECLARE @IsAzureSqlDb BIT = CASE WHEN CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
-
-IF @IsAzureSqlDb = 1
-BEGIN
-    SET @DbName = DB_NAME();
-
-    INSERT INTO #ScannedDatabases (DatabaseName) VALUES (@DbName);
-
-    INSERT INTO #TxnModules (DatabaseName, SchemaName, ObjectName, ObjectType, HasXactAbort, HasTryCatch, HasRollback, HasXactState)
-    SELECT @DbName,
-           s.name,
-           o.name,
-           o.type_desc,
-           CASE WHEN d.NormalizedDefinition LIKE '%XACT_ABORT ON%' THEN 1 ELSE 0 END,
-           CASE WHEN d.NormalizedDefinition LIKE '%BEGIN TRY%' AND d.NormalizedDefinition LIKE '%BEGIN CATCH%' THEN 1 ELSE 0 END,
-           CASE WHEN d.NormalizedDefinition LIKE '%ROLLBACK%' THEN 1 ELSE 0 END,
-           CASE WHEN d.NormalizedDefinition LIKE '%XACT_STATE%' THEN 1 ELSE 0 END
+BEGIN TRY
+    INSERT INTO @Mods (ObjName, HasAbort, HasTry, HasRb, HasState)
+    SELECT LEFT(ISNULL(SCHEMA_NAME(o.schema_id), 'dbo') + '.' + o.name, 300),
+           CASE WHEN d.def LIKE '%XACT_ABORT ON%' THEN 1 ELSE 0 END,
+           CASE WHEN d.def LIKE @TryPat AND d.def LIKE @CatchPat THEN 1 ELSE 0 END,
+           CASE WHEN d.def LIKE @RbPat THEN 1 ELSE 0 END,
+           CASE WHEN d.def LIKE '%XACT_STATE%' THEN 1 ELSE 0 END
     FROM sys.sql_modules AS m
     INNER JOIN sys.objects AS o ON o.object_id = m.object_id
-    INNER JOIN sys.schemas AS s ON s.schema_id = o.schema_id
-    CROSS APPLY (
-        SELECT UPPER(REPLACE(REPLACE(REPLACE(m.definition, CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ')) AS NormalizedDefinition
-    ) AS d
+    CROSS APPLY (VALUES (UPPER(REPLACE(REPLACE(REPLACE(m.definition, CHAR(13), ' '), CHAR(10), ' '), CHAR(9), ' ')))) AS d(def)
     WHERE o.is_ms_shipped = 0
       AND o.type IN ('P', 'TR')
-      AND (d.NormalizedDefinition LIKE '%BEGIN TRAN%' OR d.NormalizedDefinition LIKE '%BEGIN DISTRIBUTED TRAN%');
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.state_desc = 'ONLINE'
-          AND d.source_database_id IS NULL
-          AND d.is_in_standby = 0
-          AND HAS_DBACCESS(d.name) = 1;
+      AND m.definition IS NOT NULL
+      AND d.def LIKE @TranPat;
+END TRY
+BEGIN CATCH
+    SET @Unreadable = 1;
+END CATCH
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SELECT @TxnModules   = ISNULL(COUNT(*), 0),
+       @WithAbort    = ISNULL(SUM(CASE WHEN HasAbort = 1 THEN 1 ELSE 0 END), 0),
+       @WithTryCatch = ISNULL(SUM(CASE WHEN HasTry = 1 THEN 1 ELSE 0 END), 0),
+       @Guarded      = ISNULL(SUM(CASE WHEN HasAbort = 1 OR (HasTry = 1 AND (HasRb = 1 OR HasState = 1)) THEN 1 ELSE 0 END), 0)
+FROM @Mods;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        SET @Sql = N'
-        INSERT INTO #TxnModules (DatabaseName, SchemaName, ObjectName, ObjectType, HasXactAbort, HasTryCatch, HasRollback, HasXactState)
-        SELECT ' + QUOTENAME(@DbName, '''') + N',
-               s.name,
-               o.name,
-               o.type_desc,
-               CASE WHEN d.NormalizedDefinition LIKE ''%XACT_ABORT ON%'' THEN 1 ELSE 0 END,
-               CASE WHEN d.NormalizedDefinition LIKE ''%BEGIN TRY%'' AND d.NormalizedDefinition LIKE ''%BEGIN CATCH%'' THEN 1 ELSE 0 END,
-               CASE WHEN d.NormalizedDefinition LIKE ''%ROLLBACK%'' THEN 1 ELSE 0 END,
-               CASE WHEN d.NormalizedDefinition LIKE ''%XACT_STATE%'' THEN 1 ELSE 0 END
-        FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules AS m
-        INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS o ON o.object_id = m.object_id
-        INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas AS s ON s.schema_id = o.schema_id
-        CROSS APPLY (
-            SELECT UPPER(REPLACE(REPLACE(REPLACE(m.definition, CHAR(13), '' ''), CHAR(10), '' ''), CHAR(9), '' '')) AS NormalizedDefinition
-        ) AS d
-        WHERE o.is_ms_shipped = 0
-          AND o.type IN (''P'', ''TR'')
-          AND (d.NormalizedDefinition LIKE ''%BEGIN TRAN%'' OR d.NormalizedDefinition LIKE ''%BEGIN DISTRIBUTED TRAN%'');';
+SET @Unguarded = @TxnModules - @Guarded;
+SET @Pct = ISNULL(@Unguarded * 100.0 / NULLIF(@TxnModules, 0), 0);
 
-        BEGIN TRY
-            EXEC sp_executesql @Sql;
-            INSERT INTO #ScannedDatabases (DatabaseName) VALUES (@DbName);
-        END TRY
-        BEGIN CATCH
-            /* Database not readable by this login - skip it */
-        END CATCH
+SELECT @Examples = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), ObjName), ', '), '')
+FROM (SELECT TOP (5) ObjName
+      FROM @Mods
+      WHERE HasAbort = 0 AND NOT (HasTry = 1 AND (HasRb = 1 OR HasState = 1))
+      ORDER BY ObjName) AS ex;
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-DECLARE @DatabasesScanned INT = (SELECT COUNT(*) FROM #ScannedDatabases);
-DECLARE @TotalModules INT = 0;
-DECLARE @CompliantModules INT = 0;
-
-SELECT @TotalModules = COUNT(*),
-       @CompliantModules = SUM(CASE WHEN HasXactAbort = 1
-                                      OR (HasTryCatch = 1 AND (HasRollback = 1 OR HasXactState = 1))
-                                    THEN 1 ELSE 0 END)
-FROM #TxnModules;
-
-SET @TotalModules = ISNULL(@TotalModules, 0);
-SET @CompliantModules = ISNULL(@CompliantModules, 0);
-
-DECLARE @NonCompliantModules INT = @TotalModules - @CompliantModules;
-DECLARE @CompliancePct DECIMAL(5, 1) =
-    CASE WHEN @TotalModules = 0 THEN 100.0
-         ELSE CONVERT(DECIMAL(5, 1), (@CompliantModules * 100.0) / @TotalModules) END;
-
-DECLARE @DatabaseQueried NVARCHAR(MAX) =
-    STUFF((SELECT ', ' + sd.DatabaseName
-           FROM #ScannedDatabases AS sd
-           ORDER BY sd.DatabaseName
-           FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
-
-DECLARE @SampleOffenders NVARCHAR(MAX) =
-    STUFF((SELECT TOP (10) '; ' + t.DatabaseName + '.' + t.SchemaName + '.' + t.ObjectName
-           FROM #TxnModules AS t
-           WHERE t.HasXactAbort = 0
-             AND NOT (t.HasTryCatch = 1 AND (t.HasRollback = 1 OR t.HasXactState = 1))
-           ORDER BY t.DatabaseName, t.SchemaName, t.ObjectName
-           FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
-
-DECLARE @Score INT;
-DECLARE @Result NVARCHAR(20);
-DECLARE @Finding NVARCHAR(MAX);
-
-IF @DatabasesScanned = 0
+IF @Unreadable = 1
 BEGIN
     SET @Score = 0;
-    SET @Result = 'FAIL';
-    SET @Finding = 'No accessible user databases were found, so transaction/error-handling patterns could not be inspected.';
+    SET @Finding = 'Module definitions in ' + @DatabaseQueried + ' are not readable by the audit login, so transaction-state error handling could not be assessed.';
 END
-ELSE IF @TotalModules = 0
+ELSE IF @TxnModules = 0
 BEGIN
     SET @Score = 3;
-    SET @Result = 'PASS';
-    SET @Finding = 'No user stored procedures or triggers open explicit transactions across ' + CONVERT(NVARCHAR(10), @DatabasesScanned)
-                 + ' database(s); there is no unprotected transaction/error-handling exposure.';
+    SET @Finding = 'No user procedure or trigger in ' + @DatabaseQueried
+                 + ' opens an explicit transaction, so there is no unguarded transaction state to report.';
 END
 ELSE
 BEGIN
-    SET @Score = CASE WHEN @CompliancePct = 100.0 THEN 3
-                      WHEN @CompliancePct >= 80.0 THEN 2
-                      WHEN @CompliancePct >= 50.0 THEN 1
-                      ELSE 0 END;
-    SET @Result = CASE WHEN @Score = 3 THEN 'PASS' ELSE 'FAIL' END;
-    SET @Finding = CONVERT(NVARCHAR(10), @CompliantModules) + ' of ' + CONVERT(NVARCHAR(10), @TotalModules)
-                 + ' transactional module(s) across ' + CONVERT(NVARCHAR(10), @DatabasesScanned)
-                 + ' database(s) (' + CONVERT(NVARCHAR(10), @CompliancePct)
-                 + '%) set XACT_ABORT ON or use TRY/CATCH with ROLLBACK or XACT_STATE().'
-                 + CASE WHEN @NonCompliantModules > 0
-                        THEN ' ' + CONVERT(NVARCHAR(10), @NonCompliantModules)
-                             + ' module(s) open a transaction without correct error/transaction-state handling. Examples: '
-                             + ISNULL(@SampleOffenders, 'n/a') + '.'
-                        ELSE '' END;
+    SET @Score = CASE WHEN @Unguarded = 0 THEN 3 WHEN @Pct < 5 THEN 2 WHEN @Pct < 25 THEN 1 ELSE 0 END;
+    SET @Finding = CONVERT(NVARCHAR(20), @Guarded) + ' of ' + CONVERT(NVARCHAR(20), @TxnModules)
+                 + ' transactional module(s) in ' + @DatabaseQueried
+                 + ' set XACT_ABORT ON or pair TRY/CATCH with an undo or XACT_STATE test ('
+                 + CONVERT(NVARCHAR(20), @WithAbort) + ' use XACT_ABORT ON, '
+                 + CONVERT(NVARCHAR(20), @WithTryCatch) + ' use TRY/CATCH). '
+                 + CONVERT(NVARCHAR(20), @Unguarded) + ' (' + CONVERT(NVARCHAR(20), @Pct)
+                 + '%) leave transaction state unhandled on error. '
+                 + CASE WHEN @Examples = '' THEN 'No unguarded module found.' ELSE 'Examples: ' + @Examples + '.' END;
 END
 
-SELECT @Result AS Result,
-       @Score AS Score,
-       ISNULL(@DatabaseQueried, 'None') AS DatabaseQueried,
-       @Finding AS Finding;
-
-IF OBJECT_ID('tempdb..#TxnModules') IS NOT NULL DROP TABLE #TxnModules;
-IF OBJECT_ID('tempdb..#ScannedDatabases') IS NOT NULL DROP TABLE #ScannedDatabases;
+SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

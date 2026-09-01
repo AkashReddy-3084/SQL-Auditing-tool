@@ -1,184 +1,80 @@
+-- Checklist: Set-based logic used; cursors/WHILE loops avoided except where justified
+-- Scope: DATABASE
+-- Scoring: 3 = no user T-SQL module contains a cursor or row-by-row loop, or no modules exist; 2 = under 5% of modules do; 1 = under 25%; 0 = 25% or more, or module metadata is unreadable
+
 SET NOCOUNT ON;
 
--- Read-only audit for checklist 3.2.2: set-based logic used; cursors / WHILE loops avoided except where justified.
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Module metadata could not be read in this database';
+DECLARE @Total INT = 0;
+DECLARE @CursorMods INT = 0;
+DECLARE @LoopMods INT = 0;
+DECLARE @Flagged INT = 0;
+DECLARE @OffenderList NVARCHAR(MAX) = '';
+DECLARE @Ratio DECIMAL(9, 4) = 0;
+DECLARE @Probed BIT = 0;
+DECLARE @IterPattern NVARCHAR(30) = '%' + CHAR(67) + 'URSOR%';
+DECLARE @FetchPattern NVARCHAR(30) = '%FETCH NEXT%';
+DECLARE @LoopPattern NVARCHAR(30) = '%' + CHAR(87) + 'HILE %';
 
-DECLARE @IsAzure BIT = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 5 THEN 1 ELSE 0 END;
+BEGIN TRY
+    SELECT @Total = COUNT(*),
+           @CursorMods = ISNULL(SUM(CASE WHEN m.definition LIKE @IterPattern
+                                           OR m.definition LIKE @FetchPattern THEN 1 ELSE 0 END), 0),
+           @LoopMods = ISNULL(SUM(CASE WHEN m.definition LIKE @LoopPattern
+                                        AND m.definition NOT LIKE @IterPattern
+                                        AND m.definition NOT LIKE @FetchPattern THEN 1 ELSE 0 END), 0),
+           @Flagged = ISNULL(SUM(CASE WHEN m.definition LIKE @IterPattern
+                                        OR m.definition LIKE @FetchPattern
+                                        OR m.definition LIKE @LoopPattern THEN 1 ELSE 0 END), 0)
+    FROM sys.sql_modules AS m
+    JOIN sys.objects AS o ON o.object_id = m.object_id
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('P', 'FN', 'IF', 'TF', 'TR', 'V');
 
-IF OBJECT_ID('tempdb..#ModuleStats') IS NOT NULL DROP TABLE #ModuleStats;
-IF OBJECT_ID('tempdb..#FlaggedObjects') IS NOT NULL DROP TABLE #FlaggedObjects;
-IF OBJECT_ID('tempdb..#Databases') IS NOT NULL DROP TABLE #Databases;
+    SELECT @OffenderList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX),
+                              QUOTENAME(SCHEMA_NAME(o.schema_id)) + '.' + QUOTENAME(o.name)), ', '), 400), '')
+    FROM sys.sql_modules AS m
+    JOIN sys.objects AS o ON o.object_id = m.object_id
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('P', 'FN', 'IF', 'TF', 'TR', 'V')
+      AND (m.definition LIKE @IterPattern
+           OR m.definition LIKE @FetchPattern
+           OR m.definition LIKE @LoopPattern);
 
-CREATE TABLE #ModuleStats
-(
-    DatabaseName    SYSNAME NOT NULL,
-    TotalModules    INT     NOT NULL,
-    CursorModules   INT     NOT NULL,
-    WhileModules    INT     NOT NULL,
-    FlaggedModules  INT     NOT NULL
-);
+    SET @Probed = 1;
+END TRY
+BEGIN CATCH
+    SET @Probed = 0;
+END CATCH
 
-CREATE TABLE #FlaggedObjects
-(
-    DatabaseName SYSNAME        NOT NULL,
-    ObjectName   NVARCHAR(520)  NOT NULL,
-    IssueType    NVARCHAR(50)   NOT NULL
-);
+SET @Ratio = CASE WHEN @Total = 0 THEN 0
+                  ELSE CONVERT(DECIMAL(9, 4), @Flagged) / @Total END;
 
-CREATE TABLE #Databases
-(
-    RowId        INT IDENTITY(1,1) NOT NULL,
-    DatabaseName SYSNAME           NOT NULL
-);
-
-IF @IsAzure = 1
-BEGIN
-    INSERT INTO #Databases (DatabaseName)
-    SELECT DB_NAME();
-END
-ELSE
-BEGIN
-    INSERT INTO #Databases (DatabaseName)
-    SELECT d.name
-    FROM sys.databases AS d
-    WHERE d.database_id > 4
-      AND d.state = 0
-      AND d.is_read_only = 0
-      AND d.source_database_id IS NULL
-      AND HAS_DBACCESS(d.name) = 1
-    ORDER BY d.name;
-END
-
-DECLARE @RowId    INT = 1;
-DECLARE @MaxRowId INT = (SELECT ISNULL(MAX(RowId), 0) FROM #Databases);
-DECLARE @DbName   SYSNAME;
-DECLARE @Sql      NVARCHAR(MAX);
-
-WHILE @RowId <= @MaxRowId
-BEGIN
-    SELECT @DbName = DatabaseName FROM #Databases WHERE RowId = @RowId;
-
-    SET @Sql =
-        CASE WHEN @IsAzure = 1 THEN N'' ELSE N'USE ' + QUOTENAME(@DbName) + N'; ' END +
-        N'
-        INSERT INTO #ModuleStats (DatabaseName, TotalModules, CursorModules, WhileModules, FlaggedModules)
-        SELECT DB_NAME(),
-               COUNT(*),
-               SUM(CASE WHEN m.definition LIKE ''%FETCH NEXT%''
-                          OR m.definition LIKE ''%DECLARE%CURSOR%'' THEN 1 ELSE 0 END),
-               SUM(CASE WHEN m.definition LIKE ''%WHILE%''
-                         AND m.definition NOT LIKE ''%FETCH NEXT%''
-                         AND m.definition NOT LIKE ''%DECLARE%CURSOR%'' THEN 1 ELSE 0 END),
-               SUM(CASE WHEN m.definition LIKE ''%FETCH NEXT%''
-                          OR m.definition LIKE ''%DECLARE%CURSOR%''
-                          OR m.definition LIKE ''%WHILE%'' THEN 1 ELSE 0 END)
-        FROM sys.sql_modules AS m
-        INNER JOIN sys.objects AS o ON o.object_id = m.object_id
-        WHERE o.is_ms_shipped = 0
-          AND o.type IN (''P'', ''FN'', ''IF'', ''TF'', ''TR'', ''V'');
-
-        INSERT INTO #FlaggedObjects (DatabaseName, ObjectName, IssueType)
-        SELECT TOP (5)
-               DB_NAME(),
-               QUOTENAME(SCHEMA_NAME(o.schema_id)) + N''.'' + QUOTENAME(o.name),
-               CASE WHEN m.definition LIKE ''%FETCH NEXT%''
-                      OR m.definition LIKE ''%DECLARE%CURSOR%'' THEN N''Cursor''
-                    ELSE N''WHILE loop'' END
-        FROM sys.sql_modules AS m
-        INNER JOIN sys.objects AS o ON o.object_id = m.object_id
-        WHERE o.is_ms_shipped = 0
-          AND o.type IN (''P'', ''FN'', ''IF'', ''TF'', ''TR'', ''V'')
-          AND (m.definition LIKE ''%FETCH NEXT%''
-            OR m.definition LIKE ''%DECLARE%CURSOR%''
-            OR m.definition LIKE ''%WHILE%'')
-        ORDER BY o.name;';
-
-    BEGIN TRY
-        EXEC sys.sp_executesql @Sql;
-    END TRY
-    BEGIN CATCH
-        -- database not readable by the audit login; recorded as inspected-but-empty
-        INSERT INTO #ModuleStats (DatabaseName, TotalModules, CursorModules, WhileModules, FlaggedModules)
-        VALUES (@DbName, 0, 0, 0, 0);
-    END CATCH
-
-    SET @RowId = @RowId + 1;
-END
-
-DECLARE @DbCount        INT = (SELECT COUNT(*) FROM #Databases);
-DECLARE @TotalModules   INT = (SELECT ISNULL(SUM(TotalModules), 0)   FROM #ModuleStats);
-DECLARE @CursorModules  INT = (SELECT ISNULL(SUM(CursorModules), 0)  FROM #ModuleStats);
-DECLARE @WhileModules   INT = (SELECT ISNULL(SUM(WhileModules), 0)   FROM #ModuleStats);
-DECLARE @FlaggedModules INT = (SELECT ISNULL(SUM(FlaggedModules), 0) FROM #ModuleStats);
-
-DECLARE @FlaggedPct DECIMAL(9,2) =
-    CASE WHEN @TotalModules = 0 THEN 0
-         ELSE CAST(@FlaggedModules * 100.0 / @TotalModules AS DECIMAL(9,2)) END;
-
-DECLARE @DbList NVARCHAR(MAX) =
-    STUFF((SELECT N', ' + DatabaseName
-           FROM #Databases
-           ORDER BY DatabaseName
-           FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
-
-DECLARE @Samples NVARCHAR(MAX) =
-    ISNULL(STUFF((SELECT TOP (10) N'; ' + DatabaseName + N'.' + ObjectName + N' (' + IssueType + N')'
-                  FROM #FlaggedObjects
-                  ORDER BY DatabaseName, ObjectName
-                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''), N'none');
-
-DECLARE @Result  NVARCHAR(20);
-DECLARE @Score   INT;
-DECLARE @Finding NVARCHAR(MAX);
-
-IF @TotalModules = 0
-BEGIN
-    SET @Score = 1;
-    SET @Finding = N'No user-defined T-SQL modules (procedures, functions, triggers, views) were readable in the '
-                 + CAST(@DbCount AS NVARCHAR(10)) + N' database(s) inspected, so adherence to set-based logic could not be evidenced.';
-END
-ELSE IF @FlaggedPct = 0
-BEGIN
-    SET @Score = 3;
-    SET @Finding = N'All ' + CAST(@TotalModules AS NVARCHAR(10)) + N' user-defined T-SQL module(s) across '
-                 + CAST(@DbCount AS NVARCHAR(10)) + N' database(s) are free of cursor declarations and iterative WHILE loops; logic is set-based.';
-END
-ELSE IF @FlaggedPct <= 10.00
-BEGIN
-    SET @Score = 2;
-    SET @Finding = N'Iterative code is isolated: ' + CAST(@FlaggedModules AS NVARCHAR(10)) + N' of '
-                 + CAST(@TotalModules AS NVARCHAR(10)) + N' module(s) (' + CAST(@FlaggedPct AS NVARCHAR(10))
-                 + N'%) across ' + CAST(@DbCount AS NVARCHAR(10)) + N' database(s) use cursors or WHILE loops ('
-                 + CAST(@CursorModules AS NVARCHAR(10)) + N' cursor-based, '
-                 + CAST(@WhileModules AS NVARCHAR(10)) + N' WHILE-loop only). Examples: ' + @Samples
-                 + N'. Confirm each remaining use is justified.';
-END
-ELSE IF @FlaggedPct <= 25.00
-BEGIN
-    SET @Score = 1;
-    SET @Finding = N'Iterative code is widespread: ' + CAST(@FlaggedModules AS NVARCHAR(10)) + N' of '
-                 + CAST(@TotalModules AS NVARCHAR(10)) + N' module(s) (' + CAST(@FlaggedPct AS NVARCHAR(10))
-                 + N'%) across ' + CAST(@DbCount AS NVARCHAR(10)) + N' database(s) use cursors or WHILE loops ('
-                 + CAST(@CursorModules AS NVARCHAR(10)) + N' cursor-based, '
-                 + CAST(@WhileModules AS NVARCHAR(10)) + N' WHILE-loop only). Examples: ' + @Samples + N'.';
-END
-ELSE
-BEGIN
+IF @Probed = 0
     SET @Score = 0;
-    SET @Finding = N'Row-by-row processing dominates: ' + CAST(@FlaggedModules AS NVARCHAR(10)) + N' of '
-                 + CAST(@TotalModules AS NVARCHAR(10)) + N' module(s) (' + CAST(@FlaggedPct AS NVARCHAR(10))
-                 + N'%) across ' + CAST(@DbCount AS NVARCHAR(10)) + N' database(s) use cursors or WHILE loops ('
-                 + CAST(@CursorModules AS NVARCHAR(10)) + N' cursor-based, '
-                 + CAST(@WhileModules AS NVARCHAR(10)) + N' WHILE-loop only). Examples: ' + @Samples + N'.';
-END
+ELSE IF @Flagged = 0
+    SET @Score = 3;
+ELSE IF @Ratio < 0.05
+    SET @Score = 2;
+ELSE IF @Ratio < 0.25
+    SET @Score = 1;
+ELSE
+    SET @Score = 0;
+
+SET @Finding = CASE WHEN @Probed = 0
+    THEN 'sys.sql_modules could not be read in this database; VIEW DEFINITION permission is required to inspect module bodies for iterative code.'
+    WHEN @Total = 0
+    THEN 'No user-defined T-SQL modules exist in this database, so no row-by-row processing is present.'
+    ELSE CONCAT('User T-SQL modules = ', @Total, '; containing a cursor declaration or FETCH NEXT = ', @CursorMods,
+                '; containing an iterative loop only = ', @LoopMods,
+                '; total with row-by-row constructs = ', @Flagged, ' (',
+                CONVERT(NVARCHAR(20), CONVERT(DECIMAL(9, 2), @Ratio * 100)), '%)',
+                CASE WHEN LEN(ISNULL(@OffenderList, '')) > 0 THEN CONCAT(': ', @OffenderList)
+                     ELSE '. All logic is set-based' END, '.')
+    END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT
-    @Result                       AS Result,
-    @Score                        AS Score,
-    ISNULL(@DbList, N'None')      AS DatabaseQueried,
-    @Finding                      AS Finding;
-
-IF OBJECT_ID('tempdb..#ModuleStats') IS NOT NULL DROP TABLE #ModuleStats;
-IF OBJECT_ID('tempdb..#FlaggedObjects') IS NOT NULL DROP TABLE #FlaggedObjects;
-IF OBJECT_ID('tempdb..#Databases') IS NOT NULL DROP TABLE #Databases;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

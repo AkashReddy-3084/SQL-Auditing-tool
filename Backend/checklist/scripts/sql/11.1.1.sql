@@ -1,72 +1,73 @@
 -- Checklist: Database schema and code source-controlled (SSDT/SQL project or migration scripts)
 -- Scope: DATABASE
--- Scoring: 3 = a recognized migration-tracking table (EF Migrations, Flyway, DbUp, etc.) is found; 2 = reserved; 1 = reserved; 0 = no migration-tracking table found
--- NOTE: Automated evidence only; this detects a migration-framework artifact, not the actual source-control repository. Full compliance requires human review.
+-- Scoring: 3 = a migration/version tracking artefact exists and holds recorded versions; 2 = the artefact exists but is empty; 1 = only SSDT/DAC tooling metadata found; 0 = no source-control artefact found
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Source-control artefacts could not be inspected in this database';
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE @Artefacts TABLE
+(
+    FullName NVARCHAR(300) NOT NULL,
+    RowsHeld BIGINT        NOT NULL
+);
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @MigrationTableCount INT;
+DECLARE @ArtefactCount INT = 0;
+DECLARE @PopulatedCount INT = 0;
+DECLARE @SsdtProps INT = 0;
+DECLARE @List NVARCHAR(MAX) = '';
 
-    SELECT @MigrationTableCount = COUNT(*) FROM sys.tables
-    WHERE name IN ('__EFMigrationsHistory','flyway_schema_history','SchemaVersions','__MigrationHistory','DbUp','dbo.__MigrationHistory')
-       OR name LIKE '%migration%history%' OR name LIKE '%schema_version%';
+BEGIN TRY
+    INSERT INTO @Artefacts (FullName, RowsHeld)
+    SELECT s.name + '.' + t.name, ISNULL(rc.RowCnt, 0)
+    FROM sys.tables AS t
+    INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+    OUTER APPLY (SELECT SUM(ps.row_count) AS RowCnt
+                 FROM sys.dm_db_partition_stats AS ps
+                 WHERE ps.object_id = t.object_id AND ps.index_id IN (0, 1)) AS rc
+    WHERE t.name IN ('__EFMigrationsHistory', '__MigrationHistory', '__RefactorLog',
+                     'flyway_schema_history', 'schema_version', 'SchemaVersions',
+                     'VersionInfo', 'ScriptsRun', 'DatabaseVersion', 'DATABASECHANGELOG')
+       OR t.name LIKE '%MigrationHistory%'
+       OR t.name LIKE '%SchemaVersion%'
+       OR t.name LIKE '%schema[_]history%';
+END TRY
+BEGIN CATCH
+    SET @Score = 0;
+END CATCH
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@MigrationTableCount,0) > 0 THEN 3 ELSE 0 END,
-        CASE WHEN ISNULL(@MigrationTableCount,0) > 0 THEN CONCAT('Schema-migration tracking tables found = ', @MigrationTableCount)
-             ELSE 'No recognized schema-migration tracking table found' END
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+BEGIN TRY
+    SELECT @SsdtProps = COUNT(*)
+    FROM sys.extended_properties
+    WHERE name IN ('microsoft_database_tools_support', 'DacVersion', 'DacPackageName', 'BlueprintVersion');
+END TRY
+BEGIN CATCH
+    SET @SsdtProps = 0;
+END CATCH
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SELECT @ArtefactCount = COUNT(*),
+       @PopulatedCount = ISNULL(SUM(CASE WHEN RowsHeld > 0 THEN 1 ELSE 0 END), 0)
+FROM @Artefacts;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @mc INT;
-SELECT @mc = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.tables
-WHERE name IN (''__EFMigrationsHistory'',''flyway_schema_history'',''SchemaVersions'',''__MigrationHistory'',''DbUp'')
-   OR name LIKE ''%migration%history%'' OR name LIKE ''%schema_version%'';
-SELECT @p_Db,
-       CASE WHEN ISNULL(@mc,0) > 0 THEN 3 ELSE 0 END,
-       CASE WHEN ISNULL(@mc,0) > 0 THEN CONCAT(''Schema-migration tracking tables found = '', @mc)
-            ELSE ''No recognized schema-migration tracking table found'' END;';
+SET @List = ISNULL((SELECT LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), FullName), ', '), 400) FROM @Artefacts), '');
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
+SET @Score = CASE WHEN @PopulatedCount > 0 THEN 3
+                  WHEN @ArtefactCount > 0 THEN 2
+                  WHEN @SsdtProps > 0 THEN 1
+                  ELSE 0 END;
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
+SET @Finding = CASE
+    WHEN @ArtefactCount = 0 AND @SsdtProps = 0
+        THEN 'No migration-history, version-tracking or SSDT refactor-log table exists and no database-tooling extended property is present, so no in-database evidence of source-controlled schema and code was found'
+    WHEN @ArtefactCount = 0
+        THEN CONCAT('No migration or version-tracking table found; only ', @SsdtProps,
+                    ' SSDT/DAC tooling extended propert(ies) are present')
+    ELSE CONCAT(@ArtefactCount, ' source-control artefact table(s) found (', @List, '); ',
+                @PopulatedCount, ' of them hold recorded versions; SSDT/DAC tooling properties = ', @SsdtProps)
+    END;
 
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
