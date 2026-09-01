@@ -241,6 +241,7 @@
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage2Label" Text="2  Checklist" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage3Label" Text="3  Evaluate" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage4Label" Text="4  Summary" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Button x:Name="ExitHeaderBtn" Content="Exit" Style="{StaticResource DangerButton}" Click="ExitHeaderBtn_Click" Margin="12,0,0,0" MinWidth="90" Visibility="Collapsed" />
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -405,7 +406,14 @@
 
                             <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
-                                    <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,8" />
+                                    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                                        <TextBlock Text="Progress" FontWeight="SemiBold" FontSize="12" Foreground="#58657A" Margin="0,0,0,6" />
+                                        <Grid>
+                                            <ProgressBar x:Name="EvalProgressBar" Height="12" Minimum="0" Maximum="100" Value="0" />
+                                            <TextBlock x:Name="EvalProgressText" Text="0 / 0" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" FontWeight="SemiBold" Foreground="#1F2937" />
+                                        </Grid>
+                                    </StackPanel>
                                     <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
                                     <TreeView x:Name="EvalTree" Margin="0,0,0,6"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -573,7 +581,7 @@
                             </Border>
 
                             <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-                                <Button x:Name="ExitBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitBtn_Click" />
+                                <Button x:Name="ExitSummaryBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitSummaryBtn_Click" />
                             </StackPanel>
                         </Grid>
                     </ScrollViewer>

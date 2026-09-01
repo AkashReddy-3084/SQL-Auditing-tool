@@ -76,7 +76,9 @@ namespace SQLAuditor.Wpf
         private bool _isLlmVerified = false;
         private Auditor? _auditor;
         private System.Threading.CancellationTokenSource? _evaluationCts;
+        private System.Threading.CancellationTokenSource? _scriptGenerationCts;
         private bool _isEvaluating = false;
+        private bool _isGeneratingScripts = false;
         private bool _allowTabChange = false;
         private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
@@ -597,6 +599,7 @@ namespace SQLAuditor.Wpf
             }
 
             RenderEvaluationTree();
+            UpdateEvaluationProgressDisplay();
             ShowManualAtIndex();
             Log("Starting evaluation...");
 
@@ -698,8 +701,10 @@ namespace SQLAuditor.Wpf
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
                 await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
+                UpdateEvaluationProgressDisplay();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
@@ -762,8 +767,10 @@ namespace SQLAuditor.Wpf
                     return;
                 }
                 var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
+                UpdateEvaluationProgressDisplay();
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
                 Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
@@ -1024,6 +1031,13 @@ namespace SQLAuditor.Wpf
                 if (!_evalStatusMap.TryGetValue(pair.Key, out var statusEntry)
                     || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
                     || _copiedManualIds.Contains(pair.Key))
+                {
+                    continue;
+                }
+
+                var status = statusEntry.Status ?? string.Empty;
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
                 {
                     continue;
                 }
@@ -1361,7 +1375,40 @@ namespace SQLAuditor.Wpf
             {
                 _treeRenderQueued = false;
                 RenderEvaluationTree();
+                UpdateEvaluationProgressDisplay();
             }));
+        }
+
+        private static bool IsTerminalEvaluationStatus(string status)
+        {
+            return string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Skipped", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Complete", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Error", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateEvaluationProgressDisplay()
+        {
+            if (_evalItemMap == null || _evalStatusMap == null)
+            {
+                EvalProgressBar.Value = 0;
+                EvalProgressBar.Maximum = 1;
+                EvalProgressText.Text = "0 / 0";
+                return;
+            }
+
+            var total = _evalItemMap.Count;
+            var finished = _evalStatusMap.Count(kvp => _evalItemMap.ContainsKey(kvp.Key) && IsTerminalEvaluationStatus(kvp.Value.Status));
+            var max = Math.Max(total, 1);
+
+            EvalProgressBar.Minimum = 0;
+            EvalProgressBar.Maximum = max;
+            EvalProgressBar.Value = Math.Min(finished, max);
+            EvalProgressText.Text = $"{finished} / {total}";
         }
 
         private void RenderEvaluationTree()
@@ -1793,7 +1840,8 @@ namespace SQLAuditor.Wpf
 
                 var technique = statusEntry.Technique;
                 var status = statusEntry.Status;
-                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status))
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
                 {
                     continue;
                 }
@@ -1908,29 +1956,71 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void ExitBtn_Click(object sender, RoutedEventArgs e)
+        private bool HasActiveOperationInProgress()
         {
-            try
+            return _isEvaluating || _isGeneratingScripts;
+        }
+
+        private void ResetChecklistSessionStateForExit()
+        {
+            _checklistLoaded = false;
+            _loadedItems = null;
+            _loadedStructure = null;
+            _itemTypeMap = null;
+            _itemScriptMap = null;
+            _selectedIds = null;
+            _evalItemMap = null;
+            _evalStatusMap = null;
+            _manualQueue = null;
+            _manualInstructions = null;
+            _manualStateMap = null;
+            _manualIndex = -1;
+            _copiedManualIds.Clear();
+            _historicalManualIds.Clear();
+            ChecklistTree.Items.Clear();
+            MappingTree.Items.Clear();
+            Log("Checklist state refreshed on exit.");
+        }
+
+        private void HandleExitNavigation()
+        {
+            if (HasActiveOperationInProgress())
             {
-                if (_isEvaluating)
+                var currentPage = MainTabs.SelectedIndex == 0 ? "Login" : MainTabs.SelectedIndex == 1 ? "Checklist" : MainTabs.SelectedIndex == 2 ? "Evaluate" : "Summary";
+                var result = MessageBox.Show(
+                    $"A {currentPage} operation is still in progress. Do you want to cancel it and exit?",
+                    "Exit with active operation",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result != MessageBoxResult.Yes)
                 {
-                    var choice = MessageBox.Show(
-                        "An evaluation is still running. Exit anyway?",
-                        "Exit SQL Auditor",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning);
-                    if (choice != MessageBoxResult.Yes) return;
-
-                    try { _evaluationCts?.Cancel(); } catch { }
+                    return;
                 }
+            }
 
-                try { _progressWatcherCts?.Cancel(); } catch { }
-            }
-            catch { }
-            finally
+            CancelActiveEvaluationIfNeeded();
+            _scriptGenerationCts?.Cancel();
+            _isGeneratingScripts = false;
+
+            if (MainTabs.SelectedIndex == 1)
             {
-                Application.Current.Shutdown();
+                ResetChecklistSessionStateForExit();
             }
+
+            var destination = MainTabs.SelectedIndex == 1 ? 0 : 1;
+            SetTabIndex(destination);
+            UpdateStageIndicators();
+        }
+
+        private void ExitHeaderBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
+        }
+
+        private void ExitSummaryBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
         }
 
         private async Task EnsureAuditor(string fqdn)
@@ -1996,6 +2086,22 @@ namespace SQLAuditor.Wpf
                 MainTabs.SelectedIndex = idx;
             }
             finally { _allowTabChange = false; }
+        }
+
+        private void CancelActiveEvaluationIfNeeded()
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                try { _pendingUserInput.TrySetCanceled(); } catch { }
+            }
+
+            if (_evaluationCts != null && !_evaluationCts.IsCancellationRequested)
+            {
+                try { _evaluationCts.Cancel(); } catch { }
+            }
+
+            _isEvaluating = false;
+            Log("Evaluation cancelled by exit request.");
         }
 
         private void InvalidateSqlVerification()
@@ -2427,6 +2533,8 @@ namespace SQLAuditor.Wpf
         private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
         {
             GenerateScriptsBtn.IsEnabled = false;
+            _isGeneratingScripts = true;
+            _scriptGenerationCts = new System.Threading.CancellationTokenSource();
 
             try
             {
@@ -2541,6 +2649,9 @@ namespace SQLAuditor.Wpf
             }
             finally
             {
+                _isGeneratingScripts = false;
+                _scriptGenerationCts?.Dispose();
+                _scriptGenerationCts = null;
                 GenerateScriptsBtn.IsEnabled = _checklistLoaded;
             }
         }
@@ -2603,6 +2714,7 @@ namespace SQLAuditor.Wpf
                 Stage2Label.FontWeight = MainTabs.SelectedIndex == 1 ? FontWeights.Bold : FontWeights.Normal;
                 Stage3Label.FontWeight = MainTabs.SelectedIndex == 2 ? FontWeights.Bold : FontWeights.Normal;
                 Stage4Label.FontWeight = MainTabs.SelectedIndex == 3 ? FontWeights.Bold : FontWeights.Normal;
+                ExitHeaderBtn.Visibility = MainTabs.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
 
                 // Allow loading checklist at any time (user action required)
                 LoadChecklistBtn.IsEnabled = true;
