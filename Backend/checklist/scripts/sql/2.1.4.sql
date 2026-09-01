@@ -1,51 +1,78 @@
 -- Checklist: Orchestration/dependency management exists (master package/pipeline or scheduler)
 -- Scope: SERVER
--- Scoring: 3 = enabled jobs are scheduled and multi-step; 2 = enabled jobs are scheduled or multi-step; 1 = jobs exist without orchestration indicators; 0 = no jobs or metadata unavailable
--- NOTE: Automated evidence only; SSIS, external pipelines, and dependency correctness require human review.
+-- Scoring: 3 = enabled jobs are on an enabled schedule and dependency chaining exists (multi-step jobs or a master job starting others); 2 = a scheduler or a master job exists without both signals, or the platform hosts orchestration externally; 1 = jobs exist but none are scheduled or chained; 0 = no jobs exist
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'SQL Agent orchestration metadata could not be evaluated';
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'Orchestration evidence was unavailable';
+DECLARE @Engine INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
+DECLARE @Sql NVARCHAR(MAX);
 DECLARE @Jobs INT = 0;
-DECLARE @Enabled INT = 0;
-DECLARE @Scheduled INT = 0;
-DECLARE @MultiStep INT = 0;
-DECLARE @EngineEdition INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
+DECLARE @EnabledJobs INT = 0;
+DECLARE @ScheduledJobs INT = 0;
+DECLARE @ChainedJobs INT = 0;
+DECLARE @MasterJobs INT = 0;
+DECLARE @MasterNames NVARCHAR(MAX) = '';
+DECLARE @ReadError BIT = 0;
 
-IF @EngineEdition = 5
+CREATE TABLE #Orch
+(
+    Jobs INT NOT NULL,
+    EnabledJobs INT NOT NULL,
+    ScheduledJobs INT NOT NULL,
+    ChainedJobs INT NOT NULL,
+    MasterJobs INT NOT NULL,
+    MasterNames NVARCHAR(MAX) NULL
+);
+
+IF @Engine <> 5
 BEGIN
-    SET @Score = 1;
-    SET @Finding = N'Azure SQL Database does not host SQL Agent; external orchestration is not visible to this T-SQL probe';
+    BEGIN TRY
+        SET @Sql = N'SELECT (SELECT COUNT(*) FROM msdb.dbo.sysjobs) AS Jobs, (SELECT COUNT(*) FROM msdb.dbo.sysjobs AS ej WHERE ej.enabled = 1) AS EnabledJobs, (SELECT COUNT(DISTINCT sj.job_id) FROM msdb.dbo.sysjobschedules AS sj INNER JOIN msdb.dbo.sysschedules AS sc ON sc.schedule_id = sj.schedule_id AND sc.enabled = 1) AS ScheduledJobs, (SELECT COUNT(DISTINCT st.job_id) FROM msdb.dbo.sysjobsteps AS st WHERE st.step_id > 1) AS ChainedJobs, (SELECT COUNT(DISTINCT ms.job_id) FROM msdb.dbo.sysjobsteps AS ms WHERE ms.command LIKE N''%sp[_]start[_]job%'') AS MasterJobs, (SELECT LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), mj.name), N'', ''), 300) FROM msdb.dbo.sysjobs AS mj WHERE EXISTS (SELECT 1 FROM msdb.dbo.sysjobsteps AS mt WHERE mt.job_id = mj.job_id AND mt.command LIKE N''%sp[_]start[_]job%'')) AS MasterNames;';
+        INSERT INTO #Orch (Jobs, EnabledJobs, ScheduledJobs, ChainedJobs, MasterJobs, MasterNames)
+        EXEC sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @ReadError = 1;
+    END CATCH
+END
+
+SELECT TOP (1)
+       @Jobs = o.Jobs,
+       @EnabledJobs = o.EnabledJobs,
+       @ScheduledJobs = o.ScheduledJobs,
+       @ChainedJobs = o.ChainedJobs,
+       @MasterJobs = o.MasterJobs,
+       @MasterNames = ISNULL(o.MasterNames, '')
+FROM #Orch AS o;
+
+IF @Engine = 5
+BEGIN
+    SET @Score = 2;
+    SET @Finding = 'Azure SQL Database hosts no SQL Agent or SSIS catalog; ETL orchestration and dependency management run in an external scheduler (elastic jobs, Data Factory or Fabric pipelines) that the instance cannot report on';
+END
+ELSE IF @Jobs = 0
+BEGIN
+    SET @Score = 0;
+    SET @Finding = CONCAT('No SQL Agent jobs exist on this instance, so no scheduler or master job orchestration was found',
+                          CASE WHEN @ReadError = 1 THEN '; job metadata could not be read' ELSE '' END);
 END
 ELSE
 BEGIN
-    BEGIN TRY
-        SELECT @Jobs = COUNT(*),
-               @Enabled = ISNULL(SUM(CASE WHEN j.enabled = 1 THEN 1 ELSE 0 END), 0),
-               @Scheduled = ISNULL(SUM(CASE WHEN x.sched > 0 THEN 1 ELSE 0 END), 0),
-               @MultiStep = ISNULL(SUM(CASE WHEN x.steps > 1 THEN 1 ELSE 0 END), 0)
-        FROM msdb.dbo.sysjobs AS j
-        OUTER APPLY
-        (
-            SELECT
-                (SELECT COUNT(*) FROM msdb.dbo.sysjobschedules AS s WHERE s.job_id = j.job_id) AS sched,
-                (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps AS st WHERE st.job_id = j.job_id) AS steps
-        ) AS x;
-
-        SET @Score = CASE WHEN @Jobs = 0 THEN 0
-                          WHEN @Enabled > 0 AND @Scheduled = @Enabled AND @MultiStep = @Enabled THEN 3
-                          WHEN @Scheduled > 0 OR @MultiStep > 0 THEN 2
-                          ELSE 1 END;
-        SET @Finding = N'jobs=' + CONVERT(NVARCHAR(20), @Jobs) + N', enabled=' + CONVERT(NVARCHAR(20), @Enabled) + N', scheduled=' + CONVERT(NVARCHAR(20), @Scheduled) + N', multi_step=' + CONVERT(NVARCHAR(20), @MultiStep);
-    END TRY
-    BEGIN CATCH
-        SET @Score = 0;
-        SET @Finding = N'Unable to read SQL Agent orchestration metadata: ' + ERROR_MESSAGE();
-    END CATCH;
-END;
+    SET @Score = CASE WHEN @EnabledJobs > 0 AND @ScheduledJobs > 0 AND (@ChainedJobs > 0 OR @MasterJobs > 0) THEN 3
+                      WHEN @ScheduledJobs > 0 OR @MasterJobs > 0 THEN 2
+                      ELSE 1 END;
+    SET @Finding = CONCAT('Agent jobs = ', @Jobs,
+                          '; enabled = ', @EnabledJobs,
+                          '; on an enabled schedule = ', @ScheduledJobs,
+                          '; multi-step (dependency chained) = ', @ChainedJobs,
+                          '; jobs starting other jobs = ', @MasterJobs,
+                          CASE WHEN LEN(@MasterNames) > 0 THEN '; master jobs: ' + @MasterNames
+                               ELSE '; no master job that starts other jobs was found' END);
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

@@ -1,191 +1,78 @@
+-- Checklist: Long transactions avoided; batch large operations
+-- Scope: SERVER
+-- Scoring: 3 = no user transaction open longer than 5 minutes; 2 = longest open user transaction under 30 minutes; 1 = longest open user transaction under 120 minutes; 0 = a user transaction has been open 120 minutes or more, or the transaction DMVs could not be read
+
 SET NOCOUNT ON;
 
-DECLARE @LongTxMinutes     INT = 5;
-DECLARE @CriticalTxMinutes INT = 30;
-DECLARE @IsAzureSqlDb      BIT = CASE WHEN CONVERT(INT, SERVERPROPERTY('EngineEdition')) = 5 THEN 1 ELSE 0 END;
-DECLARE @CollectionError   NVARCHAR(2000) = NULL;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'Active transaction DMVs could not be read';
+DECLARE @Open INT = 0;
+DECLARE @Long INT = 0;
+DECLARE @MaxMinutes INT = 0;
+DECLARE @MaxLogMB DECIMAL(18, 2) = 0;
+DECLARE @Offenders NVARCHAR(MAX) = '';
+DECLARE @Read BIT = 0;
 
-DECLARE @LongTx TABLE (
-    SessionId       INT           NULL,
-    DatabaseName    NVARCHAR(256) NULL,
-    DurationMinutes INT           NULL,
-    LogBytesUsed    BIGINT        NULL,
-    SessionStatus   NVARCHAR(60)  NULL
-);
+DECLARE @Tx TABLE (
+    SessionId INT NOT NULL,
+    DbName NVARCHAR(128) NOT NULL,
+    OpenMinutes INT NOT NULL,
+    LogMB DECIMAL(18, 2) NOT NULL);
 
-DECLARE @Modules TABLE (
-    DatabaseName NVARCHAR(256) NULL,
-    ObjectName   NVARCHAR(512) NULL
-);
-
-DECLARE @ScannedDbs TABLE (DatabaseName NVARCHAR(256) NOT NULL);
-
-/* Signal A: user transactions that are currently open beyond the long-running threshold. */
 BEGIN TRY
-    INSERT INTO @LongTx (SessionId, DatabaseName, DurationMinutes, LogBytesUsed, SessionStatus)
-    SELECT
-        tst.session_id,
-        MAX(COALESCE(DB_NAME(tdt.database_id), N'(unknown)')),
-        MAX(DATEDIFF(MINUTE, tat.transaction_begin_time, GETDATE())),
-        SUM(COALESCE(tdt.database_transaction_log_bytes_used, CONVERT(BIGINT, 0))),
-        MAX(COALESCE(es.status, N'unknown'))
-    FROM sys.dm_tran_active_transactions AS tat
-    INNER JOIN sys.dm_tran_session_transactions AS tst
-        ON tst.transaction_id = tat.transaction_id
-    INNER JOIN sys.dm_exec_sessions AS es
-        ON es.session_id = tst.session_id
-    LEFT JOIN sys.dm_tran_database_transactions AS tdt
-        ON tdt.transaction_id = tat.transaction_id
-    WHERE tst.is_user_transaction = 1
+    INSERT INTO @Tx (SessionId, DbName, OpenMinutes, LogMB)
+    SELECT st.session_id,
+           MAX(ISNULL(DB_NAME(dt.database_id), 'unknown')),
+           MAX(DATEDIFF(MINUTE, at.transaction_begin_time, GETDATE())),
+           ISNULL(SUM(CONVERT(DECIMAL(18, 2), dt.database_transaction_log_bytes_used)), 0) / 1048576.0
+    FROM sys.dm_tran_active_transactions AS at
+    JOIN sys.dm_tran_session_transactions AS st ON st.transaction_id = at.transaction_id
+    JOIN sys.dm_exec_sessions AS es ON es.session_id = st.session_id
+    LEFT JOIN sys.dm_tran_database_transactions AS dt ON dt.transaction_id = at.transaction_id
+    WHERE st.is_user_transaction = 1
       AND es.is_user_process = 1
-      AND tat.transaction_begin_time IS NOT NULL
-      AND tat.transaction_begin_time < DATEADD(MINUTE, -@LongTxMinutes, GETDATE())
-    GROUP BY tst.session_id;
+      AND es.session_id <> @@SPID
+      AND at.transaction_begin_time IS NOT NULL
+    GROUP BY st.session_id;
+
+    SET @Read = 1;
 END TRY
 BEGIN CATCH
-    SET @CollectionError = N'Active transaction DMV read failed: ' + ERROR_MESSAGE();
-END CATCH
+    SET @Read = 0;
+END CATCH;
 
-/* Signal B: module code that opens an explicit transaction around bulk DML with no batching construct. */
-IF @IsAzureSqlDb = 1
-BEGIN
-    INSERT INTO @ScannedDbs (DatabaseName) VALUES (DB_NAME());
+SELECT @Open = COUNT(*),
+       @Long = ISNULL(SUM(CASE WHEN OpenMinutes >= 5 THEN 1 ELSE 0 END), 0),
+       @MaxMinutes = ISNULL(MAX(OpenMinutes), 0),
+       @MaxLogMB = ISNULL(MAX(LogMB), 0)
+FROM @Tx;
 
-    BEGIN TRY
-        INSERT INTO @Modules (DatabaseName, ObjectName)
-        SELECT
-            DB_NAME(),
-            QUOTENAME(s.name) + N'.' + QUOTENAME(o.name)
-        FROM sys.sql_modules AS sm
-        INNER JOIN sys.objects AS o ON o.object_id = sm.object_id
-        INNER JOIN sys.schemas AS s ON s.schema_id = o.schema_id
-        WHERE o.is_ms_shipped = 0
-          AND sm.definition LIKE N'%BEGIN TRAN%'
-          AND (    sm.definition LIKE N'%DELETE %'
-                OR sm.definition LIKE N'%UPDATE %'
-                OR sm.definition LIKE N'%MERGE %'
-                OR sm.definition LIKE N'%INSERT INTO%')
-          AND sm.definition NOT LIKE N'%WHILE%'
-          AND sm.definition NOT LIKE N'%TOP %'
-          AND sm.definition NOT LIKE N'%TOP(%'
-          AND sm.definition NOT LIKE N'%ROWCOUNT%';
-    END TRY
-    BEGIN CATCH
-        SET @CollectionError = ISNULL(@CollectionError + N' | ', N'') + N'Module scan failed for current database: ' + ERROR_MESSAGE();
-    END CATCH
-END
-ELSE
-BEGIN
-    DECLARE @DbName SYSNAME;
-    DECLARE @Sql    NVARCHAR(MAX);
+SELECT @Offenders = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX),
+           CONCAT('spid ', SessionId, ' on ', DbName, ' open ', OpenMinutes, ' min holding ', LogMB, ' MB log')), '; '), 400), 'none')
+FROM @Tx
+WHERE OpenMinutes >= 5;
 
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.state_desc = N'ONLINE'
-          AND d.is_read_only = 0
-          AND d.source_database_id IS NULL
-          AND d.is_in_standby = 0
-          AND HAS_DBACCESS(d.name) = 1;
+SET @Score = CASE
+    WHEN @Read = 0 THEN 0
+    WHEN @MaxMinutes < 5 THEN 3
+    WHEN @MaxMinutes < 30 THEN 2
+    WHEN @MaxMinutes < 120 THEN 1
+    ELSE 0
+END;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            INSERT INTO @ScannedDbs (DatabaseName) VALUES (@DbName);
-
-            SET @Sql =
-                N'SELECT @db, QUOTENAME(s.name) + N''.'' + QUOTENAME(o.name) ' + NCHAR(13) + NCHAR(10) +
-                N'FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules AS sm ' + NCHAR(13) + NCHAR(10) +
-                N'INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.objects AS o ON o.object_id = sm.object_id ' + NCHAR(13) + NCHAR(10) +
-                N'INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas AS s ON s.schema_id = o.schema_id ' + NCHAR(13) + NCHAR(10) +
-                N'WHERE o.is_ms_shipped = 0 ' + NCHAR(13) + NCHAR(10) +
-                N'  AND sm.definition LIKE N''%BEGIN TRAN%'' ' + NCHAR(13) + NCHAR(10) +
-                N'  AND (sm.definition LIKE N''%DELETE %'' OR sm.definition LIKE N''%UPDATE %'' OR sm.definition LIKE N''%MERGE %'' OR sm.definition LIKE N''%INSERT INTO%'') ' + NCHAR(13) + NCHAR(10) +
-                N'  AND sm.definition NOT LIKE N''%WHILE%'' ' + NCHAR(13) + NCHAR(10) +
-                N'  AND sm.definition NOT LIKE N''%TOP %'' ' + NCHAR(13) + NCHAR(10) +
-                N'  AND sm.definition NOT LIKE N''%TOP(%'' ' + NCHAR(13) + NCHAR(10) +
-                N'  AND sm.definition NOT LIKE N''%ROWCOUNT%'';';
-
-            INSERT INTO @Modules (DatabaseName, ObjectName)
-            EXEC sp_executesql @Sql, N'@db SYSNAME', @db = @DbName;
-        END TRY
-        BEGIN CATCH
-            SET @CollectionError = ISNULL(@CollectionError + N' | ', N'') + N'Module scan failed for [' + @DbName + N']: ' + ERROR_MESSAGE();
-        END CATCH
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-DECLARE @LongCount     INT = (SELECT COUNT(*) FROM @LongTx);
-DECLARE @CriticalCount INT = (SELECT COUNT(*) FROM @LongTx WHERE DurationMinutes >= @CriticalTxMinutes);
-DECLARE @MaxMinutes    INT = (SELECT ISNULL(MAX(DurationMinutes), 0) FROM @LongTx);
-DECLARE @ModuleCount   INT = (SELECT COUNT(*) FROM @Modules);
-DECLARE @DbCount       INT = (SELECT COUNT(*) FROM @ScannedDbs);
-
-DECLARE @DbList NVARCHAR(MAX) =
-    STUFF((SELECT N', ' + DatabaseName
-           FROM @ScannedDbs
-           ORDER BY DatabaseName
-           FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
-
-DECLARE @Score   INT;
-DECLARE @Result  NVARCHAR(20);
-DECLARE @Finding NVARCHAR(MAX);
-
-IF @CriticalCount > 0 OR @ModuleCount > 5
-    SET @Score = 1;
-ELSE IF @LongCount > 0 OR @ModuleCount > 0
-    SET @Score = 2;
-ELSE
-    SET @Score = 3;
+SET @Finding = CASE
+    WHEN @Read = 0
+        THEN 'sys.dm_tran_active_transactions could not be read; open transaction duration is unknown'
+    ELSE CONCAT(
+        'open user transactions = ', @Open,
+        '; open 5 minutes or longer = ', @Long,
+        '; longest open transaction = ', @MaxMinutes, ' minutes',
+        '; largest log space held by a single transaction = ', @MaxLogMB, ' MB',
+        '; long runners: ', @Offenders,
+        ' (point-in-time observation of transactions open at audit time)')
+END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SET @Finding =
-      N'Databases scanned: ' + CAST(@DbCount AS NVARCHAR(10))
-    + N'. User transactions currently open longer than ' + CAST(@LongTxMinutes AS NVARCHAR(10)) + N' minutes: ' + CAST(@LongCount AS NVARCHAR(10))
-    + N' (open ' + CAST(@CriticalTxMinutes AS NVARCHAR(10)) + N' minutes or more: ' + CAST(@CriticalCount AS NVARCHAR(10))
-    + N'; longest open transaction: ' + CAST(@MaxMinutes AS NVARCHAR(10)) + N' minutes). '
-    + N'User modules opening an explicit transaction around bulk DML with no batching construct (WHILE / TOP / ROWCOUNT): '
-    + CAST(@ModuleCount AS NVARCHAR(10)) + N'. ';
-
-IF @LongCount > 0
-    SET @Finding = @Finding + N'Longest open transactions: '
-        + ISNULL(STUFF((SELECT TOP (5)
-                            N'; session ' + CAST(SessionId AS NVARCHAR(10))
-                          + N' on [' + DatabaseName + N'] open ' + CAST(DurationMinutes AS NVARCHAR(10)) + N' min, log used '
-                          + CAST(LogBytesUsed / 1024 AS NVARCHAR(20)) + N' KB, status ' + SessionStatus
-                        FROM @LongTx
-                        ORDER BY DurationMinutes DESC
-                        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'none') + N'. ';
-
-IF @ModuleCount > 0
-    SET @Finding = @Finding + N'Un-batched bulk-DML modules (first 10): '
-        + ISNULL(STUFF((SELECT TOP (10)
-                            N'; [' + DatabaseName + N'].' + ObjectName
-                        FROM @Modules
-                        ORDER BY DatabaseName, ObjectName
-                        FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'none') + N'. ';
-
-IF @Score = 3
-    SET @Finding = @Finding + N'No long-running open transaction and no un-batched bulk-DML module were detected. ';
-
-SET @Finding = @Finding
-    + N'Note: the transaction check is a point-in-time observation of currently open transactions.';
-
-IF @CollectionError IS NOT NULL
-    SET @Finding = @Finding + N' Collection warnings: ' + @CollectionError;
-
-SELECT
-    @Result                     AS Result,
-    @Score                      AS Score,
-    ISNULL(@DbList, DB_NAME())  AS DatabaseQueried,
-    @Finding                    AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

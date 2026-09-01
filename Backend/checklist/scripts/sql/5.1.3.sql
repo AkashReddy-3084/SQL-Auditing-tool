@@ -1,96 +1,88 @@
--- Checklist: DQ KPIs defined: completeness, accuracy, timeliness, consistency, uniqueness, validity
+-- Checklist: [DQ Framework & Governance] DQ KPIs defined: completeness, accuracy, timeliness, consistency, uniqueness, validity
 -- Scope: DATABASE
--- Scoring: 3 = 4+ of the six KPI dimensions represented as columns; 2 = 2-3 present; 1 = under 2 present; 0 = no DQ metrics table found
+-- Scoring: 3 = DQ rule/KPI objects exist and at least 5 of the 6 dimensions are named; 2 = 3 or 4 dimensions named; 1 = DQ objects exist but 2 or fewer dimensions named; 0 = no DQ KPI or rule definition objects found
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Data quality KPI definitions could not be inspected in the current database';
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE @DqObjects INT = -1;
+DECLARE @DimCount INT = 0;
+DECLARE @ObjectList NVARCHAR(MAX) = 'none';
+DECLARE @DimList NVARCHAR(MAX) = 'none';
+DECLARE @Completeness INT = 0, @Accuracy INT = 0, @Timeliness INT = 0;
+DECLARE @Consistency INT = 0, @Uniqueness INT = 0, @Validity INT = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @DqTableCount INT, @Completeness INT, @Accuracy INT, @Timeliness INT, @Consistency INT, @Uniqueness INT, @Validity INT;
+DECLARE @Dq TABLE (ObjectId INT PRIMARY KEY, FullName NVARCHAR(300));
+DECLARE @Names TABLE (Nm NVARCHAR(300));
 
-    SELECT @DqTableCount = COUNT(*) FROM sys.tables
-    WHERE name LIKE '%dq_%' OR name LIKE '%data_quality%' OR name LIKE '%quality_metric%' OR name LIKE '%quality_score%';
+BEGIN TRY
+    INSERT INTO @Dq (ObjectId, FullName)
+    SELECT o.object_id, CONVERT(NVARCHAR(300), s.name + '.' + o.name)
+    FROM sys.objects AS o
+    INNER JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+    WHERE o.is_ms_shipped = 0
+      AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF')
+      AND (o.name LIKE '%data[_]quality%' OR o.name LIKE '%dataquality%'
+           OR o.name LIKE 'dq[_]%' OR o.name LIKE '%[_]dq[_]%' OR o.name LIKE '%[_]dq'
+           OR o.name LIKE '%quality%rule%' OR o.name LIKE '%quality%metric%'
+           OR o.name LIKE '%quality%kpi%' OR o.name LIKE '%quality%dimension%'
+           OR o.name LIKE '%quality%score%' OR o.name LIKE '%quality%threshold%');
 
-    SELECT @Completeness = MAX(CASE WHEN c.name LIKE '%complete%' THEN 1 ELSE 0 END),
-           @Accuracy = MAX(CASE WHEN c.name LIKE '%accura%' THEN 1 ELSE 0 END),
-           @Timeliness = MAX(CASE WHEN c.name LIKE '%timel%' THEN 1 ELSE 0 END),
-           @Consistency = MAX(CASE WHEN c.name LIKE '%consist%' THEN 1 ELSE 0 END),
-           @Uniqueness = MAX(CASE WHEN c.name LIKE '%uniq%' THEN 1 ELSE 0 END),
-           @Validity = MAX(CASE WHEN c.name LIKE '%valid%' THEN 1 ELSE 0 END)
-    FROM sys.columns c
-    JOIN sys.tables t ON t.object_id = c.object_id
-    WHERE t.name LIKE '%dq_%' OR t.name LIKE '%data_quality%' OR t.name LIKE '%quality_metric%' OR t.name LIKE '%quality_score%';
+    SELECT @DqObjects = COUNT(*) FROM @Dq;
 
-    DECLARE @DimCount INT = ISNULL(@Completeness,0) + ISNULL(@Accuracy,0) + ISNULL(@Timeliness,0) + ISNULL(@Consistency,0) + ISNULL(@Uniqueness,0) + ISNULL(@Validity,0);
+    SET @ObjectList = ISNULL(LEFT((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), FullName), ', ') FROM @Dq), 700), 'none');
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@DqTableCount,0) = 0 THEN 0
-             WHEN @DimCount >= 4 THEN 3
-             WHEN @DimCount >= 2 THEN 2
-             ELSE 1 END,
-        CASE WHEN ISNULL(@DqTableCount,0) = 0 THEN 'No DQ metrics table found'
-             ELSE CONCAT('DQ metrics tables = ', @DqTableCount, ', KPI dimensions represented = ', @DimCount, ' of 6') END
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+    INSERT INTO @Names (Nm) SELECT FullName FROM @Dq;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+    INSERT INTO @Names (Nm)
+    SELECT CONVERT(NVARCHAR(300), c.name)
+    FROM sys.columns AS c
+    WHERE c.object_id IN (SELECT ObjectId FROM @Dq);
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @dt INT, @c1 INT, @c2 INT, @c3 INT, @c4 INT, @c5 INT, @c6 INT;
-SELECT @dt = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.tables
-WHERE name LIKE ''%dq_%'' OR name LIKE ''%data_quality%'' OR name LIKE ''%quality_metric%'' OR name LIKE ''%quality_score%'';
-SELECT @c1 = MAX(CASE WHEN c.name LIKE ''%complete%'' THEN 1 ELSE 0 END),
-       @c2 = MAX(CASE WHEN c.name LIKE ''%accura%'' THEN 1 ELSE 0 END),
-       @c3 = MAX(CASE WHEN c.name LIKE ''%timel%'' THEN 1 ELSE 0 END),
-       @c4 = MAX(CASE WHEN c.name LIKE ''%consist%'' THEN 1 ELSE 0 END),
-       @c5 = MAX(CASE WHEN c.name LIKE ''%uniq%'' THEN 1 ELSE 0 END),
-       @c6 = MAX(CASE WHEN c.name LIKE ''%valid%'' THEN 1 ELSE 0 END)
-FROM ' + QUOTENAME(@DbName) + N'.sys.columns c
-JOIN ' + QUOTENAME(@DbName) + N'.sys.tables t ON t.object_id = c.object_id
-WHERE t.name LIKE ''%dq_%'' OR t.name LIKE ''%data_quality%'' OR t.name LIKE ''%quality_metric%'' OR t.name LIKE ''%quality_score%'';
-SELECT @p_Db,
-       CASE WHEN ISNULL(@dt,0) = 0 THEN 0
-            WHEN (ISNULL(@c1,0)+ISNULL(@c2,0)+ISNULL(@c3,0)+ISNULL(@c4,0)+ISNULL(@c5,0)+ISNULL(@c6,0)) >= 4 THEN 3
-            WHEN (ISNULL(@c1,0)+ISNULL(@c2,0)+ISNULL(@c3,0)+ISNULL(@c4,0)+ISNULL(@c5,0)+ISNULL(@c6,0)) >= 2 THEN 2
-            ELSE 1 END,
-       CASE WHEN ISNULL(@dt,0) = 0 THEN ''No DQ metrics table found''
-            ELSE CONCAT(''DQ metrics tables = '', @dt, '', KPI dimensions represented = '', (ISNULL(@c1,0)+ISNULL(@c2,0)+ISNULL(@c3,0)+ISNULL(@c4,0)+ISNULL(@c5,0)+ISNULL(@c6,0)), '' of 6'') END;';
+    SELECT @Completeness = ISNULL(MAX(CASE WHEN Nm LIKE '%complete%' THEN 1 ELSE 0 END), 0),
+           @Accuracy     = ISNULL(MAX(CASE WHEN Nm LIKE '%accura%' THEN 1 ELSE 0 END), 0),
+           @Timeliness   = ISNULL(MAX(CASE WHEN Nm LIKE '%timeli%' OR Nm LIKE '%freshness%' THEN 1 ELSE 0 END), 0),
+           @Consistency  = ISNULL(MAX(CASE WHEN Nm LIKE '%consisten%' THEN 1 ELSE 0 END), 0),
+           @Uniqueness   = ISNULL(MAX(CASE WHEN Nm LIKE '%uniqu%' OR Nm LIKE '%duplicat%' THEN 1 ELSE 0 END), 0),
+           @Validity     = ISNULL(MAX(CASE WHEN Nm LIKE '%validit%' OR Nm LIKE '%valid[_]%' THEN 1 ELSE 0 END), 0)
+    FROM @Names;
+END TRY
+BEGIN CATCH
+    SET @DqObjects = -1;
+END CATCH;
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
+SET @DimCount = @Completeness + @Accuracy + @Timeliness + @Consistency + @Uniqueness + @Validity;
 
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
+SET @DimList = CASE WHEN @DimCount = 0 THEN 'none'
+    ELSE STUFF(
+         CASE WHEN @Completeness = 1 THEN ', completeness' ELSE '' END
+       + CASE WHEN @Accuracy = 1 THEN ', accuracy' ELSE '' END
+       + CASE WHEN @Timeliness = 1 THEN ', timeliness' ELSE '' END
+       + CASE WHEN @Consistency = 1 THEN ', consistency' ELSE '' END
+       + CASE WHEN @Uniqueness = 1 THEN ', uniqueness' ELSE '' END
+       + CASE WHEN @Validity = 1 THEN ', validity' ELSE '' END, 1, 2, '') END;
 
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
+SET @Score = CASE
+    WHEN @DqObjects < 0 THEN 0
+    WHEN @DqObjects = 0 THEN 0
+    WHEN @DimCount >= 5 THEN 3
+    WHEN @DimCount >= 3 THEN 2
+    ELSE 1
+END;
 
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
+SET @Finding = CASE
+    WHEN @DqObjects < 0
+        THEN CONCAT('Catalog views in ', @DatabaseQueried, ' could not be read, so DQ KPI definitions were not inspected.')
+    WHEN @DqObjects = 0
+        THEN CONCAT('No data-quality rule, metric, KPI or dimension objects were found in ', @DatabaseQueried,
+                    '; none of the six DQ dimensions is defined in the schema.')
+    ELSE CONCAT(@DqObjects, ' data-quality object(s) found in ', @DatabaseQueried, ' (', @ObjectList,
+                '); DQ dimensions named in those objects or their columns = ', @DimCount, ' of 6: ', @DimList, '.')
+END;
+
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

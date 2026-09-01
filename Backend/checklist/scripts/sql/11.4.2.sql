@@ -1,78 +1,80 @@
 -- Checklist: Integration tests validate end-to-end ETL
 -- Scope: DATABASE
--- Scoring: 3 = at least one integration/end-to-end ETL test procedure found; 2 = reserved; 1 = ETL procedures exist but no integration test procedures found; 0 = no ETL-like procedures found
+-- Scoring: 3 = test procedures reference ETL/load objects, evidencing end-to-end coverage; 2 = a unit-test framework schema plus test procedures exist but none reference ETL objects; 1 = test procedures exist without a framework or ETL coverage; 0 = no test procedures found
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Test artefacts could not be inspected in this database';
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+DECLARE @TestProcs INT = 0;
+DECLARE @TestList NVARCHAR(MAX) = '';
+DECLARE @EtlObjects INT = 0;
+DECLARE @IntegrationTests INT = 0;
+DECLARE @Framework INT = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @EtlProcCount INT, @IntegrationTestProcCount INT;
+BEGIN TRY
+    SELECT @TestProcs = COUNT(*),
+           @TestList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), s.name + '.' + p.name), ', '), 400), '')
+    FROM sys.procedures AS p
+    INNER JOIN sys.schemas AS s ON s.schema_id = p.schema_id
+    WHERE p.is_ms_shipped = 0
+      AND (p.name LIKE '%test%' OR p.name LIKE '%spec[_]%' OR s.name LIKE '%test%');
+END TRY
+BEGIN CATCH
+    SET @TestProcs = 0;
+END CATCH
 
-    SELECT @EtlProcCount = COUNT(*) FROM sys.procedures
-    WHERE name LIKE '%load%' OR name LIKE '%etl%' OR name LIKE '%pipeline%';
+BEGIN TRY
+    SELECT @EtlObjects = COUNT(*)
+    FROM sys.objects
+    WHERE is_ms_shipped = 0
+      AND type IN ('P', 'V', 'U')
+      AND (name LIKE '%etl%' OR name LIKE '%load%' OR name LIKE '%pipeline%'
+           OR name LIKE '%staging%' OR name LIKE '%stg[_]%' OR name LIKE '%extract%');
+END TRY
+BEGIN CATCH
+    SET @EtlObjects = 0;
+END CATCH
 
-    SELECT @IntegrationTestProcCount = COUNT(*) FROM sys.procedures
-    WHERE (name LIKE '%test%' OR name LIKE '%integration%')
-      AND (name LIKE '%etl%' OR name LIKE '%load%' OR name LIKE '%pipeline%' OR name LIKE '%e2e%');
+BEGIN TRY
+    SELECT @IntegrationTests = COUNT(DISTINCT d.referencing_id)
+    FROM sys.sql_expression_dependencies AS d
+    INNER JOIN sys.procedures AS p ON p.object_id = d.referencing_id
+    INNER JOIN sys.schemas AS s ON s.schema_id = p.schema_id
+    WHERE (p.name LIKE '%test%' OR p.name LIKE '%spec[_]%' OR s.name LIKE '%test%')
+      AND (d.referenced_entity_name LIKE '%etl%' OR d.referenced_entity_name LIKE '%load%'
+           OR d.referenced_entity_name LIKE '%pipeline%' OR d.referenced_entity_name LIKE '%staging%'
+           OR d.referenced_entity_name LIKE '%stg[_]%' OR d.referenced_entity_name LIKE '%extract%');
+END TRY
+BEGIN CATCH
+    SET @IntegrationTests = 0;
+END CATCH
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@EtlProcCount,0) = 0 THEN 0
-             WHEN ISNULL(@IntegrationTestProcCount,0) > 0 THEN 3
-             ELSE 1 END,
-        CONCAT('ETL-like procedures = ', ISNULL(@EtlProcCount,0), ', integration/end-to-end ETL test procedures = ', ISNULL(@IntegrationTestProcCount,0))
-    );
-END
-ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+BEGIN TRY
+    SELECT @Framework = COUNT(*)
+    FROM sys.schemas
+    WHERE name IN ('tSQLt', 'tst', 'unittest', 'tests', 'integrationtest');
+END TRY
+BEGIN CATCH
+    SET @Framework = 0;
+END CATCH
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SET @Score = CASE WHEN @IntegrationTests > 0 THEN 3
+                  WHEN @TestProcs > 0 AND @Framework > 0 THEN 2
+                  WHEN @TestProcs > 0 THEN 1
+                  ELSE 0 END;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @ec INT, @ic INT;
-SELECT @ec = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.procedures
-WHERE name LIKE ''%load%'' OR name LIKE ''%etl%'' OR name LIKE ''%pipeline%'';
-SELECT @ic = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.procedures
-WHERE (name LIKE ''%test%'' OR name LIKE ''%integration%'')
-  AND (name LIKE ''%etl%'' OR name LIKE ''%load%'' OR name LIKE ''%pipeline%'' OR name LIKE ''%e2e%'');
-SELECT @p_Db,
-       CASE WHEN ISNULL(@ec,0) = 0 THEN 0
-            WHEN ISNULL(@ic,0) > 0 THEN 3
-            ELSE 1 END,
-       CONCAT(''ETL-like procedures = '', ISNULL(@ec,0), '', integration/end-to-end ETL test procedures = '', ISNULL(@ic,0));';
+SET @Finding = CASE
+    WHEN @TestProcs = 0
+        THEN CONCAT('No test procedure found in this database; ', @EtlObjects,
+                    ' ETL/load object(s) exist and are therefore untested here')
+    ELSE CONCAT(@TestProcs, ' test procedure(s) found (', @TestList, '); ', @IntegrationTests,
+                ' of them reference one of the ', @EtlObjects,
+                ' ETL/load object(s) in this database; test-framework schemas present = ', @Framework)
+    END;
 
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

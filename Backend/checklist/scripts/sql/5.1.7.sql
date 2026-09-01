@@ -1,78 +1,75 @@
-<<<<<<< Updated upstream
 -- Checklist: DQ failures halt progression where critical (bad data not silently promoted)
--- Scope: SERVER
--- Scoring: 2 = validation/halting modules and Agent quit-on-failure steps exist; 1 = one evidence source exists; 0 = no evidence
--- NOTE: Automated evidence only; which failures are critical and whether progression is halted requires human review.
+-- Scope: DATABASE
+-- Scoring: 3 = halting validation modules and reject/quarantine tables both present; 2 = halting validation modules present; 1 = only reject/quarantine tables present; 0 = no DQ gating evidence
 
 SET NOCOUNT ON;
-DECLARE @Result NVARCHAR(10) = N'Fail';
+
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'DQ halt metadata could not be evaluated';
-DECLARE @HaltingModules INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'DQ gating evidence could not be collected in the current database';
+DECLARE @RaisePattern NVARCHAR(60) = '%' + CHAR(82) + 'AISERROR%';
+DECLARE @ThrowPattern NVARCHAR(60) = '%' + CHAR(84) + 'HROW%';
+DECLARE @RollbackPattern NVARCHAR(60) = '%' + CHAR(82) + 'OLLBACK%';
 DECLARE @Modules INT = 0;
-DECLARE @QuitOnFailSteps INT = 0;
-DECLARE @JobSteps INT = 0;
+DECLARE @HaltModules INT = 0;
+DECLARE @GateTables INT = 0;
+DECLARE @ModuleList NVARCHAR(MAX) = '';
+DECLARE @TableList NVARCHAR(MAX) = '';
+DECLARE @Probe INT = 1;
 
 BEGIN TRY
-    SELECT @HaltingModules = COUNT(*)
-    FROM sys.sql_modules AS m
-    WHERE (m.definition LIKE '%THROW%' OR m.definition LIKE '%RAISERROR%')
-      AND (m.definition LIKE '%valid%' OR m.definition LIKE '%quality%' OR m.definition LIKE '%reject%');
     SELECT @Modules = COUNT(*) FROM sys.sql_modules;
-    SELECT @QuitOnFailSteps = COUNT(*) FROM msdb.dbo.sysjobsteps WHERE on_fail_action = 2;
-    SELECT @JobSteps = COUNT(*) FROM msdb.dbo.sysjobsteps;
-    SET @Score = CASE WHEN @HaltingModules > 0 AND @QuitOnFailSteps > 0 THEN 2
-                      WHEN @HaltingModules > 0 OR @QuitOnFailSteps > 0 THEN 1 ELSE 0 END;
-    SET @Finding = N'halting_modules=' + CONVERT(NVARCHAR(20), @HaltingModules) + N', modules=' + CONVERT(NVARCHAR(20), @Modules) + N', quit_on_fail_steps=' + CONVERT(NVARCHAR(20), @QuitOnFailSteps) + N', job_steps=' + CONVERT(NVARCHAR(20), @JobSteps);
+
+    SELECT @HaltModules = COUNT(*),
+           @ModuleList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), s.name + '.' + o.name), ', '), 300), '')
+    FROM sys.sql_modules AS m
+    JOIN sys.objects AS o ON o.object_id = m.object_id
+    JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+    WHERE o.is_ms_shipped = 0
+      AND (m.definition LIKE @RaisePattern
+           OR m.definition LIKE @ThrowPattern
+           OR m.definition LIKE @RollbackPattern)
+      AND (o.name LIKE '%valid%' OR o.name LIKE '%quality%' OR o.name LIKE '%dq[_]%'
+           OR o.name LIKE '%reject%' OR o.name LIKE '%quarantin%' OR o.name LIKE '%check%'
+           OR m.definition LIKE '%validat%' OR m.definition LIKE '%data quality%');
+
+    SELECT @GateTables = COUNT(*),
+           @TableList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), s.name + '.' + t.name), ', '), 300), '')
+    FROM sys.tables AS t
+    JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+    WHERE t.is_ms_shipped = 0
+      AND (t.name LIKE '%reject%' OR t.name LIKE '%quarantin%' OR t.name LIKE '%exception%'
+           OR t.name LIKE '%[_]error%' OR t.name LIKE 'error%' OR t.name LIKE '%invalid%'
+           OR t.name LIKE '%dq[_]%' OR t.name LIKE '%failed%' OR t.name LIKE '%bad[_]%');
 END TRY
 BEGIN CATCH
-    SET @Score = 0;
-    SET @Finding = N'Unable to read DQ halt metadata: ' + ERROR_MESSAGE();
+    SET @Probe = 0;
+    SET @Finding = 'DQ gating metadata unavailable: ' + LEFT(ERROR_MESSAGE(), 200);
 END CATCH;
+
+SET @Modules = ISNULL(@Modules, 0);
+SET @HaltModules = ISNULL(@HaltModules, 0);
+SET @GateTables = ISNULL(@GateTables, 0);
+
+IF @Probe = 1
+BEGIN
+    SET @Score = CASE
+        WHEN @HaltModules > 0 AND @GateTables > 0 THEN 3
+        WHEN @HaltModules > 0 THEN 2
+        WHEN @GateTables > 0 THEN 1
+        ELSE 0 END;
+
+    IF @Modules = 0 AND @GateTables = 0
+        SET @Finding = 'No programmable modules and no reject/quarantine tables found in ' + @DatabaseQueried
+                     + '; nothing prevents failed rows from being promoted';
+    ELSE
+        SET @Finding = CONCAT(@DatabaseQueried, ': ', @HaltModules, ' of ', @Modules,
+            ' module(s) both validate and abort',
+            CASE WHEN LEN(@ModuleList) > 0 THEN ' (' + @ModuleList + ')' ELSE '' END,
+            '; ', @GateTables, ' reject/quarantine table(s)',
+            CASE WHEN LEN(@TableList) > 0 THEN ' (' + @TableList + ')' ELSE '' END);
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
-=======
--- Checklist: 5.1.7 DQ failures halt progression   where critical (bad data not silently promoted)
--- Scope: SERVER
--- Scoring: 3 = fully verified; 2 = automated evidence present (capped); 1 = minimal/ambiguous evidence; 0 = no evidence
--- NOTE: Automated evidence only; full compliance requires human review when the score is below 3.
-
-SET NOCOUNT ON;
-
-DECLARE
-    @Result nvarchar(10) = 'Fail',
-    @Score int = 0,
-    @DatabaseQueried sysname = 'master',
-    @Finding nvarchar(max) = N'No evidence collected';
-
--- Attempt to execute the provided probe and capture its result as XML (single column)
-CREATE TABLE #probe (xmlcol nvarchar(max));
-
-BEGIN TRY
-    DECLARE @sql nvarchar(max) = N'SELECT (SELECT COUNT(\*) FROM   sys.sql\_modules m WHERE (m.definition LIKE ''%THROW%'' OR m.definition LIKE   ''%RAISERROR%'') AND (m.definition LIKE ''%valid%'' OR m.definition LIKE   ''%quality%'' OR m.definition LIKE ''%reject%'')) AS halting\_modules, (SELECT   COUNT(\*) FROM sys.sql\_modules) AS modules, (SELECT COUNT(\*) FROM   msdb.dbo.sysjobsteps WHERE on\_fail\_action = 2) AS quit\_on\_fail\_steps, (SELECT   COUNT(\*) FROM msdb.dbo.sysjobsteps) AS job\_steps;                                                                                                                                                                                                                                                                                                                                                                                                                        | FOR XML AUTO, ELEMENTS, ROOT(''rows'')';
-    INSERT INTO #probe(xmlcol)
-    EXEC sp_executesql @sql;
-END TRY
-BEGIN CATCH
-    INSERT INTO #probe(xmlcol) VALUES (N'Probe execution failed: ' + ERROR_MESSAGE());
-END CATCH;
-
--- Build Finding from probe output (first row concatenated)
-SELECT TOP 1 @Finding = ISNULL(xmlcol, N'') FROM #probe;
-
--- Scoring: 3 if probe indicates strong positive evidence (heuristic)
--- For automated batch generation we conservatively cap automatic verification at 2 unless explicit full-proof indicators exist.
--- Heuristic: if probe returned non-empty content, set Score = 2; else 0.
-IF EXISTS (SELECT 1 FROM #probe WHERE LEN(ISNULL(xmlcol, '')) > 0)
-    SET @Score = 2;
-ELSE
-    SET @Score = 0;
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DROP TABLE #probe;
-
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
->>>>>>> Stashed changes

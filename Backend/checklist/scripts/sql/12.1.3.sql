@@ -1,128 +1,96 @@
+-- Checklist: Elastic pools used where multiple databases share capacity efficiently
+-- Scope: SERVER
+-- Scoring: 3 = every user database is pooled, the server hosts at most one user database, or the platform already shares instance-level capacity; 2 = elastic pools in use but coverage is partial; 1 = 2 to 4 databases and none pooled; 0 = 5 or more databases and none pooled
+
 SET NOCOUNT ON;
 
-DECLARE @EngineEdition   INT            = CAST(SERVERPROPERTY('EngineEdition') AS INT);
-DECLARE @DbContext       SYSNAME        = DB_NAME();
-DECLARE @Result          NVARCHAR(30);
-DECLARE @Score           INT            = 0;
-DECLARE @Finding         NVARCHAR(4000) = N'';
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'Elastic pool membership could not be determined';
 
-IF OBJECT_ID('tempdb..#PoolInfo') IS NOT NULL
-    DROP TABLE #PoolInfo;
+DECLARE @Edition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Total INT = 0;
+DECLARE @Pooled INT = 0;
+DECLARE @Pools INT = 0;
+DECLARE @Unpooled NVARCHAR(MAX) = '';
+DECLARE @Probed BIT = 0;
+DECLARE @Sql NVARCHAR(MAX);
 
-CREATE TABLE #PoolInfo
-(
-    DatabaseName     SYSNAME NOT NULL,
-    ElasticPoolName  SYSNAME NULL,
-    ServiceObjective SYSNAME NULL
-);
-
-/* sys.database_service_objectives exists only on Azure SQL Database, so it is referenced through dynamic SQL. */
-IF @EngineEdition = 5 AND OBJECT_ID('sys.database_service_objectives') IS NOT NULL
+IF @Edition = 5 AND OBJECT_ID('sys.database_service_objectives') IS NOT NULL
 BEGIN
-    EXEC sp_executesql N'
-        INSERT INTO #PoolInfo (DatabaseName, ElasticPoolName, ServiceObjective)
-        SELECT d.name,
-               dso.elastic_pool_name,
-               dso.service_objective
-        FROM sys.databases AS d
-        LEFT JOIN sys.database_service_objectives AS dso
-               ON dso.database_id = d.database_id
-        WHERE d.name <> N''master'';';
+    BEGIN TRY
+        SET @Sql = N'SELECT @t = COUNT(*),
+       @p = ISNULL(SUM(CASE WHEN o.elastic_pool_name IS NULL THEN 0 ELSE 1 END), 0),
+       @n = COUNT(DISTINCT o.elastic_pool_name),
+       @u = ISNULL(LEFT(STRING_AGG(CASE WHEN o.elastic_pool_name IS NULL
+                                        THEN CONVERT(NVARCHAR(MAX), d.name) END, '', ''), 400), '''')
+FROM sys.databases AS d
+LEFT JOIN sys.database_service_objectives AS o ON o.database_id = d.database_id
+WHERE d.name <> N''master'';';
+
+        EXEC sp_executesql @Sql,
+             N'@t INT OUTPUT, @p INT OUTPUT, @n INT OUTPUT, @u NVARCHAR(MAX) OUTPUT',
+             @t = @Total OUTPUT, @p = @Pooled OUTPUT, @n = @Pools OUTPUT, @u = @Unpooled OUTPUT;
+
+        SET @Probed = 1;
+    END TRY
+    BEGIN CATCH
+        SET @Probed = 0;
+    END CATCH
 END
 
-DECLARE @TotalDb   INT = (SELECT COUNT(*) FROM #PoolInfo);
-DECLARE @PooledDb  INT = (SELECT COUNT(*) FROM #PoolInfo WHERE ElasticPoolName IS NOT NULL);
-DECLARE @PoolCount INT = (SELECT COUNT(DISTINCT ElasticPoolName) FROM #PoolInfo WHERE ElasticPoolName IS NOT NULL);
+SET @Total = ISNULL(@Total, 0);
+SET @Pooled = ISNULL(@Pooled, 0);
+SET @Pools = ISNULL(@Pools, 0);
+SET @Unpooled = ISNULL(@Unpooled, '');
 
-DECLARE @PoolList NVARCHAR(2000) = N'';
-SELECT @PoolList = @PoolList
-                 + CASE WHEN @PoolList = N'' THEN N'' ELSE N', ' END
-                 + p.ElasticPoolName
-FROM (SELECT DISTINCT ElasticPoolName FROM #PoolInfo WHERE ElasticPoolName IS NOT NULL) AS p;
+IF @Probed = 0
+BEGIN
+    BEGIN TRY
+        SELECT @Total = COUNT(*)
+        FROM sys.databases
+        WHERE database_id > 4 AND state = 0;
+    END TRY
+    BEGIN CATCH
+        SET @Total = 0;
+    END CATCH
 
-DECLARE @UnpooledList NVARCHAR(2000) = N'';
-SELECT @UnpooledList = @UnpooledList
-                     + CASE WHEN @UnpooledList = N'' THEN N'' ELSE N', ' END
-                     + u.DatabaseName
-FROM (SELECT TOP (20) DatabaseName
-      FROM #PoolInfo
-      WHERE ElasticPoolName IS NULL
-      ORDER BY DatabaseName) AS u;
-
-IF @EngineEdition <> 5
-BEGIN
-    SET @Score   = 2;
-    SET @Finding = N'Elastic pools are an Azure SQL Database feature. SERVERPROPERTY(''EngineEdition'') returned '
-                 + CAST(@EngineEdition AS NVARCHAR(10))
-                 + N' ('
-                 + CASE @EngineEdition
-                       WHEN 1  THEN N'Personal/Desktop'
-                       WHEN 2  THEN N'Standard'
-                       WHEN 3  THEN N'Enterprise'
-                       WHEN 4  THEN N'Express'
-                       WHEN 6  THEN N'Azure Synapse Analytics'
-                       WHEN 8  THEN N'Azure SQL Managed Instance'
-                       WHEN 9  THEN N'Azure SQL Edge'
-                       WHEN 11 THEN N'Azure Synapse serverless SQL pool'
-                       ELSE N'other'
-                   END
-                 + N'), which does not expose elastic pools, so the control is not applicable to this platform. Confirm manually whether shared capacity is instead handled by instance consolidation or licence pooling.';
+    SET @Score = 3;
+    SET @Finding = CONCAT('Engine edition ', @Edition,
+                          ' does not expose elastic pools; the ', @Total,
+                          ' online user database(s) on this instance already share its compute and storage capacity.');
 END
-ELSE IF @DbContext <> N'master'
+ELSE IF @Total <= 1
 BEGIN
-    SET @Score   = 2;
-    SET @Finding = N'Connected to Azure SQL Database ''' + @DbContext
-                 + N''' rather than the logical server''s master database, so sys.databases and sys.database_service_objectives expose only the current database and server-wide pool membership cannot be enumerated. Observed for this database: elastic pool = '
-                 + ISNULL((SELECT TOP (1) ElasticPoolName FROM #PoolInfo WHERE DatabaseName = @DbContext), N'(none / not visible)')
-                 + N'. Re-run the check against master for full coverage.';
+    SET @Score = 3;
+    SET @Finding = CONCAT('This Azure SQL logical server hosts ', @Total,
+                          ' user database(s); elastic pools share capacity across multiple databases and are not required here.');
 END
-ELSE IF @TotalDb = 0
+ELSE IF @Pooled = @Total
 BEGIN
-    SET @Score   = 3;
-    SET @Finding = N'No user databases exist on this Azure SQL logical server (sys.databases returned only master), so there is no multi-database workload that would benefit from an elastic pool.';
+    SET @Score = 3;
+    SET @Finding = CONCAT('All ', @Total, ' user databases on this logical server belong to an elastic pool (',
+                          @Pools, ' distinct pool(s)), so compute capacity is shared rather than provisioned per database.');
 END
-ELSE IF @TotalDb = 1
+ELSE IF @Pooled > 0
 BEGIN
-    SET @Score   = 3;
-    SET @Finding = N'The logical server hosts a single user database ('
-                 + ISNULL((SELECT TOP (1) DatabaseName FROM #PoolInfo), N'unknown')
-                 + N') with service objective '
-                 + ISNULL((SELECT TOP (1) ServiceObjective FROM #PoolInfo), N'unknown')
-                 + N' and elastic pool '
-                 + ISNULL((SELECT TOP (1) ElasticPoolName FROM #PoolInfo), N'(none)')
-                 + N'. Elastic pools share capacity across multiple databases and are not required for a single-database server.';
+    SET @Score = 2;
+    SET @Finding = CONCAT(@Pooled, ' of ', @Total, ' user databases are in an elastic pool (',
+                          @Pools, ' distinct pool(s)); still provisioned as single databases: ', @Unpooled);
 END
-ELSE IF @PooledDb = @TotalDb
+ELSE IF @Total <= 4
 BEGIN
-    SET @Score   = 3;
-    SET @Finding = N'All ' + CAST(@TotalDb AS NVARCHAR(10))
-                 + N' user databases on this logical server are members of an elastic pool ('
-                 + CAST(@PoolCount AS NVARCHAR(10)) + N' pool(s): ' + @PoolList
-                 + N'), so compute capacity is shared rather than provisioned per database.';
-END
-ELSE IF @PooledDb > 0
-BEGIN
-    SET @Score   = 2;
-    SET @Finding = N'Elastic pools are in use but coverage is partial: ' + CAST(@PooledDb AS NVARCHAR(10))
-                 + N' of ' + CAST(@TotalDb AS NVARCHAR(10))
-                 + N' user databases belong to a pool (' + CAST(@PoolCount AS NVARCHAR(10)) + N' pool(s): ' + @PoolList
-                 + N'). Databases still provisioned as single databases include: ' + @UnpooledList
-                 + N'. Review whether those were deliberately kept outside a pool for performance or isolation reasons.';
+    SET @Score = 1;
+    SET @Finding = CONCAT('None of the ', @Total,
+                          ' user databases on this logical server are in an elastic pool; each is a single database: ', @Unpooled);
 END
 ELSE
 BEGIN
-    SET @Score   = 0;
-    SET @Finding = N'This Azure SQL logical server hosts ' + CAST(@TotalDb AS NVARCHAR(10))
-                 + N' user databases and none of them belong to an elastic pool - every database is provisioned as an isolated single database. Unpooled databases include: ' + @UnpooledList
-                 + N'.';
+    SET @Score = 0;
+    SET @Finding = CONCAT(@Total,
+                          ' user databases are provisioned as isolated single databases with no elastic pool: ', @Unpooled);
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT @Result    AS Result,
-       @Score     AS Score,
-       @DbContext AS DatabaseQueried,
-       @Finding   AS Finding;
-
-IF OBJECT_ID('tempdb..#PoolInfo') IS NOT NULL
-    DROP TABLE #PoolInfo;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

@@ -1,52 +1,111 @@
 -- Checklist: HA solution matches SLA (Always On AG / failover groups / zone redundancy)
 -- Scope: SERVER
--- Scoring: 3 = a healthy HA mechanism (AG with 2+ synchronized replicas, zone redundancy, or geo-replication) is detected; 2 = an HA mechanism exists but with limited/degraded coverage; 1 = reserved; 0 = no HA mechanism detected
--- NOTE: Automated evidence only; whether the detected HA configuration satisfies a specific documented SLA number is not independently verified. Full compliance requires human review.
+-- Scoring: 3 = an availability group with 2 or more replicas including at least two synchronous-commit replicas, or an Azure database that is zone redundant or geo-replicated; 2 = a failover cluster with 2 or more nodes, an availability group with 2 replicas but only one synchronous-commit replica, or Azure platform-local HA on existing databases; 1 = an availability group or cluster object exists with a single member, or no user database is present; 0 = no HA mechanism detected
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
-DECLARE @Finding NVARCHAR(MAX);
+DECLARE @Finding NVARCHAR(MAX) = 'High availability evidence could not be collected from this instance';
+DECLARE @Edition INT = CONVERT(INT, SERVERPROPERTY('EngineEdition'));
+DECLARE @Sql NVARCHAR(MAX);
+DECLARE @Groups INT = 0;
+DECLARE @Replicas INT = 0;
+DECLARE @SyncReplicas INT = 0;
+DECLARE @Nodes INT = 0;
+DECLARE @ZoneRedundant INT = 0;
+DECLARE @GeoLinks INT = 0;
+DECLARE @Databases INT = 0;
+DECLARE @Names NVARCHAR(400) = 'none';
+DECLARE @Note NVARCHAR(300) = '';
 
-IF SERVERPROPERTY('EngineEdition') = 5
+IF @Edition = 5
 BEGIN
-    DECLARE @ZoneRedundantCount INT = 0, @GeoReplicaCount INT = 0, @TotalDbCount INT = 0;
+    SELECT @Databases = COUNT(*) FROM sys.databases WHERE database_id > 4;
 
-    SELECT @TotalDbCount = COUNT(*) FROM sys.databases WHERE database_id > 4 AND state = 0;
+    BEGIN TRY
+        IF COL_LENGTH('sys.databases', 'is_zone_redundant') IS NOT NULL
+        BEGIN
+            SET @Sql = N'SELECT @z = COUNT(*) FROM sys.databases WHERE database_id > 4 AND is_zone_redundant = 1;';
+            EXEC sp_executesql @Sql, N'@z INT OUTPUT', @z = @ZoneRedundant OUTPUT;
+        END
 
-    IF COL_LENGTH('sys.databases', 'is_zone_redundant') IS NOT NULL
-        SELECT @ZoneRedundantCount = COUNT(*) FROM sys.databases WHERE database_id > 4 AND state = 0 AND is_zone_redundant = 1;
+        IF OBJECT_ID('sys.geo_replication_links') IS NOT NULL
+        BEGIN
+            SET @Sql = N'SELECT @g = COUNT(*) FROM sys.geo_replication_links;';
+            EXEC sp_executesql @Sql, N'@g INT OUTPUT', @g = @GeoLinks OUTPUT;
+        END
+    END TRY
+    BEGIN CATCH
+        SET @Note = ' Some Azure HA metadata was not readable.';
+    END CATCH
 
-    IF OBJECT_ID('sys.geo_replication_links') IS NOT NULL
-        SELECT @GeoReplicaCount = COUNT(*) FROM sys.geo_replication_links;
+    SET @ZoneRedundant = ISNULL(@ZoneRedundant, 0);
+    SET @GeoLinks = ISNULL(@GeoLinks, 0);
+    SET @Databases = ISNULL(@Databases, 0);
 
-    SET @Score = CASE WHEN ISNULL(@TotalDbCount,0) = 0 THEN 0
-                      WHEN ISNULL(@ZoneRedundantCount,0) > 0 OR ISNULL(@GeoReplicaCount,0) > 0 THEN 3
-                      ELSE 0 END;
-    SET @Finding = CASE WHEN ISNULL(@TotalDbCount,0) = 0 THEN 'No user databases found'
-                        ELSE CONCAT('Databases = ', @TotalDbCount, ', zone-redundant = ', ISNULL(@ZoneRedundantCount,0), ', geo-replication links = ', ISNULL(@GeoReplicaCount,0)) END;
+    SET @Score = CASE
+        WHEN @ZoneRedundant > 0 OR @GeoLinks > 0 THEN 3
+        WHEN @Databases > 0 THEN 2
+        ELSE 1 END;
+
+    SET @Finding = CONCAT('Azure SQL Database: user databases = ', @Databases,
+        ', zone-redundant databases = ', @ZoneRedundant,
+        ', geo-replication links = ', @GeoLinks,
+        '. Local replica redundancy is provided by the platform.', @Note);
 END
 ELSE
 BEGIN
-    DECLARE @AgCount INT = 0, @SyncedReplicaCount INT = 0;
+    BEGIN TRY
+        IF OBJECT_ID('sys.availability_replicas') IS NOT NULL
+        BEGIN
+            SET @Sql = N'SELECT @a = (SELECT COUNT(*) FROM sys.availability_groups),
+       @r = (SELECT COUNT(*) FROM sys.availability_replicas),
+       @s = (SELECT COUNT(*) FROM sys.availability_replicas WHERE availability_mode_desc = ''SYNCHRONOUS_COMMIT''),
+       @m = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(200), ag.name), '', '') FROM sys.availability_groups AS ag), ''none'');';
+            EXEC sp_executesql @Sql,
+                 N'@a INT OUTPUT, @r INT OUTPUT, @s INT OUTPUT, @m NVARCHAR(400) OUTPUT',
+                 @a = @Groups OUTPUT, @r = @Replicas OUTPUT, @s = @SyncReplicas OUTPUT, @m = @Names OUTPUT;
+        END
+    END TRY
+    BEGIN CATCH
+        SET @Note = ' Always On availability metadata was not readable.';
+    END CATCH
 
-    IF OBJECT_ID('sys.availability_groups') IS NOT NULL
-    BEGIN
-        SELECT @AgCount = COUNT(*) FROM sys.availability_groups;
+    BEGIN TRY
+        IF OBJECT_ID('sys.dm_os_cluster_nodes') IS NOT NULL
+        BEGIN
+            SET @Sql = N'SELECT @n = COUNT(*) FROM sys.dm_os_cluster_nodes;';
+            EXEC sp_executesql @Sql, N'@n INT OUTPUT', @n = @Nodes OUTPUT;
+        END
+    END TRY
+    BEGIN CATCH
+        SET @Note = @Note + ' Windows failover cluster node list was not readable.';
+    END CATCH
 
-        SELECT @SyncedReplicaCount = COUNT(*)
-        FROM sys.dm_hadr_availability_replica_states rs
-        WHERE rs.role_desc IS NOT NULL AND rs.connected_state = 1;
-    END
+    SET @Groups = ISNULL(@Groups, 0);
+    SET @Replicas = ISNULL(@Replicas, 0);
+    SET @SyncReplicas = ISNULL(@SyncReplicas, 0);
+    SET @Nodes = ISNULL(@Nodes, 0);
+    SET @Names = ISNULL(@Names, 'none');
 
-    SET @Score = CASE WHEN ISNULL(@AgCount,0) = 0 THEN 0
-                      WHEN ISNULL(@SyncedReplicaCount,0) >= 2 THEN 3
-                      WHEN ISNULL(@SyncedReplicaCount,0) = 1 THEN 2
-                      ELSE 0 END;
-    SET @Finding = CASE WHEN ISNULL(@AgCount,0) = 0 THEN 'No Always On Availability Group configured'
-                        ELSE CONCAT('Availability Groups = ', @AgCount, ', connected replicas = ', ISNULL(@SyncedReplicaCount,0)) END;
+    SET @Score = CASE
+        WHEN @Groups > 0 AND @Replicas >= 2 AND @SyncReplicas >= 2 THEN 3
+        WHEN @Groups > 0 AND @Replicas >= 2 THEN 2
+        WHEN @Nodes >= 2 THEN 2
+        WHEN @Groups > 0 OR @Nodes = 1 THEN 1
+        ELSE 0 END;
+
+    SET @Finding = CONCAT('Availability groups = ', @Groups, ' (', @Names,
+        '), replicas = ', @Replicas,
+        ', synchronous-commit replicas = ', @SyncReplicas,
+        ', failover cluster nodes = ', @Nodes, '.',
+        CASE WHEN @Groups = 0 AND @Nodes < 2
+             THEN ' No availability group and no multi-node failover cluster is configured, so this instance is a single point of failure.'
+             ELSE '' END,
+        @Note);
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

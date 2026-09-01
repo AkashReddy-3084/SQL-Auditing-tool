@@ -1,240 +1,108 @@
-/*
-    Checklist item : 4.3.4 - No redundant/duplicate/overlapping indexes
-    Scope          : DATABASE (all accessible user databases; current database only on Azure SQL Database)
-    Type           : Read-only. Only temporary tables are written.
-    Output         : Result, Score, DatabaseQueried, Finding
-*/
+-- Checklist: No redundant/duplicate/overlapping indexes
+-- Scope: DATABASE
+-- Scoring: 3 = no nonclustered index is duplicated or prefixed by another; 2 = under 5% affected; 1 = under 25%; 0 = 25% or more, or index metadata unreadable
+
 SET NOCOUNT ON;
 
-DECLARE @IsAzureSqlDb bit = CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS int) = 5 THEN 1 ELSE 0 END;
+DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Score INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Index metadata could not be inspected in the current database';
 
-IF OBJECT_ID('tempdb..#IndexColumns') IS NOT NULL DROP TABLE #IndexColumns;
-IF OBJECT_ID('tempdb..#IndexDef') IS NOT NULL DROP TABLE #IndexDef;
-IF OBJECT_ID('tempdb..#Redundant') IS NOT NULL DROP TABLE #Redundant;
+DECLARE @Unreadable BIT = 0;
+DECLARE @TotalIdx INT = 0;
+DECLARE @DupCount INT = 0;
+DECLARE @OverlapCount INT = 0;
+DECLARE @Affected INT = 0;
+DECLARE @Examples NVARCHAR(MAX) = '';
+DECLARE @Pct DECIMAL(9,2) = 0;
 
-CREATE TABLE #IndexColumns
+DECLARE @Idx TABLE
 (
-    DatabaseName sysname  NOT NULL,
-    SchemaName   sysname  NOT NULL,
-    TableName    sysname  NOT NULL,
-    IndexName    sysname  NOT NULL,
-    ObjectId     int      NOT NULL,
-    IndexId      int      NOT NULL,
-    IsUnique     bit      NOT NULL,
-    IsPrimaryKey bit      NOT NULL,
-    IndexType    tinyint  NOT NULL,
-    HasFilter    bit      NOT NULL,
-    ColumnName   sysname  NOT NULL,
-    KeyOrdinal   tinyint  NOT NULL,
-    IsIncluded   bit      NOT NULL,
-    IsDescending bit      NOT NULL
+    ObjectId INT NOT NULL,
+    IndexId  INT NOT NULL,
+    IdxRef   NVARCHAR(400) NOT NULL,
+    KeyCols  NVARCHAR(MAX) NOT NULL
 );
 
-/* No single-quoted literals inside the template, so no quote doubling is required. */
-DECLARE @Template nvarchar(max) = N'
-SELECT @dbName, s.name, t.name, i.name, i.object_id, i.index_id,
-       i.is_unique, i.is_primary_key, i.type, i.has_filter,
-       c.name, ic.key_ordinal, ic.is_included_column, ic.is_descending_key
-FROM {DB}sys.indexes AS i
-INNER JOIN {DB}sys.tables AS t ON t.object_id = i.object_id
-INNER JOIN {DB}sys.schemas AS s ON s.schema_id = t.schema_id
-INNER JOIN {DB}sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-INNER JOIN {DB}sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-WHERE i.type IN (1, 2)
-  AND i.is_hypothetical = 0
-  AND i.name IS NOT NULL
-  AND t.is_ms_shipped = 0;';
+DECLARE @Flag TABLE
+(
+    IdxRef  NVARCHAR(400) NOT NULL,
+    Pairing NVARCHAR(400) NOT NULL,
+    Issue   VARCHAR(20) NOT NULL
+);
 
-DECLARE @DbName sysname;
-DECLARE @Sql nvarchar(max);
-DECLARE @SkippedDbs nvarchar(max) = N'';
+BEGIN TRY
+    INSERT INTO @Idx (ObjectId, IndexId, IdxRef, KeyCols)
+    SELECT i.object_id,
+           i.index_id,
+           LEFT(ISNULL(SCHEMA_NAME(t.schema_id), 'dbo') + '.' + t.name + '.' + i.name, 400),
+           ISNULL(k.KeyCols, '')
+    FROM sys.indexes AS i
+    INNER JOIN sys.tables AS t ON t.object_id = i.object_id
+    OUTER APPLY (SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), c.name), ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS KeyCols
+                 FROM sys.index_columns AS ic
+                 INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                 WHERE ic.object_id = i.object_id
+                   AND ic.index_id = i.index_id
+                   AND ic.is_included_column = 0) AS k
+    WHERE t.is_ms_shipped = 0
+      AND i.type = 2
+      AND i.is_hypothetical = 0
+      AND i.name IS NOT NULL;
+END TRY
+BEGIN CATCH
+    SET @Unreadable = 1;
+END CATCH
 
-IF @IsAzureSqlDb = 1
+INSERT INTO @Flag (IdxRef, Pairing, Issue)
+SELECT b.IdxRef, a.IdxRef, 'DUPLICATE'
+FROM @Idx AS a
+INNER JOIN @Idx AS b ON b.ObjectId = a.ObjectId AND b.IndexId > a.IndexId
+WHERE a.KeyCols <> '' AND a.KeyCols = b.KeyCols;
+
+INSERT INTO @Flag (IdxRef, Pairing, Issue)
+SELECT a.IdxRef, b.IdxRef, 'OVERLAPPING'
+FROM @Idx AS a
+INNER JOIN @Idx AS b ON b.ObjectId = a.ObjectId AND b.IndexId <> a.IndexId
+WHERE a.KeyCols <> ''
+  AND LEN(b.KeyCols) > LEN(a.KeyCols)
+  AND LEFT(b.KeyCols, LEN(a.KeyCols) + 1) = a.KeyCols + ',';
+
+SELECT @TotalIdx = ISNULL(COUNT(*), 0) FROM @Idx;
+
+SELECT @DupCount     = ISNULL(SUM(CASE WHEN Issue = 'DUPLICATE' THEN 1 ELSE 0 END), 0),
+       @OverlapCount = ISNULL(SUM(CASE WHEN Issue = 'OVERLAPPING' THEN 1 ELSE 0 END), 0)
+FROM @Flag;
+
+SELECT @Affected = ISNULL(COUNT(*), 0)
+FROM (SELECT DISTINCT IdxRef FROM @Flag) AS a;
+
+SET @Pct = ISNULL(@Affected * 100.0 / NULLIF(@TotalIdx, 0), 0);
+
+SELECT @Examples = ISNULL(STRING_AGG(CONVERT(NVARCHAR(MAX), Issue + ': ' + IdxRef + ' vs ' + Pairing), '; '), '')
+FROM (SELECT TOP (5) Issue, IdxRef, Pairing FROM @Flag ORDER BY Issue, IdxRef) AS ex;
+
+IF @Unreadable = 1
 BEGIN
-    SET @DbName = DB_NAME();
-    SET @Sql = REPLACE(@Template, N'{DB}', N'');
-
-    BEGIN TRY
-        INSERT INTO #IndexColumns
-            (DatabaseName, SchemaName, TableName, IndexName, ObjectId, IndexId,
-             IsUnique, IsPrimaryKey, IndexType, HasFilter,
-             ColumnName, KeyOrdinal, IsIncluded, IsDescending)
-        EXEC sys.sp_executesql @Sql, N'@dbName sysname', @dbName = @DbName;
-    END TRY
-    BEGIN CATCH
-        SET @SkippedDbs = @SkippedDbs + @DbName + N'; ';
-    END CATCH
+    SET @Score = 0;
+    SET @Finding = 'Index metadata in ' + @DatabaseQueried + ' is not readable by the audit login, so duplicate and overlapping indexes could not be assessed.';
 END
-ELSE
+ELSE IF @TotalIdx = 0
 BEGIN
-    DECLARE DbCursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT d.name
-        FROM sys.databases AS d
-        WHERE d.database_id > 4
-          AND d.state = 0
-          AND d.source_database_id IS NULL
-          AND HAS_DBACCESS(d.name) = 1
-        ORDER BY d.name;
-
-    OPEN DbCursor;
-    FETCH NEXT FROM DbCursor INTO @DbName;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        SET @Sql = REPLACE(@Template, N'{DB}', QUOTENAME(@DbName) + N'.');
-
-        BEGIN TRY
-            INSERT INTO #IndexColumns
-                (DatabaseName, SchemaName, TableName, IndexName, ObjectId, IndexId,
-                 IsUnique, IsPrimaryKey, IndexType, HasFilter,
-                 ColumnName, KeyOrdinal, IsIncluded, IsDescending)
-            EXEC sys.sp_executesql @Sql, N'@dbName sysname', @dbName = @DbName;
-        END TRY
-        BEGIN CATCH
-            SET @SkippedDbs = @SkippedDbs + @DbName + N'; ';
-        END CATCH
-
-        FETCH NEXT FROM DbCursor INTO @DbName;
-    END
-
-    CLOSE DbCursor;
-    DEALLOCATE DbCursor;
-END
-
-CREATE TABLE #IndexDef
-(
-    DatabaseName    sysname       NOT NULL,
-    SchemaName      sysname       NOT NULL,
-    TableName       sysname       NOT NULL,
-    IndexName       sysname       NOT NULL,
-    ObjectId        int           NOT NULL,
-    IndexId         int           NOT NULL,
-    IsUnique        bit           NOT NULL,
-    IsPrimaryKey    bit           NOT NULL,
-    HasFilter       bit           NOT NULL,
-    KeyColumns      nvarchar(max) NOT NULL,
-    IncludedColumns nvarchar(max) NOT NULL
-);
-
-/* Canonical signature per index: ordered key columns (with sort direction) and alphabetised included columns. */
-INSERT INTO #IndexDef
-    (DatabaseName, SchemaName, TableName, IndexName, ObjectId, IndexId,
-     IsUnique, IsPrimaryKey, HasFilter, KeyColumns, IncludedColumns)
-SELECT d.DatabaseName, d.SchemaName, d.TableName, d.IndexName, d.ObjectId, d.IndexId,
-       d.IsUnique, d.IsPrimaryKey, d.HasFilter,
-       ISNULL(STUFF((SELECT N',' + k.ColumnName + CASE WHEN k.IsDescending = 1 THEN N' DESC' ELSE N' ASC' END
-                     FROM #IndexColumns AS k
-                     WHERE k.DatabaseName = d.DatabaseName
-                       AND k.ObjectId = d.ObjectId
-                       AND k.IndexId = d.IndexId
-                       AND k.IsIncluded = 0
-                     ORDER BY k.KeyOrdinal
-                     FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, N''), N''),
-       ISNULL(STUFF((SELECT N',' + n.ColumnName
-                     FROM #IndexColumns AS n
-                     WHERE n.DatabaseName = d.DatabaseName
-                       AND n.ObjectId = d.ObjectId
-                       AND n.IndexId = d.IndexId
-                       AND n.IsIncluded = 1
-                     ORDER BY n.ColumnName
-                     FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, N''), N'')
-FROM (SELECT DISTINCT DatabaseName, SchemaName, TableName, IndexName,
-                      ObjectId, IndexId, IsUnique, IsPrimaryKey, HasFilter
-      FROM #IndexColumns) AS d;
-
-CREATE TABLE #Redundant
-(
-    DatabaseName    sysname     NOT NULL,
-    SchemaName      sysname     NOT NULL,
-    TableName       sysname     NOT NULL,
-    IndexName       sysname     NOT NULL,
-    OverlappingWith sysname     NOT NULL,
-    IssueType       varchar(20) NOT NULL
-);
-
-/* Exact duplicates: identical key list AND identical include list on the same table. */
-INSERT INTO #Redundant (DatabaseName, SchemaName, TableName, IndexName, OverlappingWith, IssueType)
-SELECT b.DatabaseName, b.SchemaName, b.TableName, b.IndexName, a.IndexName, 'DUPLICATE'
-FROM #IndexDef AS a
-INNER JOIN #IndexDef AS b
-        ON b.DatabaseName = a.DatabaseName
-       AND b.ObjectId = a.ObjectId
-       AND b.IndexId > a.IndexId
-WHERE a.HasFilter = 0
-  AND b.HasFilter = 0
-  AND a.KeyColumns = b.KeyColumns
-  AND a.IncludedColumns = b.IncludedColumns
-  AND a.KeyColumns <> N'';
-
-/* Overlapping: a non-unique, non-clustered, include-free index whose keys are a strict leading prefix of another index. */
-INSERT INTO #Redundant (DatabaseName, SchemaName, TableName, IndexName, OverlappingWith, IssueType)
-SELECT a.DatabaseName, a.SchemaName, a.TableName, a.IndexName, b.IndexName, 'OVERLAPPING'
-FROM #IndexDef AS a
-INNER JOIN #IndexDef AS b
-        ON b.DatabaseName = a.DatabaseName
-       AND b.ObjectId = a.ObjectId
-       AND b.IndexId <> a.IndexId
-WHERE a.IsUnique = 0
-  AND a.IsPrimaryKey = 0
-  AND a.IndexId > 1
-  AND a.HasFilter = 0
-  AND b.HasFilter = 0
-  AND a.IncludedColumns = N''
-  AND a.KeyColumns <> N''
-  AND LEN(a.KeyColumns) < LEN(b.KeyColumns)
-  AND LEFT(b.KeyColumns, LEN(a.KeyColumns) + 1) = a.KeyColumns + N',';
-
-DECLARE @DupCount int = (SELECT COUNT(*) FROM #Redundant WHERE IssueType = 'DUPLICATE');
-DECLARE @OverlapCount int = (SELECT COUNT(*) FROM #Redundant WHERE IssueType = 'OVERLAPPING');
-DECLARE @IndexCount int = (SELECT COUNT(*) FROM #IndexDef);
-DECLARE @DbScanned int = (SELECT COUNT(DISTINCT DatabaseName) FROM #IndexColumns);
-
-DECLARE @DbList nvarchar(max) =
-    ISNULL(STUFF((SELECT DISTINCT N', ' + x.DatabaseName
-                  FROM #IndexColumns AS x
-                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''),
-           N'No accessible user databases');
-
-DECLARE @Examples nvarchar(max) =
-    ISNULL(STUFF((SELECT TOP (5) N'; ' + r.IssueType + N': ' + r.DatabaseName + N'.' + r.SchemaName + N'.'
-                              + r.TableName + N' [' + r.IndexName + N'] vs [' + r.OverlappingWith + N']'
-                  FROM #Redundant AS r
-                  ORDER BY CASE WHEN r.IssueType = 'DUPLICATE' THEN 0 ELSE 1 END,
-                           r.DatabaseName, r.SchemaName, r.TableName, r.IndexName
-                  FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''),
-           N'None');
-
-DECLARE @Score int;
-DECLARE @Result nvarchar(10);
-
-IF @DbScanned = 0
-    SET @Score = 1;
-ELSE IF @DupCount > 0
-    SET @Score = 1;
-ELSE IF @OverlapCount > 0
-    SET @Score = 2;
-ELSE
     SET @Score = 3;
+    SET @Finding = 'No nonclustered index exists on user tables in ' + @DatabaseQueried + ', so no index is redundant, duplicated or overlapping.';
+END
+ELSE
+BEGIN
+    SET @Score = CASE WHEN @Affected = 0 THEN 3 WHEN @Pct < 5 THEN 2 WHEN @Pct < 25 THEN 1 ELSE 0 END;
+    SET @Finding = CONVERT(NVARCHAR(20), @Affected) + ' of ' + CONVERT(NVARCHAR(20), @TotalIdx)
+                 + ' nonclustered index(es) in ' + @DatabaseQueried + ' (' + CONVERT(NVARCHAR(20), @Pct)
+                 + '%) are redundant: ' + CONVERT(NVARCHAR(20), @DupCount)
+                 + ' pair(s) share an identical key column list and ' + CONVERT(NVARCHAR(20), @OverlapCount)
+                 + ' index(es) are a leading-key prefix of another index on the same table. '
+                 + CASE WHEN @Examples = '' THEN 'No redundant index found.' ELSE 'Examples: ' + @Examples + '.' END;
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DECLARE @Finding nvarchar(max) =
-      N'Scanned ' + CAST(@DbScanned AS nvarchar(20)) + N' user database(s) covering '
-    + CAST(@IndexCount AS nvarchar(20)) + N' rowstore index(es). Exact duplicate index pairs: '
-    + CAST(@DupCount AS nvarchar(20)) + N'. Overlapping (leading-key prefix) indexes: '
-    + CAST(@OverlapCount AS nvarchar(20)) + N'. Examples: ' + @Examples + N'.'
-    + CASE WHEN LEN(@SkippedDbs) > 0
-           THEN N' Databases skipped because their metadata could not be read: ' + @SkippedDbs
-           ELSE N'' END
-    + CASE WHEN @DbScanned = 0
-           THEN N' No user database index metadata could be read, so duplicate/overlapping index status could not be verified; manual review required.'
-           ELSE N'' END
-    + CASE WHEN @DbScanned > 0 AND @DupCount = 0 AND @OverlapCount = 0
-           THEN N' No redundant, duplicate or overlapping indexes detected.'
-           ELSE N'' END;
-
-SELECT
-    @Result  AS Result,
-    @Score   AS Score,
-    @DbList  AS DatabaseQueried,
-    @Finding AS Finding;
+SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

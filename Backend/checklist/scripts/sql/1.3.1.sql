@@ -1,178 +1,91 @@
 -- Checklist: HA approach defined and matches SLA (Always On AG / failover cluster / zone-redundant / failover groups)
 -- Scope: SERVER
-<<<<<<< Updated upstream
--- Scoring: 3 = Always On AG or failover cluster evidence is active; 2 = platform-managed HA or partial HA evidence; 1 = HA capability enabled without active topology; 0 = no HA evidence
--- NOTE: Automated evidence only; confirm that the observed HA approach matches the documented SLA.
+-- Scoring: 3 = an availability group with a synchronous secondary, a multi-node failover cluster, or an Azure SQL Database geo/failover-group secondary is active; 2 = HA is present but single-topology, or Azure SQL Database on a production tier where HA is platform-managed; 1 = HA capability is switched on with no topology built, or a low Azure tier; 0 = no HA evidence at all
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'HA metadata could not be evaluated';
-DECLARE @EngineEdition INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
-DECLARE @AgCount INT = 0;
-DECLARE @ClusterNodeCount INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'HA evidence could not be collected';
+DECLARE @Engine INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
+DECLARE @Edition NVARCHAR(128) = ISNULL(CONVERT(NVARCHAR(128), SERVERPROPERTY('Edition')), N'(unknown)');
 DECLARE @HadrEnabled INT = ISNULL(CONVERT(INT, SERVERPROPERTY('IsHadrEnabled')), 0);
 DECLARE @IsClustered INT = ISNULL(CONVERT(INT, SERVERPROPERTY('IsClustered')), 0);
-DECLARE @ProbeError NVARCHAR(4000) = N'';
+DECLARE @AgCount INT = 0;
+DECLARE @SyncSecondaries INT = 0;
+DECLARE @ClusterNodes INT = 0;
+DECLARE @GeoLinks INT = 0;
+DECLARE @Tier NVARCHAR(200) = N'(unknown)';
+DECLARE @Warn NVARCHAR(1000) = N'';
 DECLARE @Sql NVARCHAR(MAX);
 
-IF @EngineEdition = 5
+IF @Engine = 5
 BEGIN
-    SET @Score = 2;
-    SET @Finding = N'Azure SQL Database: HA is platform-managed; zone redundancy or failover-group configuration is not exposed by this T-SQL probe. '
-                 + N'engine_edition=' + CONVERT(NVARCHAR(20), @EngineEdition)
-                 + N', hadr_enabled=' + CONVERT(NVARCHAR(20), @HadrEnabled)
-                 + N', is_clustered=' + CONVERT(NVARCHAR(20), @IsClustered);
+    BEGIN TRY
+        SET @Sql = N'SELECT @out = COUNT(*) FROM sys.geo_replication_links;';
+        EXEC sys.sp_executesql @Sql, N'@out INT OUTPUT', @out = @GeoLinks OUTPUT;
+    END TRY
+    BEGIN CATCH
+        SET @Warn = N'geo_replication_links unavailable: ' + ERROR_MESSAGE();
+    END CATCH;
+
+    BEGIN TRY
+        SET @Sql = N'SELECT @out = ISNULL(MAX(CONVERT(NVARCHAR(200), edition + N''/'' + service_objective)), N''(unknown)'') FROM sys.database_service_objectives;';
+        EXEC sys.sp_executesql @Sql, N'@out NVARCHAR(200) OUTPUT', @out = @Tier OUTPUT;
+    END TRY
+    BEGIN CATCH
+        IF @Warn = N'' SET @Warn = N'service objective unavailable: ' + ERROR_MESSAGE();
+    END CATCH;
+
+    SET @Score = CASE
+        WHEN @GeoLinks > 0 THEN 3
+        WHEN @Tier LIKE N'%Basic%' OR @Tier LIKE N'%/S0%' OR @Tier LIKE N'%Free%' THEN 1
+        ELSE 2 END;
+
+    SET @Finding = CONCAT(N'Azure SQL Database (', @Edition, N'), service objective = ', @Tier,
+        N'; active geo-replication / failover-group links = ', @GeoLinks,
+        N'; HA within a region is platform-managed');
 END
 ELSE
 BEGIN
     BEGIN TRY
-        SET @Sql = N'SELECT @value = COUNT(*) FROM sys.availability_groups;';
-        EXEC sys.sp_executesql @Sql, N'@value INT OUTPUT', @value = @AgCount OUTPUT;
+        SET @Sql = N'SELECT @out = COUNT(*) FROM sys.availability_groups;';
+        EXEC sys.sp_executesql @Sql, N'@out INT OUTPUT', @out = @AgCount OUTPUT;
+
+        SET @Sql = N'SELECT @out = COUNT(*) FROM sys.dm_hadr_availability_replica_states AS s
+                     JOIN sys.availability_replicas AS r ON r.replica_id = s.replica_id
+                     WHERE s.role = 2 AND r.availability_mode = 1;';
+        EXEC sys.sp_executesql @Sql, N'@out INT OUTPUT', @out = @SyncSecondaries OUTPUT;
     END TRY
     BEGIN CATCH
-        SET @ProbeError = ERROR_MESSAGE();
+        SET @Warn = N'availability-group views unavailable: ' + ERROR_MESSAGE();
     END CATCH;
 
     BEGIN TRY
-        SET @Sql = N'SELECT @value = COUNT(*) FROM sys.dm_os_cluster_nodes;';
-        EXEC sys.sp_executesql @Sql, N'@value INT OUTPUT', @value = @ClusterNodeCount OUTPUT;
+        SET @Sql = N'SELECT @out = COUNT(*) FROM sys.dm_os_cluster_nodes;';
+        EXEC sys.sp_executesql @Sql, N'@out INT OUTPUT', @out = @ClusterNodes OUTPUT;
     END TRY
     BEGIN CATCH
-        IF @ProbeError = N'' SET @ProbeError = ERROR_MESSAGE();
+        IF @Warn = N'' SET @Warn = N'cluster node DMV unavailable: ' + ERROR_MESSAGE();
     END CATCH;
 
-    IF @AgCount > 0 AND @HadrEnabled = 1
-    BEGIN
-        SET @Score = 3;
-        SET @Finding = N'Always On availability group evidence found: ags='
-                     + CONVERT(NVARCHAR(20), @AgCount) + N', cluster_nodes='
-                     + CONVERT(NVARCHAR(20), @ClusterNodeCount) + N', hadr_enabled='
-                     + CONVERT(NVARCHAR(20), @HadrEnabled) + N', is_clustered='
-                     + CONVERT(NVARCHAR(20), @IsClustered);
-    END
-    ELSE IF @IsClustered = 1 AND @ClusterNodeCount > 1
-    BEGIN
-        SET @Score = 3;
-        SET @Finding = N'Failover cluster evidence found: ags='
-                     + CONVERT(NVARCHAR(20), @AgCount) + N', cluster_nodes='
-                     + CONVERT(NVARCHAR(20), @ClusterNodeCount) + N', hadr_enabled='
-                     + CONVERT(NVARCHAR(20), @HadrEnabled) + N', is_clustered='
-                     + CONVERT(NVARCHAR(20), @IsClustered);
-    END
-    ELSE IF @HadrEnabled = 1 OR @IsClustered = 1 OR @AgCount > 0 OR @ClusterNodeCount > 0
-    BEGIN
-        SET @Score = 1;
-        SET @Finding = N'Partial HA evidence found: ags='
-                     + CONVERT(NVARCHAR(20), @AgCount) + N', cluster_nodes='
-                     + CONVERT(NVARCHAR(20), @ClusterNodeCount) + N', hadr_enabled='
-                     + CONVERT(NVARCHAR(20), @HadrEnabled) + N', is_clustered='
-                     + CONVERT(NVARCHAR(20), @IsClustered);
-    END
-    ELSE
-    BEGIN
-        SET @Score = 0;
-        SET @Finding = N'No active Always On availability group or failover cluster evidence found: ags='
-                     + CONVERT(NVARCHAR(20), @AgCount) + N', cluster_nodes='
-                     + CONVERT(NVARCHAR(20), @ClusterNodeCount) + N', hadr_enabled='
-                     + CONVERT(NVARCHAR(20), @HadrEnabled) + N', is_clustered='
-                     + CONVERT(NVARCHAR(20), @IsClustered);
-    END;
+    SET @Score = CASE
+        WHEN @AgCount > 0 AND @SyncSecondaries > 0 THEN 3
+        WHEN @IsClustered = 1 AND @ClusterNodes > 1 THEN 3
+        WHEN @AgCount > 0 OR @ClusterNodes > 1 THEN 2
+        WHEN @Engine = 8 THEN 2
+        WHEN @HadrEnabled = 1 OR @IsClustered = 1 THEN 1
+        ELSE 0 END;
 
-    IF @ProbeError <> N''
-        SET @Finding = @Finding + N'; probe_warning=' + @ProbeError;
-END;
+    SET @Finding = CONCAT(CASE WHEN @Engine = 8 THEN N'Azure SQL Managed Instance (' ELSE N'SQL Server (' END,
+        @Edition, N'): availability groups = ', @AgCount,
+        N', synchronous secondary replicas = ', @SyncSecondaries,
+        N', failover cluster nodes = ', @ClusterNodes,
+        N', IsHadrEnabled = ', @HadrEnabled, N', IsClustered = ', @IsClustered);
+END
+
+IF @Warn <> N'' SET @Finding = @Finding + N'; probe note: ' + @Warn;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
-=======
--- Scoring: 3 = clear HA detected (AGs > 0 OR clustered with multiple nodes); 2 = partial or ambiguous HA evidence (hadr or clustered flag on but counts missing); 1 = minimal evidence (engine indicates PaaS/MI but no HA objects found); 0 = no evidence
--- NOTE: Automated evidence only; full compliance requires human review when the score is below 3.
-
-SET NOCOUNT ON;
-
-DECLARE
-@Result nvarchar(10) = 'Fail',
-@Score int = 0,
-@DatabaseQueried sysname = 'master',
-@Finding nvarchar(max) = N'No evidence collected';
-
--- Variables to hold probe results (nullable if probe fails)
-DECLARE @ags int = NULL;
-DECLARE @cluster_nodes int = NULL;
-DECLARE @hadr_enabled int = NULL;
-DECLARE @is_clustered int = NULL;
-DECLARE @engine_edition int = NULL;
-
--- Probe availability groups (may be unavailable on some SKUs)
-BEGIN TRY
-EXEC sp_executesql
-N'SELECT @out = COUNT(*) FROM sys.availability_groups',
-N'@out int OUTPUT',
-@out = @ags OUTPUT;
-END TRY
-BEGIN CATCH
-SET @ags = NULL;
-END CATCH;
-
--- Probe cluster nodes DMV (may be unavailable or require permissions)
-BEGIN TRY
-EXEC sp_executesql
-N'SELECT @out = COUNT(*) FROM sys.dm_os_cluster_nodes',
-N'@out int OUTPUT',
-@out = @cluster_nodes OUTPUT;
-END TRY
-BEGIN CATCH
-SET @cluster_nodes = NULL;
-END CATCH;
-
--- Safe SERVERPROPERTY probes
-BEGIN TRY
-SET @hadr_enabled = CASE WHEN TRY_CAST(SERVERPROPERTY('IsHadrEnabled') AS int) IS NULL THEN NULL ELSE CAST(SERVERPROPERTY('IsHadrEnabled') AS int) END;
-SET @is_clustered = CASE WHEN TRY_CAST(SERVERPROPERTY('IsClustered') AS int) IS NULL THEN NULL ELSE CAST(SERVERPROPERTY('IsClustered') AS int) END;
-SET @engine_edition = CASE WHEN TRY_CAST(SERVERPROPERTY('EngineEdition') AS int) IS NULL THEN NULL ELSE CAST(SERVERPROPERTY('EngineEdition') AS int) END;
-END TRY
-BEGIN CATCH
-SET @hadr_enabled = NULL;
-SET @is_clustered = NULL;
-SET @engine_edition = NULL;
-END CATCH;
-
--- Scoring logic:
--- 3 = clear HA: ags > 0 OR (is_clustered = 1 AND cluster_nodes > 1)
--- 2 = partial/ambiguous HA evidence: hadr_enabled = 1 OR is_clustered = 1 or cluster_nodes > 0 but not clearly multi-node
--- 1 = minimal: engine_edition indicates Azure/MI but no HA objects found
--- 0 = none
-IF @ags IS NOT NULL AND @ags > 0
-SET @Score = 3;
-ELSE IF @is_clustered = 1 AND @cluster_nodes IS NOT NULL AND @cluster_nodes > 1
-SET @Score = 3;
-ELSE IF (@hadr_enabled = 1) OR (@is_clustered = 1) OR (@cluster_nodes IS NOT NULL AND @cluster_nodes > 0)
-SET @Score = 2;
-ELSE IF @engine_edition IS NOT NULL AND @engine_edition IN (5,8) -- Azure SQL DB (5) or MI (8): platform suggests PaaS HA may be provided
-SET @Score = 1;
-ELSE
-SET @Score = 0;
-
--- Build Finding from actual values returned
-DECLARE @parts TABLE (ord int, txt nvarchar(max));
-
-INSERT INTO @parts VALUES (1, N'ags = ' + ISNULL(CASE WHEN @ags IS NULL THEN N'Unavailable' ELSE CONVERT(nvarchar(20), @ags) END, N'Unavailable'));
-INSERT INTO @parts VALUES (2, N'cluster_nodes = ' + ISNULL(CASE WHEN @cluster_nodes IS NULL THEN N'Unavailable' ELSE CONVERT(nvarchar(20), @cluster_nodes) END, N'Unavailable'));
-INSERT INTO @parts VALUES (3, N'hadr_enabled = ' + ISNULL(CASE WHEN @hadr_enabled IS NULL THEN N'Unavailable' ELSE CONVERT(nvarchar(20), @hadr_enabled) END, N'Unavailable'));
-INSERT INTO @parts VALUES (4, N'is_clustered = ' + ISNULL(CASE WHEN @is_clustered IS NULL THEN N'Unavailable' ELSE CONVERT(nvarchar(20), @is_clustered) END, N'Unavailable'));
-INSERT INTO @parts VALUES (5, N'engine_edition = ' + ISNULL(CASE WHEN @engine_edition IS NULL THEN N'Unavailable' ELSE CONVERT(nvarchar(20), @engine_edition) END, N'Unavailable'));
-
-SELECT @Finding = STRING_AGG(txt, '; ') WITHIN GROUP (ORDER BY ord) FROM @parts;
-
--- Ensure non-empty Finding
-IF @Finding IS NULL OR LEN(@Finding) = 0
-SET @Finding = N'No evidence returned from probes';
-
--- Derive Result
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
->>>>>>> Stashed changes

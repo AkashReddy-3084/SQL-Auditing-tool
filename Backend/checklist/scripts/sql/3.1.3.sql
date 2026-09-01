@@ -1,78 +1,74 @@
 -- Checklist: Schema-qualified object references (dbo.Table, not Table)
 -- Scope: DATABASE
--- Scoring: 3 = 90%+ of table-referencing modules show schema-qualified references; 2 = 50-89%; 1 = under 50%; 0 = no table-referencing modules found
--- NOTE: Automated evidence only; text-based detection is a proxy and may undercount schema qualification styles other than dbo. Full compliance requires human review.
+-- Scoring: 3 = every resolved module reference carries a schema name; 2 = under 5% of references are single-part; 1 = under 25%; 0 = 25% or more, or dependency metadata is unreadable
+
+SET NOCOUNT ON;
 
 DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(MAX) = 'None';
-DECLARE @Finding NVARCHAR(MAX) = 'No database found to be queried';
-DECLARE @DbName SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Module dependency metadata could not be read in this database';
+DECLARE @TotalRefs INT = 0;
+DECLARE @Unqualified INT = 0;
+DECLARE @Modules INT = 0;
+DECLARE @OffenderList NVARCHAR(MAX) = '';
+DECLARE @Ratio DECIMAL(9, 4) = 0;
+DECLARE @Probed BIT = 0;
 
-CREATE TABLE #DbResults (DbName SYSNAME, DbScore INT, Finding NVARCHAR(MAX));
+BEGIN TRY
+    SELECT @TotalRefs = COUNT(*),
+           @Unqualified = ISNULL(SUM(CASE WHEN d.referenced_schema_name IS NULL THEN 1 ELSE 0 END), 0)
+    FROM sys.sql_expression_dependencies AS d
+    JOIN sys.objects AS o ON o.object_id = d.referencing_id
+    WHERE o.is_ms_shipped = 0
+      AND d.referenced_class = 1
+      AND d.referenced_server_name IS NULL
+      AND d.referenced_database_name IS NULL
+      AND d.is_ambiguous = 0;
 
-IF SERVERPROPERTY('EngineEdition') = 5
-BEGIN
-    DECLARE @ReferencingModules INT, @QualifiedModules INT;
+    SELECT @Modules = COUNT(*),
+           @OffenderList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), q.objname), ', '), 400), '')
+    FROM (
+        SELECT DISTINCT QUOTENAME(SCHEMA_NAME(o.schema_id)) + '.' + QUOTENAME(o.name) AS objname
+        FROM sys.sql_expression_dependencies AS d
+        JOIN sys.objects AS o ON o.object_id = d.referencing_id
+        WHERE o.is_ms_shipped = 0
+          AND d.referenced_class = 1
+          AND d.referenced_server_name IS NULL
+          AND d.referenced_database_name IS NULL
+          AND d.is_ambiguous = 0
+          AND d.referenced_schema_name IS NULL
+    ) AS q;
 
-    SELECT @ReferencingModules = COUNT(*) FROM sys.sql_modules WHERE definition LIKE '%FROM %' OR definition LIKE '%JOIN %';
-    SELECT @QualifiedModules = COUNT(*) FROM sys.sql_modules
-    WHERE (definition LIKE '%FROM %' OR definition LIKE '%JOIN %')
-      AND (definition LIKE '%FROM dbo.%' OR definition LIKE '%JOIN dbo.%' OR definition LIKE '%FROM [dbo].%' OR definition LIKE '%JOIN [dbo].%');
+    SET @Probed = 1;
+END TRY
+BEGIN CATCH
+    SET @Probed = 0;
+END CATCH
 
-    INSERT INTO #DbResults (DbName, DbScore, Finding)
-    VALUES (
-        DB_NAME(),
-        CASE WHEN ISNULL(@ReferencingModules,0) = 0 THEN 0
-             WHEN (CAST(ISNULL(@QualifiedModules,0) AS DECIMAL(9,4)) / NULLIF(@ReferencingModules,0)) >= 0.90 THEN 3
-             WHEN (CAST(ISNULL(@QualifiedModules,0) AS DECIMAL(9,4)) / NULLIF(@ReferencingModules,0)) >= 0.50 THEN 2
-             ELSE 1 END,
-        CONCAT('Table-referencing modules = ', ISNULL(@ReferencingModules,0), ', with schema-qualified reference = ', ISNULL(@QualifiedModules,0))
-    );
-END
+SET @Ratio = CASE WHEN @TotalRefs = 0 THEN 0
+                  ELSE CONVERT(DECIMAL(9, 4), @Unqualified) / @TotalRefs END;
+
+IF @Probed = 0
+    SET @Score = 0;
+ELSE IF @Unqualified = 0
+    SET @Score = 3;
+ELSE IF @Ratio < 0.05
+    SET @Score = 2;
+ELSE IF @Ratio < 0.25
+    SET @Score = 1;
 ELSE
-BEGIN
-    DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-        SELECT name FROM sys.databases
-        WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1;
+    SET @Score = 0;
 
-    OPEN db_cursor;
-    FETCH NEXT FROM db_cursor INTO @DbName;
+SET @Finding = CASE WHEN @Probed = 0
+    THEN 'sys.sql_expression_dependencies could not be read in this database; VIEW DEFINITION permission is required to resolve object references.'
+    ELSE CONCAT('Inspected ', @TotalRefs, ' resolved object reference(s) in user modules; ',
+                @Unqualified, ' use a single-part name with no schema (',
+                CONVERT(NVARCHAR(20), CONVERT(DECIMAL(9, 2), @Ratio * 100)), '%), across ',
+                @Modules, ' module(s)',
+                CASE WHEN LEN(ISNULL(@OffenderList, '')) > 0 THEN CONCAT(': ', @OffenderList)
+                     ELSE '. No module uses an unqualified reference' END, '.')
+    END;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            SET @Sql = N'DECLARE @rm INT, @qm INT;
-SELECT @rm = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules WHERE definition LIKE ''%FROM %'' OR definition LIKE ''%JOIN %'';
-SELECT @qm = COUNT(*) FROM ' + QUOTENAME(@DbName) + N'.sys.sql_modules
-WHERE (definition LIKE ''%FROM %'' OR definition LIKE ''%JOIN %'')
-  AND (definition LIKE ''%FROM dbo.%'' OR definition LIKE ''%JOIN dbo.%'' OR definition LIKE ''%FROM [dbo].%'' OR definition LIKE ''%JOIN [dbo].%'');
-SELECT @p_Db,
-       CASE WHEN ISNULL(@rm,0) = 0 THEN 0
-            WHEN (CAST(ISNULL(@qm,0) AS DECIMAL(9,4)) / NULLIF(@rm,0)) >= 0.90 THEN 3
-            WHEN (CAST(ISNULL(@qm,0) AS DECIMAL(9,4)) / NULLIF(@rm,0)) >= 0.50 THEN 2
-            ELSE 1 END,
-       CONCAT(''Table-referencing modules = '', ISNULL(@rm,0), '', with schema-qualified reference = '', ISNULL(@qm,0));';
-
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            EXEC sp_executesql @Sql, N'@p_Db SYSNAME', @p_Db = @DbName;
-        END TRY
-        BEGIN CATCH
-            INSERT INTO #DbResults (DbName, DbScore, Finding)
-            VALUES (@DbName, 0, CONCAT('Evaluation failed: ', ERROR_MESSAGE()));
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @DbName;
-    END
-
-    CLOSE db_cursor;
-    DEALLOCATE db_cursor;
-END
-
-SET @DatabaseQueried = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName), ', ') FROM #DbResults), 'None');
-SET @Score = ISNULL((SELECT MIN(DbScore) FROM #DbResults), 0);
-SET @Finding = ISNULL((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), DbName) + ': ' + Finding, '; ') FROM #DbResults), 'No database found to be queried');
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

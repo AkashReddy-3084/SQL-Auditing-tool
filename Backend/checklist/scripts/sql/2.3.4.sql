@@ -1,79 +1,77 @@
-<<<<<<< Updated upstream
 -- Checklist: Retry logic exists for transient failures
 -- Scope: SERVER
--- Scoring: 3 = Agent retry steps and T-SQL retry modules exist; 2 = one retry mechanism exists; 1 = load steps exist without retry logic; 0 = no executable load evidence
--- NOTE: Automated evidence only; retry safety and transient-error classification require human review.
+-- Scoring: 3 = at least 90% of Agent job steps configure retry attempts; 2 = at least 50% do, or the platform exposes no Agent metadata; 1 = some steps configure retries; 0 = no step configures retries, or no job steps exist
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'Retry metadata could not be evaluated';
-DECLARE @RetrySteps INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
+DECLARE @Finding NVARCHAR(MAX) = 'Retry configuration evidence was unavailable';
+DECLARE @Engine INT = ISNULL(CONVERT(INT, SERVERPROPERTY('EngineEdition')), 0);
+DECLARE @Sql NVARCHAR(MAX);
 DECLARE @Steps INT = 0;
-DECLARE @RetryModules INT = 0;
+DECLARE @WithRetry INT = 0;
+DECLARE @RetryPct DECIMAL(6, 2) = 0;
+DECLARE @Jobs INT = 0;
+DECLARE @JobsNoRetry INT = 0;
+DECLARE @NoRetryList NVARCHAR(MAX) = '';
+DECLARE @ReadError BIT = 0;
 
-BEGIN TRY
-    SELECT @RetrySteps = COUNT(*) FROM msdb.dbo.sysjobsteps WHERE retry_attempts > 0;
-    SELECT @Steps = COUNT(*) FROM msdb.dbo.sysjobsteps;
-    SELECT @RetryModules = COUNT(*)
-    FROM sys.sql_modules
-    WHERE definition LIKE '%WAITFOR DELAY%'
-       OR (definition LIKE '%WHILE%' AND definition LIKE '%retry%');
+CREATE TABLE #Retry
+(
+    JobName NVARCHAR(256) NOT NULL,
+    RetryAttempts INT NOT NULL
+);
 
-    SET @Score = CASE WHEN @RetrySteps > 0 AND @RetryModules > 0 THEN 3
-                      WHEN @RetrySteps > 0 OR @RetryModules > 0 THEN 2
-                      WHEN @Steps > 0 THEN 1 ELSE 0 END;
-    SET @Finding = N'retry_steps=' + CONVERT(NVARCHAR(20), @RetrySteps) + N', steps=' + CONVERT(NVARCHAR(20), @Steps) + N', retry_modules=' + CONVERT(NVARCHAR(20), @RetryModules);
-END TRY
-BEGIN CATCH
-    SET @Score = 0;
-    SET @Finding = N'Unable to read retry metadata: ' + ERROR_MESSAGE();
-END CATCH;
+IF @Engine <> 5
+BEGIN
+    BEGIN TRY
+        SET @Sql = N'SELECT j.name, ISNULL(s.retry_attempts, 0) FROM msdb.dbo.sysjobsteps AS s INNER JOIN msdb.dbo.sysjobs AS j ON j.job_id = s.job_id;';
+        INSERT INTO #Retry (JobName, RetryAttempts) EXEC sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @ReadError = 1;
+    END CATCH
+END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
-=======
--- Checklist: 2.3.4 Retry logic exists for transient   failures
--- Scope: SERVER
--- Scoring: 3 = fully verified; 2 = automated evidence present (capped); 1 = minimal/ambiguous evidence; 0 = no evidence
--- NOTE: Automated evidence only; full compliance requires human review when the score is below 3.
+SELECT @Steps = COUNT(*),
+       @WithRetry = ISNULL(SUM(CASE WHEN r.RetryAttempts > 0 THEN 1 ELSE 0 END), 0)
+FROM #Retry AS r;
 
-SET NOCOUNT ON;
+SELECT @Jobs = COUNT(*),
+       @JobsNoRetry = ISNULL(SUM(CASE WHEN x.MaxRetry = 0 THEN 1 ELSE 0 END), 0),
+       @NoRetryList = ISNULL(LEFT(STRING_AGG(CASE WHEN x.MaxRetry = 0 THEN CONVERT(NVARCHAR(MAX), x.JobName) END, ', '), 400), '')
+FROM (SELECT r.JobName, MAX(r.RetryAttempts) AS MaxRetry FROM #Retry AS r GROUP BY r.JobName) AS x;
 
-DECLARE
-    @Result nvarchar(10) = 'Fail',
-    @Score int = 0,
-    @DatabaseQueried sysname = 'master',
-    @Finding nvarchar(max) = N'No evidence collected';
+SET @RetryPct = CASE WHEN @Steps = 0 THEN 0
+                     ELSE CONVERT(DECIMAL(6, 2), 100.0 * @WithRetry / NULLIF(@Steps, 0)) END;
 
--- Attempt to execute the provided probe and capture its result as XML (single column)
-CREATE TABLE #probe (xmlcol nvarchar(max));
-
-BEGIN TRY
-    DECLARE @sql nvarchar(max) = N'SELECT (SELECT COUNT(\*) FROM   msdb.dbo.sysjobsteps WHERE retry\_attempts > 0) AS retry\_steps, (SELECT   COUNT(\*) FROM msdb.dbo.sysjobsteps) AS steps, (SELECT COUNT(\*) FROM   sys.sql\_modules WHERE definition LIKE ''%WAITFOR DELAY%'' OR (definition LIKE   ''%WHILE%'' AND definition LIKE ''%retry%'')) AS retry\_modules;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | FOR XML AUTO, ELEMENTS, ROOT(''rows'')';
-    INSERT INTO #probe(xmlcol)
-    EXEC sp_executesql @sql;
-END TRY
-BEGIN CATCH
-    INSERT INTO #probe(xmlcol) VALUES (N'Probe execution failed: ' + ERROR_MESSAGE());
-END CATCH;
-
--- Build Finding from probe output (first row concatenated)
-SELECT TOP 1 @Finding = ISNULL(xmlcol, N'') FROM #probe;
-
--- Scoring: 3 if probe indicates strong positive evidence (heuristic)
--- For automated batch generation we conservatively cap automatic verification at 2 unless explicit full-proof indicators exist.
--- Heuristic: if probe returned non-empty content, set Score = 2; else 0.
-IF EXISTS (SELECT 1 FROM #probe WHERE LEN(ISNULL(xmlcol, '')) > 0)
+IF @Engine = 5
+BEGIN
     SET @Score = 2;
-ELSE
+    SET @Finding = 'Azure SQL Database hosts no SQL Agent, so job step retry settings cannot be read; transient-fault retries are supplied by the client driver and the external orchestration service';
+END
+ELSE IF @Steps = 0
+BEGIN
     SET @Score = 0;
+    SET @Finding = CONCAT('No SQL Agent job steps exist on this instance, so no retry attempts are configured anywhere',
+                          CASE WHEN @ReadError = 1 THEN '; job step metadata could not be read' ELSE '' END);
+END
+ELSE
+BEGIN
+    SET @Score = CASE WHEN @RetryPct >= 90 THEN 3
+                      WHEN @RetryPct >= 50 THEN 2
+                      WHEN @WithRetry > 0 THEN 1
+                      ELSE 0 END;
+    SET @Finding = CONCAT('Agent job steps = ', @Steps,
+                          '; steps with retry_attempts greater than 0 = ', @WithRetry,
+                          ' (', @RetryPct, '%)',
+                          '; jobs = ', @Jobs,
+                          '; jobs with no retry on any step = ', @JobsNoRetry,
+                          CASE WHEN @JobsNoRetry = 0 THEN '; every job configures retries'
+                               ELSE '; jobs without retries: ' + @NoRetryList END);
+END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DROP TABLE #probe;
-
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
->>>>>>> Stashed changes

@@ -1,81 +1,79 @@
-<<<<<<< Updated upstream
 -- Checklist: Failed loads are restartable from point of failure (not full re-run)
--- Scope: SERVER
--- Scoring: 3 = retry steps and checkpoint metadata are both present; 2 = retry or checkpoint evidence is present; 1 = load steps exist without restart evidence; 0 = no load-step evidence
--- NOTE: Automated evidence only; restartability requires validating operational behavior.
+-- Scope: DATABASE
+-- Scoring: 3 = restart state tables exist and at least one procedure reads them; 2 = restart state tables exist but no module reads them; 1 = ETL modules exist with no restart state at all; 0 = no ETL modules and no restart state tables in this database
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(10) = 'Fail';
 DECLARE @Score INT = 0;
-DECLARE @DatabaseQueried NVARCHAR(128) = N'master';
-DECLARE @Finding NVARCHAR(MAX) = N'Load restartability metadata could not be evaluated';
-DECLARE @RetrySteps INT = 0;
-DECLARE @Steps INT = 0;
-DECLARE @CheckpointColumns INT = 0;
+DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
+DECLARE @Finding NVARCHAR(MAX) = 'Load restartability evidence was unavailable in this database';
+DECLARE @Ctl INT = 0;
+DECLARE @Readers INT = 0;
+DECLARE @CtlList NVARCHAR(MAX) = '';
+DECLARE @EtlProcs INT = 0;
+DECLARE @ReadError BIT = 0;
 
 BEGIN TRY
-    SELECT @RetrySteps = COUNT(*) FROM msdb.dbo.sysjobsteps WHERE retry_attempts > 0;
-    SELECT @Steps = COUNT(*) FROM msdb.dbo.sysjobsteps;
-    SELECT @CheckpointColumns = COUNT(*)
-    FROM sys.columns AS c
-    JOIN sys.tables AS t ON t.object_id = c.object_id
-    WHERE t.is_ms_shipped = 0
-      AND (c.name LIKE '%status%' OR c.name LIKE '%state%' OR c.name LIKE '%checkpoint%')
-      AND (t.name LIKE '%log%' OR t.name LIKE '%batch%' OR t.name LIKE '%control%' OR t.name LIKE '%run%');
-
-    SET @Score = CASE WHEN @RetrySteps > 0 AND @CheckpointColumns > 0 THEN 3
-                      WHEN @RetrySteps > 0 OR @CheckpointColumns > 0 THEN 2
-                      WHEN @Steps > 0 THEN 1 ELSE 0 END;
-    SET @Finding = N'retry_steps=' + CONVERT(NVARCHAR(20), @RetrySteps) + N', steps=' + CONVERT(NVARCHAR(20), @Steps) + N', checkpoint_cols=' + CONVERT(NVARCHAR(20), @CheckpointColumns);
+    SELECT @Ctl = COUNT(*),
+           @Readers = ISNULL(SUM(c.IsRead), 0),
+           @CtlList = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), c.FullName), ', '), 300), '')
+    FROM
+    (
+        SELECT s.name + '.' + t.name AS FullName,
+               CASE WHEN EXISTS (SELECT 1
+                                 FROM sys.sql_expression_dependencies AS d
+                                 INNER JOIN sys.objects AS o ON o.object_id = d.referencing_id
+                                 WHERE d.referenced_id = t.object_id
+                                   AND o.type IN ('P', 'FN', 'IF', 'TF')) THEN 1 ELSE 0 END AS IsRead
+        FROM sys.tables AS t
+        INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+        WHERE t.is_ms_shipped = 0
+          AND (t.name LIKE '%watermark%' OR t.name LIKE '%checkpoint%' OR t.name LIKE '%control%'
+               OR t.name LIKE '%batch%' OR t.name LIKE '%[_]log' OR t.name LIKE '%loadlog%'
+               OR t.name LIKE '%runlog%' OR t.name LIKE '%load%status%' OR t.name LIKE '%etl%log%')
+          AND EXISTS (SELECT 1
+                      FROM sys.columns AS col
+                      WHERE col.object_id = t.object_id
+                        AND (col.name LIKE '%status%' OR col.name LIKE '%state%'
+                             OR col.name LIKE '%watermark%' OR col.name LIKE '%checkpoint%'
+                             OR col.name LIKE '%batch%' OR col.name LIKE '%last[_]%'
+                             OR col.name LIKE '%processed%' OR col.name LIKE '%high[_]water%'
+                             OR col.name LIKE '%end[_]time%'))
+    ) AS c;
 END TRY
 BEGIN CATCH
-    SET @Score = 0;
-    SET @Finding = N'Unable to read load restartability metadata: ' + ERROR_MESSAGE();
-END CATCH;
+    SET @ReadError = 1;
+END CATCH
+
+BEGIN TRY
+    SELECT @EtlProcs = COUNT(*)
+    FROM sys.procedures AS pr
+    WHERE pr.is_ms_shipped = 0
+      AND (pr.name LIKE '%etl%' OR pr.name LIKE '%load%' OR pr.name LIKE '%stag%'
+           OR pr.name LIKE '%import%' OR pr.name LIKE '%ingest%' OR pr.name LIKE '%refresh%');
+END TRY
+BEGIN CATCH
+    SET @ReadError = 1;
+END CATCH
+
+SET @Score = CASE WHEN @Ctl > 0 AND @Readers > 0 THEN 3
+                  WHEN @Ctl > 0 THEN 2
+                  WHEN @EtlProcs > 0 THEN 1
+                  ELSE 0 END;
+
+SET @Finding = CASE
+    WHEN @ReadError = 1 AND @Ctl = 0 AND @EtlProcs = 0
+        THEN 'Table, column and dependency catalog metadata in this database could not be read'
+    WHEN @Ctl = 0 AND @EtlProcs = 0
+        THEN 'No batch, watermark, checkpoint or load-log tables carrying restart state exist in this database, and no ETL-named procedures were found'
+    WHEN @Ctl = 0
+        THEN CONCAT('ETL-named procedures = ', @EtlProcs,
+                    ' but no batch, watermark, checkpoint or load-log table carrying restart state exists, so a failed load has no recorded resume point')
+    ELSE CONCAT('Restart state tables = ', @Ctl, ' (', @CtlList, ')',
+                '; of those, referenced by a procedure or function = ', @Readers,
+                '; ETL-named procedures = ', @EtlProcs)
+END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
-=======
--- Checklist: 2.3.2 Failed   loads are restartable from point of failure (not full re-run)
--- Scope: SERVER
--- Scoring: 3 = fully verified; 2 = automated evidence present (capped); 1 = minimal/ambiguous evidence; 0 = no evidence
--- NOTE: Automated evidence only; full compliance requires human review when the score is below 3.
-
-SET NOCOUNT ON;
-
-DECLARE
-    @Result nvarchar(10) = 'Fail',
-    @Score int = 0,
-    @DatabaseQueried sysname = 'master',
-    @Finding nvarchar(max) = N'No evidence collected';
-
--- Attempt to execute the provided probe and capture its result as XML (single column)
-CREATE TABLE #probe (xmlcol nvarchar(max));
-
-BEGIN TRY
-    DECLARE @sql nvarchar(max) = N'SELECT   (SELECT COUNT(\*) FROM msdb.dbo.sysjobsteps WHERE retry\_attempts > 0) AS   retry\_steps, (SELECT COUNT(\*) FROM msdb.dbo.sysjobsteps) AS steps, (SELECT   COUNT(\*) FROM sys.columns c JOIN sys.tables t ON t.object\_id = c.object\_id   WHERE t.is\_ms\_shipped = 0 AND (c.name LIKE ''%status%'' OR c.name LIKE   ''%state%'' OR c.name LIKE ''%checkpoint%'') AND (t.name LIKE ''%log%'' OR t.name   LIKE ''%batch%'' OR t.name LIKE ''%control%'' OR t.name LIKE ''%run%'')) AS   checkpoint\_cols;                                                                                                                                                                                                                                                                                                                                                                                                   | FOR XML AUTO, ELEMENTS, ROOT(''rows'')';
-    INSERT INTO #probe(xmlcol)
-    EXEC sp_executesql @sql;
-END TRY
-BEGIN CATCH
-    INSERT INTO #probe(xmlcol) VALUES (N'Probe execution failed: ' + ERROR_MESSAGE());
-END CATCH;
-
--- Build Finding from probe output (first row concatenated)
-SELECT TOP 1 @Finding = ISNULL(xmlcol, N'') FROM #probe;
-
--- Scoring: 3 if probe indicates strong positive evidence (heuristic)
--- For automated batch generation we conservatively cap automatic verification at 2 unless explicit full-proof indicators exist.
--- Heuristic: if probe returned non-empty content, set Score = 2; else 0.
-IF EXISTS (SELECT 1 FROM #probe WHERE LEN(ISNULL(xmlcol, '')) > 0)
-    SET @Score = 2;
-ELSE
-    SET @Score = 0;
-
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
-
-DROP TABLE #probe;
-
-SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
->>>>>>> Stashed changes
