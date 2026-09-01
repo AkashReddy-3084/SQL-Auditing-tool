@@ -17,15 +17,19 @@ DECLARE @MissingList NVARCHAR(MAX) = 'none';
 
 BEGIN TRY
     SELECT @TotalTables = COUNT(*),
-           @WithPk = ISNULL(SUM(CASE WHEN EXISTS (SELECT 1 FROM sys.key_constraints AS kc
-                                                  WHERE kc.parent_object_id = t.object_id
-                                                    AND kc.type = 'PK')
-                                     THEN 1 ELSE 0 END), 0)
-    FROM sys.tables AS t
-    WHERE t.is_ms_shipped = 0
-      AND t.temporal_type <> 1;
+           @WithPk = ISNULL(SUM(CASE WHEN has_pk = 1 THEN 1 ELSE 0 END), 0)
+    FROM (
+        SELECT t.object_id,
+               CASE WHEN EXISTS (SELECT 1 FROM sys.key_constraints AS kc
+                                WHERE kc.parent_object_id = t.object_id
+                                  AND kc.type = 'PK')
+                    THEN 1 ELSE 0 END AS has_pk
+        FROM sys.tables AS t
+        WHERE t.is_ms_shipped = 0
+          AND t.temporal_type <> 1
+    ) AS table_check;
 
-    SET @MissingList = ISNULL(LEFT((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), s.name + '.' + t.name), ', ')
+    SET @MissingList = ISNULL(LEFT((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), s.name + '.' + t.name) COLLATE Latin1_General_CI_AS, ', ' COLLATE Latin1_General_CI_AS)
                                     FROM sys.tables AS t
                                     INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
                                     WHERE t.is_ms_shipped = 0

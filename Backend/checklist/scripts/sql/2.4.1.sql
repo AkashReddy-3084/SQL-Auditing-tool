@@ -31,7 +31,7 @@ BEGIN
     BEGIN TRY
         SET @Sql = N'
 SELECT @cnt = COUNT(*),
-       @lst = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), q.jobname), N'', ''), 400), N'''')
+       @lst = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), q.jobname) COLLATE Latin1_General_CI_AS, N'', '') COLLATE Latin1_General_CI_AS, 400), N'''')
 FROM (
     SELECT DISTINCT j.name AS jobname
     FROM msdb.dbo.sysjobsteps AS s
@@ -53,8 +53,8 @@ FROM (
     SELECT @UserDbs = COUNT(*),
            @MinLogDbs = ISNULL(SUM(CASE WHEN d.recovery_model_desc IN ('SIMPLE', 'BULK_LOGGED') THEN 1 ELSE 0 END), 0),
            @MinLogList = ISNULL(LEFT(STRING_AGG(CASE WHEN d.recovery_model_desc IN ('SIMPLE', 'BULK_LOGGED')
-                                  THEN CONVERT(NVARCHAR(MAX), d.name + ' [' + d.recovery_model_desc + ']')
-                                  END, ', '), 300), '')
+                                  THEN CONVERT(NVARCHAR(MAX), d.name + ' [' + d.recovery_model_desc + ']') COLLATE Latin1_General_CI_AS
+                                  END, ', ' COLLATE Latin1_General_CI_AS) COLLATE Latin1_General_CI_AS, 300), '')
     FROM sys.databases AS d
     WHERE d.database_id > 4 AND d.state = 0;
 

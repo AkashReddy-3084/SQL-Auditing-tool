@@ -17,6 +17,9 @@ DECLARE @Parts NVARCHAR(MAX) = '';
 DECLARE @Sql NVARCHAR(MAX) = '';
 DECLARE @Probe INT = 1;
 
+IF OBJECT_ID('tempdb..#Sens') IS NOT NULL DROP TABLE #Sens;
+IF OBJECT_ID('tempdb..#Prot') IS NOT NULL DROP TABLE #Prot;
+
 CREATE TABLE #Sens (object_id INT, column_id INT, sch SYSNAME, tbl SYSNAME, col SYSNAME);
 CREATE TABLE #Prot (object_id INT, column_id INT);
 
@@ -61,7 +64,7 @@ SELECT @Protected = COUNT(*)
 FROM #Sens AS s
 WHERE EXISTS (SELECT 1 FROM #Prot AS p WHERE p.object_id = s.object_id AND p.column_id = s.column_id);
 
-SELECT @Unprotected = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), s.sch + '.' + s.tbl + '.' + s.col), ', '), 350), '')
+SELECT @Unprotected = ISNULL(LEFT(STRING_AGG(CONVERT(NVARCHAR(MAX), s.sch + '.' + s.tbl + '.' + s.col) COLLATE Latin1_General_CI_AS, ', ' COLLATE Latin1_General_CI_AS), 350), '')
 FROM #Sens AS s
 WHERE NOT EXISTS (SELECT 1 FROM #Prot AS p WHERE p.object_id = s.object_id AND p.column_id = s.column_id);
 
@@ -69,7 +72,7 @@ SELECT @FormatChecks = COUNT(*)
 FROM sys.check_constraints AS cc
 WHERE EXISTS (SELECT 1 FROM #Sens AS s
               WHERE s.object_id = cc.parent_object_id
-                AND (s.column_id = cc.parent_column_id OR cc.definition LIKE '%' + s.col + '%'));
+                AND (s.column_id = cc.parent_column_id OR cc.definition COLLATE SQL_Latin1_General_CP1_CI_AS LIKE '%' + s.col + '%'));
 
 SET @SensCols = ISNULL(@SensCols, 0);
 SET @Protected = ISNULL(@Protected, 0);
@@ -99,3 +102,6 @@ END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;
+
+IF OBJECT_ID('tempdb..#Sens') IS NOT NULL DROP TABLE #Sens;
+IF OBJECT_ID('tempdb..#Prot') IS NOT NULL DROP TABLE #Prot;
