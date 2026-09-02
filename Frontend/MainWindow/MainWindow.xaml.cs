@@ -283,6 +283,9 @@ namespace SQLAuditor.Wpf
 
                 // Ensure checklist is loaded
                 System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
+                // Mirrors Auditor.CanTryMcp: a script-less admin or documentation check can never be
+                // decided by MCP, so it must not be offered as AI-MCP here either.
+                var operatorEvaluatedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
@@ -323,9 +326,17 @@ namespace SQLAuditor.Wpf
                                         }
                                     }
 
-                                    if ((!prop.Value.TryGetProperty("script_file", out var mappedScript)
-                                         || mappedScript.ValueKind == System.Text.Json.JsonValueKind.Null
-                                         || (mappedScript.ValueKind == System.Text.Json.JsonValueKind.String && string.IsNullOrWhiteSpace(mappedScript.GetString())))
+                                    var isOperatorEvaluated =
+                                        (prop.Value.TryGetProperty("IsAdminCheck", out var adminCheck)
+                                            && adminCheck.ValueKind == System.Text.Json.JsonValueKind.True)
+                                        || (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck)
+                                            && docCheck.ValueKind == System.Text.Json.JsonValueKind.True);
+                                    if (isOperatorEvaluated) operatorEvaluatedIds.Add(prop.Name);
+
+                                    if (!isOperatorEvaluated
+                                        && (!prop.Value.TryGetProperty("script_file", out var mappedScript)
+                                            || mappedScript.ValueKind == System.Text.Json.JsonValueKind.Null
+                                            || (mappedScript.ValueKind == System.Text.Json.JsonValueKind.String && string.IsNullOrWhiteSpace(mappedScript.GetString())))
                                         && prop.Value.TryGetProperty("MCP_Feasibility", out var mcpCheck)
                                         && mcpCheck.ValueKind == System.Text.Json.JsonValueKind.True)
                                     {
@@ -369,6 +380,7 @@ namespace SQLAuditor.Wpf
                             }
                             if (valid.Count > 0)
                             {
+                                // A mapped script wins: mirrors Auditor.IsScriptMapped.
                                 _itemTypeMap[it.Id] = "Script";
                                 _itemScriptMap[it.Id] = valid.ToArray();
                             }
@@ -1846,8 +1858,14 @@ namespace SQLAuditor.Wpf
                     continue;
                 }
 
+                var isDecided = string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase);
+
                 if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
-                    && !_copiedManualIds.Contains(item.Id))
+                    && !_copiedManualIds.Contains(item.Id)
+                    // A manual item the engine already decided (e.g. a result copied from a previous
+                    // run) carries a stored outcome, so it must not be reported as unanswered.
+                    && !isDecided)
                 {
                     ManualEvaluationState? manualState = null;
                     if (_manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out manualState) || manualState == null)

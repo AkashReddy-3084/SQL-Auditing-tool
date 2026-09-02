@@ -987,11 +987,10 @@ WHERE d.name = DB_NAME();";
                 return adminItems.Contains(item.Id);
             }
 
-            // Both documentation and admin checks go to AI-Manual. A documentation check has no script
-            // at all; an admin check keeps its script but the operator executes it, not the tool.
+            // A mapped script_file is authoritative: if a script exists the tool runs it, even for an
+            // admin check. IsAdminCheck/IsDocumentationCheck only steer items that have no script.
             bool IsScriptMapped(ChecklistItem item)
             {
-                if (IsDocumentationCheck(item) || IsAdminCheck(item)) return false;
                 return mapping.TryGetValue(item.Id, out var files) && files != null && files.Length > 0;
             }
 
