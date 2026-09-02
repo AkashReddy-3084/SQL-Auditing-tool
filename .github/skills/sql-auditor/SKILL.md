@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from Copilot CLI. Use when asked to audit/evaluate a SQL Server instance against the governance checklist. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "generate scripts for checklist ..." whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged.
 license: MIT
 allowed-tools: shell
 ---
@@ -16,6 +16,12 @@ or to supply any LLM configuration.
 
 All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper script
 `Backend/CLI/sql-auditor.ps1`, which locates or builds `SQLAuditor.exe` automatically.
+
+> **When to use this skill instead of the MCP skills.** `evaluate-checklist` and `generate-script`
+> only work when the `sql-auditor` MCP server is connected (VS Code). In Copilot CLI — or in any
+> session where those tools are missing — use this skill: it drives the **same** engine through the
+> wrapper script and needs no MCP server. Never tell the user the audit cannot run because the MCP
+> tools are unavailable; run the commands below instead.
 
 > **Always show the manual verification steps.** After running `evaluate`, your first
 > response must present the full Manual Verification Steps (objective, numbered steps, and

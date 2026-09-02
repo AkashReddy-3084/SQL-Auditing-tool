@@ -15,6 +15,13 @@ request.
 Use the **MCP tools**. Do **not** shell out to `Backend/CLI/sql-auditor.ps1` — that wrapper is for
 Copilot CLI and bypasses this flow.
 
+> **Host check — do this first.** This skill requires the `generate_scripts`,
+> `get_item_generation_prompt`, `validate_generated_script` and `save_generated_script` tools of the
+> `sql-auditor` MCP server. If they are **not** available in the session (you are running in
+> **GitHub Copilot CLI**, or the server has not been started in VS Code), do **not** stop: switch to
+> the `sql-auditor` skill (`.github/skills/sql-auditor/SKILL.md`) and use its `generate_scripts` /
+> `save_generated_script` commands through `Backend/CLI/sql-auditor.ps1`.
+
 > **Generation, not evaluation.** Never call `evaluate`, never ask for a SQL Server name, a
 > username or a password, and never run a generated script.
 

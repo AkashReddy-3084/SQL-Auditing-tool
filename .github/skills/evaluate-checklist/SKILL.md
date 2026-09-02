@@ -14,6 +14,14 @@ act as the reviewer for items the scripts could not decide.
 Use the **MCP tools**. Do **not** shell out to `Backend/CLI/sql-auditor.ps1` — that wrapper is for
 Copilot CLI and bypasses this flow.
 
+> **Host check — do this first.** This skill requires the `evaluate`, `enrich_result`,
+> `resolve_review`, `generate_report` and `show_reports` tools of the `sql-auditor` MCP server.
+> If they are **not** available in the session (you are running in **GitHub Copilot CLI**, or the
+> server has not been started in VS Code), do **not** stop and do **not** report the audit as
+> impossible: switch to the `sql-auditor` skill (`.github/skills/sql-auditor/SKILL.md`) and run the
+> same engine through `Backend/CLI/sql-auditor.ps1`. Only report a failure if that wrapper also
+> cannot run.
+
 > **Evaluation, not generation.** Never call `generate_scripts` or `save_generated_script` here.
 
 ## Trigger
