@@ -332,10 +332,62 @@
                                         <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
                                     </StackPanel>
                                 </Border>
+
+                                <!-- Custom Checklist card (right): read-only view of items already added, plus the entry point to the existing Add Configure Checklist modal. -->
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" VerticalAlignment="Top" Width="420" Margin="24,0,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Custom Checklist" FontSize="24" FontWeight="Bold" />
+                                        <TextBlock Text="View and manage custom checklist items." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" TextWrapping="Wrap" />
+
+                                        <Border Background="{StaticResource SurfaceBrush}"
+                                                BorderBrush="{StaticResource BorderBrushSoft}"
+                                                BorderThickness="1"
+                                                CornerRadius="12"
+                                                Padding="12"
+                                                MinHeight="220">
+                                            <Grid>
+                                                <TextBlock x:Name="CustomChecklistEmptyText"
+                                                           Text="No custom checklist items have been added yet."
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           TextWrapping="Wrap"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"
+                                                           TextAlignment="Center"
+                                                           Visibility="Collapsed" />
+                                                <ScrollViewer x:Name="CustomChecklistScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+                                                    <ItemsControl x:Name="CustomChecklistItems">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1" Padding="2,8">
+                                                                    <StackPanel>
+                                                                        <StackPanel Orientation="Horizontal">
+                                                                            <TextBlock Text="{Binding Id}" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" />
+                                                                            <TextBlock Text="{Binding SubAreaLabel}" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="8,1,0,0" TextTrimming="CharacterEllipsis" />
+                                                                        </StackPanel>
+                                                                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </ScrollViewer>
+                                            </Grid>
+                                        </Border>
+
+                                        <TextBlock x:Name="CustomChecklistStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <Button x:Name="AddCustomChecklistItemBtn"
+                                                Content="Add New Custom Checklist Item"
+                                                Style="{StaticResource ModernButton}"
+                                                Margin="0,18,0,0"
+                                                HorizontalAlignment="Left"
+                                                IsEnabled="False"
+                                                Click="ConfigureChecklistBtn_Click" />
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
 
-                            <!-- Only this button navigates to the Checklist page; enabled once SQL connection verifies. -->
-                            <Button x:Name="StartEvaluationBtn" Content="Configure Checklist" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
+                            <!-- Only this button navigates to the Checklist page; enabled once the SQL connection verifies. -->
+                            <Button x:Name="StartEvaluationBtn" Content="Continue to Checklist" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>

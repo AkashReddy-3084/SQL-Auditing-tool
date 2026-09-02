@@ -168,6 +168,10 @@ namespace SQLAuditor.Agents
             Directory.CreateDirectory(ps1Dir);
             Directory.CreateDirectory(resultsDir);
 
+            // Guarantees the default/custom split exists and the merged mapping is current
+            // before the existing registry is read back.
+            SQLAuditor.Lib.ChecklistConfigurationStore.EnsureInitialized();
+
             LoadExistingMapping();
 
 
@@ -821,28 +825,23 @@ namespace SQLAuditor.Agents
 
             // Write complete classification registry into the deterministic-script-mapping.json
             // All processed items are included; non-feasible items have script_file = null.
-            var mappingDict = new Dictionary<string, object>();
+            var mappingDict = new Dictionary<string, System.Text.Json.Nodes.JsonObject>();
 
             foreach (var entry in _classificationRegistry)
             {
-                mappingDict[entry.Key] = new
+                mappingDict[entry.Key] = new System.Text.Json.Nodes.JsonObject
                 {
-                    script_file = entry.Value.ScriptFile,
-                    scope = entry.Value.Scope,
-                    IsAdminCheck = entry.Value.IsAdminCheck,
-                    IsDocumentationCheck = entry.Value.IsDocumentationCheck,
-                    MCP_Feasibility = entry.Value.McpFeasibility
+                    ["script_file"] = entry.Value.ScriptFile,
+                    ["scope"] = entry.Value.Scope,
+                    ["IsAdminCheck"] = entry.Value.IsAdminCheck,
+                    ["IsDocumentationCheck"] = entry.Value.IsDocumentationCheck,
+                    ["MCP_Feasibility"] = entry.Value.McpFeasibility
                 };
             }
 
-            await File.WriteAllTextAsync(
-                _mappingPath,
-                JsonSerializer.Serialize(
-                    mappingDict,
-                    new JsonSerializerOptions
-                    {
-                        WriteIndented = true
-                    }));
+            // The store splits the snapshot into the default and custom mappings by ID ownership,
+            // then regenerates the merged deterministic-script-mapping.json this agent reads back.
+            SQLAuditor.Lib.ChecklistConfigurationStore.ApplyMappingSnapshot(mappingDict);
         }
 
 
