@@ -1532,11 +1532,11 @@ WHERE d.name = DB_NAME();";
             catch { }
 
             // Automatically produce the final Markdown summary report and the Excel workbook from
-            // the freshly written checklist_results.json, refreshing the historical manual results
-            // as part of that step. CLI/IDE pass generateReports: false and ask the user first.
+            // the freshly written checklist_results.json. The historical manual results are NOT
+            // refreshed here: that happens only when the user explicitly asks for the report.
             if (generateReports)
             {
-                GenerateReports();
+                GenerateReports(refreshHistoricalManualResults: false);
             }
 
             return enrichedResults;

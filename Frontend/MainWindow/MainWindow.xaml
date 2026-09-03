@@ -508,13 +508,12 @@
                                             <TextBlock x:Name="ManualStepsText" Text="" TextWrapping="Wrap" FontSize="14" LineHeight="22" />
                                         </ScrollViewer>
 
-                                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Input / Evidence" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
-                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="ManualOutputBox_TextChanged" />
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Provide your decision for the above manual item Pass/Fail along with reason text" TextWrapping="Wrap" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
+                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="ManualOutputBox_TextChanged"
+                                                 ToolTip="Start with Pass or Fail, then the reason. Example: Pass - topology document reviewed and all instances are listed." />
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
                                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Button x:Name="MarkPassedBtn" Content="Passed" Style="{StaticResource SuccessButton}" Width="110" Click="MarkPassedBtn_Click" Margin="0,0,10,0" />
-                                            <Button x:Name="MarkFailedBtn" Content="Failed" Style="{StaticResource DangerButton}" Width="110" Click="MarkFailedBtn_Click" Margin="0,0,10,0" />
                                             <Button x:Name="SubmitBtn" Content="Submit" Style="{StaticResource ModernButton}" Width="120" Click="SubmitBtn_Click" />
                                         </StackPanel>
                                     </Grid>

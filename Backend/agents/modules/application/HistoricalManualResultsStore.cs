@@ -13,8 +13,8 @@ namespace SQLAuditor.Lib;
 /// already made instead of asking them to verify the same control again.
 ///
 /// The file holds exactly the attributes <c>checklist_results.json</c> carries for those items,
-/// keyed by checklist ID. It is refreshed only when a report is generated, never after every
-/// evaluation, so it always reflects the last completed audit.
+/// keyed by checklist ID. It is refreshed only when the reviewer explicitly asks for the report,
+/// never by the report rendered automatically at the end of an evaluation.
 /// </summary>
 public static class HistoricalManualResultsStore
 {

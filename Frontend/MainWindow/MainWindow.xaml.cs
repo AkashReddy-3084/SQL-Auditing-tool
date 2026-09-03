@@ -824,15 +824,19 @@ namespace SQLAuditor.Wpf
             SaveCurrentManualDraft(false);
             var state = EnsureManualState(item.Id);
 
-            // The Passed/Failed selection is the reviewer's decision; words such as "pass"
-            // or "fail" inside their observations must never change it.
-            if (!string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
+            // The reviewer states the decision inside the evidence text, e.g. "Fail - no topology document".
+            var decision = ParseManualDecision(state.Remarks);
+            if (decision == null)
             {
-                MessageBox.Show("Select Passed or Failed before submitting.", "Manual Evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(
+                    "Start the input with your decision, 'Pass' or 'Fail', followed by the reason before submitting.",
+                    "Manual Evaluation",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
                 return;
             }
 
+            state.SelectedOutcome = decision;
             state.IsSubmitted = true;
             await PersistManualResultAsync(item, state);
 
@@ -846,32 +850,31 @@ namespace SQLAuditor.Wpf
             Log($"Submitted manual evaluation for {item.Id} as {state.SelectedOutcome}.");
         }
 
-        private async void MarkPassedBtn_Click(object sender, RoutedEventArgs e)
+        // Reads the leading Pass/Fail verdict from the reviewer's evidence text; falls back to an
+        // unambiguous verdict word elsewhere in the text.
+        private static string? ParseManualDecision(string? text)
         {
-            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            if (string.IsNullOrWhiteSpace(text)) return null;
+
+            var leading = System.Text.RegularExpressions.Regex.Match(
+                text,
+                @"^\s*(?<decision>pass(?:ed)?|fail(?:ed)?)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (leading.Success)
             {
-                _pendingUserInput.TrySetResult("PASS");
-                Log("Marked item as Passed (manual).");
-                AdvanceManualIndex();
-                return;
+                return leading.Groups["decision"].Value.StartsWith("p", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
             }
 
-            SaveCurrentManualDraft(false);
-            await SetManualOutcomeForCurrentItemAsync("Pass", persistImmediately: true);
-        }
-
-        private async void MarkFailedBtn_Click(object sender, RoutedEventArgs e)
-        {
-            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            var hasPass = System.Text.RegularExpressions.Regex.IsMatch(
+                text, @"\bpass(?:ed)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var hasFail = System.Text.RegularExpressions.Regex.IsMatch(
+                text, @"\bfail(?:ed|ure)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (hasPass ^ hasFail)
             {
-                _pendingUserInput.TrySetResult("FAIL");
-                Log("Marked item as Failed (manual).");
-                AdvanceManualIndex();
-                return;
+                return hasPass ? "Pass" : "Fail";
             }
 
-            SaveCurrentManualDraft(false);
-            await SetManualOutcomeForCurrentItemAsync("Fail", persistImmediately: true);
+            return null;
         }
 
         private void PrevManualBtn_Click(object sender, RoutedEventArgs e)
@@ -1624,47 +1627,6 @@ namespace SQLAuditor.Wpf
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
         }
 
-        private async Task SetManualOutcomeForCurrentItemAsync(string outcome, bool persistImmediately = false)
-        {
-            var item = GetCurrentManualItem();
-            if (item == null)
-            {
-                Log("No pending manual checklist item selected.");
-                return;
-            }
-
-            var state = EnsureManualState(item.Id);
-            var changed = !string.Equals(state.SelectedOutcome, outcome, StringComparison.OrdinalIgnoreCase);
-            state.SelectedOutcome = outcome;
-
-            if (persistImmediately)
-            {
-                state.IsSubmitted = true;
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
-                    RenderEvaluationTree();
-                }
-                await PersistManualResultAsync(item, state);
-                UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
-                Log($"Marked {item.Id} as {outcome}.");
-                return;
-            }
-
-            if (changed && state.IsSubmitted)
-            {
-                state.IsSubmitted = false;
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
-                    RenderEvaluationTree();
-                }
-            }
-
-            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
-            Log($"Selected {outcome} for {item.Id}. Click Submit to save.");
-        }
-
         private async Task PersistManualResultAsync(
             SQLAuditor.Lib.ChecklistItem item,
             ManualEvaluationState state,
@@ -1764,13 +1726,13 @@ namespace SQLAuditor.Wpf
 
         // Regenerates final_report.md and audit_report.xlsx from the current
         // checklist_results.json so both reports reflect re-applied manual decisions
-        // instead of the engine's placeholder write. Report generation is also when
-        // historical_last_run.json is refreshed with newly evaluated manual results.
-        private void RegenerateReportFromPersisted()
+        // instead of the engine's placeholder write. historical_last_run.json is refreshed
+        // only when the reviewer explicitly asks for the report.
+        private void RegenerateReportFromPersisted(bool refreshHistoricalManualResults = false)
         {
             try
             {
-                var message = SQLAuditor.Lib.Auditor.GenerateReports();
+                var message = SQLAuditor.Lib.Auditor.GenerateReports(refreshHistoricalManualResults);
                 if (!string.IsNullOrWhiteSpace(message)) Log(message.Replace(Environment.NewLine, " | "));
                 RefreshHistoricalManualAvailability();
             }
@@ -1779,22 +1741,14 @@ namespace SQLAuditor.Wpf
 
         private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)
         {
-            if (MarkPassedBtn == null || MarkFailedBtn == null || SubmitBtn == null || ManualOutputBox == null)
+            if (SubmitBtn == null || ManualOutputBox == null)
             {
                 return;
             }
 
             var isEnabled = IsCurrentManualReadyForInput();
-            MarkPassedBtn.IsEnabled = isEnabled;
-            MarkFailedBtn.IsEnabled = isEnabled;
             SubmitBtn.IsEnabled = isEnabled;
             ManualOutputBox.IsEnabled = isEnabled;
-
-            MarkPassedBtn.Opacity = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
-            MarkPassedBtn.BorderThickness = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
-
-            MarkFailedBtn.Opacity = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
-            MarkFailedBtn.BorderThickness = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
 
             SubmitBtn.Opacity = isSubmitted ? 1.0 : 0.85;
             SubmitBtn.BorderThickness = isSubmitted ? new Thickness(3) : new Thickness(1);
@@ -1878,7 +1832,7 @@ namespace SQLAuditor.Wpf
                     if (!string.Equals(manualState.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(manualState.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
                     {
-                        messages.Add($"{item.Id}: choose Passed or Failed.");
+                        messages.Add($"{item.Id}: enter Pass or Fail with the reason and submit.");
                         continue;
                     }
 
@@ -2990,7 +2944,7 @@ namespace SQLAuditor.Wpf
                 // the report produced automatically at the end of an assessment.
                 try
                 {
-                    RegenerateReportFromPersisted();
+                    RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
                     Log($"Rendered reports saved to {AuditOutputPaths.CurrentRunDirectory}");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
@@ -3054,7 +3008,7 @@ namespace SQLAuditor.Wpf
 
                 WriteManualChecksCsv(dialog.FileName, manualChecks);
                 var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
-                RegenerateReportFromPersisted();
+                RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
 
                 var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
                 UpdateSummaryView(results);
