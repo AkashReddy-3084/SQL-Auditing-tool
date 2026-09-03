@@ -1153,6 +1153,13 @@ WHERE d.name = DB_NAME();";
                     }
                 }
 
+                // Without this the only trace of a dead provider is enrichment_diagnostics.log,
+                // and the report silently ships with blank Finding/Evidence/Recommendation.
+                if (scriptOutcome.HasStructuredResult && ai == null)
+                {
+                    LogDiagnostic($"[{it.Id}] AI enrichment unavailable - Finding/Evidence/Recommendation/Risk Impact left empty (see enrichment_diagnostics.log).");
+                }
+
                 var finding = !string.IsNullOrWhiteSpace(ai?.Finding)
                     ? ai!.Finding!
                     : (scriptOutcome.Finding ?? string.Empty);

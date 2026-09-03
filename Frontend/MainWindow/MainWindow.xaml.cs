@@ -90,8 +90,6 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
         private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
         private System.Collections.Generic.HashSet<string> _mcpFeasibleItemIds = new(StringComparer.OrdinalIgnoreCase);
-        // Documentation/admin checks stay manual even when a script is mapped (mirrors Auditor.IsScriptMapped).
-        private System.Collections.Generic.HashSet<string> _manualOnlyItemIds = new(StringComparer.OrdinalIgnoreCase);
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
         private int _manualIndex = -1;
         // Checklist position per item id, so manual items generated in parallel stay in order.
@@ -289,7 +287,6 @@ namespace SQLAuditor.Wpf
                 // Mirrors Auditor.CanTryMcp: a script-less admin or documentation check can never be
                 // decided by MCP, so it must not be offered as AI-MCP here either.
                 _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                _manualOnlyItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 string? mappingRoot = null;
                 try
                 {
@@ -334,7 +331,6 @@ namespace SQLAuditor.Wpf
                                             && adminCheck.ValueKind == System.Text.Json.JsonValueKind.True)
                                         || (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck)
                                             && docCheck.ValueKind == System.Text.Json.JsonValueKind.True);
-                                    if (isOperatorEvaluated) _manualOnlyItemIds.Add(prop.Name);
 
                                     if (!isOperatorEvaluated
                                         && (!prop.Value.TryGetProperty("script_file", out var mappedScript)
@@ -363,9 +359,6 @@ namespace SQLAuditor.Wpf
                 {
                     foreach (var it in _loadedItems)
                     {
-                        // Admin/documentation checks keep their script but are executed by the operator.
-                        if (_manualOnlyItemIds.Contains(it.Id)) continue;
-
                         if (mappingFile.TryGetValue(it.Id, out var files) && files != null && files.Length > 0)
                         {
                             var valid = new System.Collections.Generic.List<string>();
@@ -1947,7 +1940,6 @@ namespace SQLAuditor.Wpf
             _itemTypeMap = null;
             _itemScriptMap = null;
             _mcpFeasibleItemIds.Clear();
-            _manualOnlyItemIds.Clear();
             _selectedIds = null;
             _evalItemMap = null;
             _evalStatusMap = null;
@@ -2342,6 +2334,26 @@ namespace SQLAuditor.Wpf
         {
             var targetDatabases = GetSelectedDatabaseNames();
             if (!_isVerified || targetDatabases.Length == 0) return;
+
+            // A run without a verified provider still produces valid Outcome/Score from SQL, but no
+            // Finding/Evidence/Recommendation/RiskImpact, so say so before the report is written.
+            if (!_isLlmVerified)
+            {
+                var proceed = MessageBox.Show(
+                    this,
+                    "The LLM provider is not verified.\n\n"
+                    + "Script items will still be evaluated and scored from SQL, but they will carry no "
+                    + "Finding, Evidence, Recommendation or Risk Impact, AI-MCP will be unavailable, and "
+                    + "manual guidance cannot be generated.\n\n"
+                    + "Verify the provider on the Login page for a complete report.\n\n"
+                    + "Continue anyway?",
+                    "LLM provider not verified",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (proceed != MessageBoxResult.Yes) return;
+                Log("WARNING: starting evaluation without a verified LLM provider - script items will have no Finding/Evidence/Recommendation/Risk Impact.");
+            }
 
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();

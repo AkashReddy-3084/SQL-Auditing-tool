@@ -36,7 +36,9 @@ public sealed class CustomChecklistPipeline
             ProviderConfig.BaseUrl,
             ProviderConfig.ApiKey,
             ProviderConfig.Model,
-            CustomChecklistSkill.PromptsDirectory,
+            // Script generation reuses the generate_scripts templates; only the guardrail,
+            // match and classify prompts belong to this module.
+            ScriptGenerationSkill.ResolvePromptsDir(),
             (int)ProviderConfig.Timeout.TotalSeconds,
             maxRetries: 3);
     }
