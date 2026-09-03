@@ -146,6 +146,7 @@ namespace SQLAuditor.Wpf
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
             RefreshHistoricalManualAvailability();
+            RefreshCustomChecklistCard();
             LoadChecklistBtn.IsEnabled = true;
             Log("Opened on Login view.");
             UpdateStageIndicators();
@@ -2401,10 +2402,111 @@ namespace SQLAuditor.Wpf
 
         private void UpdateStartEvaluationEnabled()
         {
+            var ready = _isVerified && GetSelectedDatabaseNames().Length > 0;
+
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = _isVerified && GetSelectedDatabaseNames().Length > 0;
+                StartEvaluationBtn.IsEnabled = ready;
             }
+
+            // Configuring a custom checklist runs guardrails, classification and script
+            // generation through the LLM provider, so it also needs a verified provider.
+            if (AddCustomChecklistItemBtn != null)
+            {
+                AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified;
+            }
+        }
+
+        // Read-only row shown in the Custom Checklist card.
+        private sealed class CustomChecklistCardItem
+        {
+            public string Id { get; init; } = "";
+            public string Title { get; init; } = "";
+            public string SubAreaLabel { get; init; } = "";
+        }
+
+        // Renders the custom items already present in custom-checklist.json, via the same
+        // configuration store the rest of the feature uses. Informational only.
+        private void RefreshCustomChecklistCard()
+        {
+            try
+            {
+                var items = SQLAuditor.Lib.ChecklistConfigurationStore.GetCatalog()
+                    .Where(i => i.IsCustom)
+                    .OrderBy(i => i.Id, System.Collections.Generic.Comparer<string>.Create(
+                        SQLAuditor.Lib.ChecklistConfigurationStore.CompareIds))
+                    .Select(i => new CustomChecklistCardItem
+                    {
+                        Id = i.Id,
+                        Title = string.IsNullOrWhiteSpace(i.Title) ? i.Text : i.Title,
+                        SubAreaLabel = string.IsNullOrWhiteSpace(i.SubAreaTitle)
+                            ? i.SubAreaId
+                            : $"{i.SubAreaId} · {i.SubAreaTitle}"
+                    })
+                    .ToList();
+
+                CustomChecklistItems.ItemsSource = items;
+
+                var hasItems = items.Count > 0;
+                CustomChecklistScroll.Visibility = hasItems ? Visibility.Visible : Visibility.Collapsed;
+                CustomChecklistEmptyText.Visibility = hasItems ? Visibility.Collapsed : Visibility.Visible;
+                CustomChecklistStatus.Text = hasItems
+                    ? $"{items.Count} custom checklist item(s) configured."
+                    : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                CustomChecklistItems.ItemsSource = null;
+                CustomChecklistScroll.Visibility = Visibility.Collapsed;
+                CustomChecklistEmptyText.Visibility = Visibility.Visible;
+                CustomChecklistStatus.Text = "Could not load custom checklist items: " + ex.Message;
+            }
+        }
+
+        // Opens the Add Configure Checklist page, then the Custom Checklist Progress page, and
+        // finally lands on the existing Checklist page with default + custom items available.
+        private async void ConfigureChecklistBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var editor = new ConfigureChecklistWindow { Owner = this };
+            if (editor.ShowDialog() != true || editor.Requests.Count == 0) return;
+
+            Log($"Configuring {editor.Requests.Count} custom checklist item(s)...");
+
+            var progressWindow = new CustomChecklistProgressWindow(editor.Requests) { Owner = this };
+            progressWindow.Start();
+            progressWindow.ShowDialog();
+
+            var result = progressWindow.Result;
+            if (result != null)
+            {
+                foreach (var outcome in result.Outcomes)
+                {
+                    Log(outcome.IsAdded
+                        ? $"Custom checklist {outcome.AssignedId} added under {outcome.SubAreaId} ({outcome.SubAreaTitle})."
+                        : $"Custom checklist '{outcome.Title}' not added — {outcome.Status}: {outcome.Detail}");
+                }
+            }
+            else
+            {
+                Log("Custom checklist configuration was cancelled.");
+            }
+
+            RefreshCustomChecklistCard();
+
+            // Land on the Checklist page so both default and custom items can be selected.
+            _auditor?.EnsureLlmEvaluators();
+            SetTabIndex(1);
+            LoadChecklistBtn.IsEnabled = true;
+            try
+            {
+                await PopulateChecklistStructureAsync();
+                Log("Checklist reloaded with the merged default + custom configuration.");
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to reload the checklist: " + ex.Message);
+            }
+            UpdateStageIndicators();
         }
 
         private void Send_Click(object sender, RoutedEventArgs e)

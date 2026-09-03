@@ -406,47 +406,18 @@ public static class ScriptGenerationSkill
     private static void UpsertMapping(
         string basePath, string checklistId, string? scriptFile, ScriptGenerationResponse response)
     {
-        var mappingPath = Path.Combine(basePath, "checklist", "deterministic-script-mapping.json");
-
-        var mapping = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
-        if (File.Exists(mappingPath))
-        {
-            try
-            {
-                var existing = File.ReadAllText(mappingPath);
-                if (!string.IsNullOrWhiteSpace(existing))
-                    mapping = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(existing)
-                              ?? new(StringComparer.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                // Keep going with an empty map if the file cannot be read.
-            }
-        }
-
-        var merged = new Dictionary<string, object?>();
-        foreach (var kv in mapping)
-        {
-            if (string.Equals(kv.Key, checklistId, StringComparison.OrdinalIgnoreCase))
-                continue;
-            merged[kv.Key] = kv.Value;
-        }
-
-        merged[checklistId] = new
-        {
-            script_file = scriptFile,
-            scope = response.Scope,
-            IsAdminCheck = response.IsAdminCheck,
-            IsDocumentationCheck = response.IsDocumentationCheck,
-            MCP_Feasibility = response.McpFeasibility
-        };
-
-        File.WriteAllText(
-            mappingPath,
-            JsonSerializer.Serialize(merged, new JsonSerializerOptions { WriteIndented = true }));
+        // Routed through the configuration store so the entry lands in the default or the custom
+        // mapping according to who owns the ID, and the merged runtime mapping is regenerated.
+        ChecklistConfigurationStore.UpsertMappingEntry(
+            checklistId,
+            scriptFile,
+            response.Scope,
+            response.IsAdminCheck,
+            response.IsDocumentationCheck,
+            response.McpFeasibility);
     }
 
-    private static async Task UpsertExecutionResultAsync(string resultsDir, ExecutionResultEntry entry)
+    internal static async Task UpsertExecutionResultAsync(string resultsDir, ExecutionResultEntry entry)
     {
         var resultsPath = Path.Combine(resultsDir, "execution-results.json");
 

@@ -46,6 +46,17 @@ namespace SQLAuditor
                 return await RunSaveGeneratedScriptCommandAsync(args);
             }
 
+            // Add a CUSTOM checklist item under an existing Area/Sub-area (NOT evaluation).
+            // Copilot CLI is the AI: this surfaces the guardrail, semantic-match and classification
+            // prompts, reserves the ID, serves the script generation prompt, and only writes to the
+            // custom configuration once the user approves.
+            if (args.Length > 0 &&
+                (string.Equals(args[0], "configure_checklist", StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(args[0], "configure-checklist", StringComparison.OrdinalIgnoreCase)))
+            {
+                return await RunConfigureChecklistCommandAsync(args);
+            }
+
             // Print a previously-generated report (summary Markdown or raw JSON).
             if (args.Length > 0 && (string.Equals(args[0], "show_reports", StringComparison.OrdinalIgnoreCase) || args.Contains("--show-reports")))
             {
@@ -938,6 +949,166 @@ namespace SQLAuditor
                 Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
                 return 3;
             }
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `configure_checklist` subcommand
+        // Configure Checklist -> Guardrails -> Semantic Match Router -> Area/Sub-area
+        // Classification -> Script Generation -> User Review/Approval -> Save Custom Checklist +
+        // Mapping -> Update Final Merged Configuration.
+        // Copilot CLI performs the three reviews from the prompts this command serves; the command
+        // itself makes no LLM calls and never connects to a SQL Server.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunConfigureChecklistCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                PrintConfigureChecklistUsage();
+                return 0;
+            }
+
+            var hints = new SQLAuditor.Lib.CustomChecklistInvocationHints
+            {
+                Classify = "run: sqlauditor configure_checklist --title \"<title>\" --description \"<description>\" "
+                         + "--guardrail accept --match none --sub-area <existing sub-area id> --rationale \"<why>\"",
+                Generate = "run: sqlauditor configure_checklist --id <id> --response-file <path-to-raw-response-file>",
+                Review = "run: sqlauditor configure_checklist --id <id> --response-file <path> --validation-file <path-to-verdict-file>",
+                Approve = "After the user approves, run: sqlauditor configure_checklist --id <id> --approve",
+                Reject = "run: sqlauditor configure_checklist --id <id> --reject"
+            };
+
+            try
+            {
+                if (opts.ContainsKey("list-sub-areas") || opts.ContainsKey("sub-areas"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.ListSubAreas());
+                    return 0;
+                }
+
+                if (opts.ContainsKey("list") || opts.ContainsKey("pending"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.ListPending());
+                    return 0;
+                }
+
+                var id = GetOption(opts, "id");
+
+                if (!string.IsNullOrWhiteSpace(id) && opts.ContainsKey("reject"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.Reject(id));
+                    return 0;
+                }
+
+                if (!string.IsNullOrWhiteSpace(id) && opts.ContainsKey("approve"))
+                {
+                    var approved = await SQLAuditor.Lib.CustomChecklistHostFlow.ApproveAsync(id);
+                    Console.WriteLine(approved);
+                    return approved.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    var response = GetOption(opts, "response");
+                    var responseFile = GetOption(opts, "response-file") ?? GetOption(opts, "responsefile");
+                    if (string.IsNullOrWhiteSpace(response) && !string.IsNullOrWhiteSpace(responseFile))
+                    {
+                        if (!File.Exists(responseFile))
+                        {
+                            Console.Error.WriteLine($"Error: --response-file not found: {responseFile}");
+                            return 2;
+                        }
+                        response = await File.ReadAllTextAsync(responseFile);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(response))
+                    {
+                        Console.Error.WriteLine(
+                            "Error: supply the generated script via --response-file <path> or --response \"<text>\", "
+                            + "or use --approve / --reject to finish the item.");
+                        return 2;
+                    }
+
+                    var verdict = GetOption(opts, "validation");
+                    var verdictFile = GetOption(opts, "validation-file") ?? GetOption(opts, "validationfile");
+                    if (string.IsNullOrWhiteSpace(verdict) && !string.IsNullOrWhiteSpace(verdictFile))
+                    {
+                        if (!File.Exists(verdictFile))
+                        {
+                            Console.Error.WriteLine($"Error: --validation-file not found: {verdictFile}");
+                            return 2;
+                        }
+                        verdict = await File.ReadAllTextAsync(verdictFile);
+                    }
+
+                    var generated = SQLAuditor.Lib.CustomChecklistHostFlow.Generate(id, response, verdict, hints);
+                    Console.WriteLine(generated);
+                    return generated.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION FAILED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION REJECTED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION VERDICT NOT RECOGNISED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("CORRECTED SCRIPT STILL INVALID", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                var title = GetOption(opts, "title");
+                var description = GetOption(opts, "description") ?? GetOption(opts, "desc");
+
+                if (opts.ContainsKey("guardrail") || opts.ContainsKey("sub-area") || opts.ContainsKey("subarea"))
+                {
+                    var classified = SQLAuditor.Lib.CustomChecklistHostFlow.Classify(
+                        title,
+                        description,
+                        GetOption(opts, "guardrail"),
+                        GetOption(opts, "guardrail-reason"),
+                        GetOption(opts, "match") ?? GetOption(opts, "matched-id"),
+                        GetOption(opts, "match-reason"),
+                        GetOption(opts, "sub-area") ?? GetOption(opts, "subarea"),
+                        GetOption(opts, "rationale"),
+                        hints);
+                    Console.WriteLine(classified);
+                    return classified.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.Begin(title, description, hints));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
+                return 3;
+            }
+        }
+
+        static void PrintConfigureChecklistUsage()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Usage: sqlauditor configure_checklist [options]");
+            Console.WriteLine();
+            Console.WriteLine("Adds a CUSTOM checklist item under an EXISTING Area/Sub-area. The default checklist");
+            Console.WriteLine("and the default mapping are never modified. New Areas/Sub-areas are not supported.");
+            Console.WriteLine();
+            Console.WriteLine("Flow (one command per step):");
+            Console.WriteLine("  1) --title \"<t>\" --description \"<d>\"");
+            Console.WriteLine("       Pre-screens the request and returns the guardrails, semantic-match and");
+            Console.WriteLine("       classification prompts for you (the AI) to review.");
+            Console.WriteLine("  2) --title \"<t>\" --description \"<d>\" --guardrail <accept|reject>");
+            Console.WriteLine("       [--guardrail-reason \"<why>\"] --match <existing id|none> [--match-reason \"<why>\"]");
+            Console.WriteLine("       --sub-area <id> [--rationale \"<why>\"]");
+            Console.WriteLine("       Records the verdicts, assigns the next free checklist ID inside the Sub-area,");
+            Console.WriteLine("       and returns the script generation prompt.");
+            Console.WriteLine("  3) --id <id> --response-file <path> [--validation-file <path>]");
+            Console.WriteLine("       Runs the format gate, then the C1-C7 review, and holds the script for approval.");
+            Console.WriteLine("  4) --id <id> --approve      Saves the item + mapping and merges the final config.");
+            Console.WriteLine("     --id <id> --reject       Releases the reserved ID; nothing is written.");
+            Console.WriteLine();
+            Console.WriteLine("Other options:");
+            Console.WriteLine("  --list-sub-areas    Print every Area/Sub-area a custom item may be filed under.");
+            Console.WriteLine("  --list              Print the drafts reserved but not yet approved.");
+            Console.WriteLine("  --help              Show this help.");
+            Console.WriteLine();
+            Console.WriteLine("The CLI performs no LLM calls: Copilot CLI is the AI layer. This command never");
+            Console.WriteLine("connects to a SQL Server and never asks for credentials.");
         }
 
         // ---------------------------------------------------------------------

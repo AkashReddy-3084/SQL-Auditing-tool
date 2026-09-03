@@ -701,6 +701,64 @@ public static class AuditTools
         }
     }
 
+    [McpServerTool(Name = "configure_checklist")]
+    [Description("CONFIGURE the checklist by adding a CUSTOM checklist item under an EXISTING Area/Sub-area. This is NOT evaluation and NOT script generation for an existing item: never call 'evaluate', never connect to a SQL Server and never ask for credentials. The tool is a state machine driven by the arguments you supply, and YOU are the AI layer for its three reviews. STEP 1 — call with 'title' and 'description' (ask the user for both; never ask for an Area, Sub-area or ID): it pre-screens the request and returns the canonical guardrails, semantic-match-router and Area/Sub-area classification prompts. Perform those three reviews in order using ONLY those prompts. STEP 2 — call again with the same title/description plus guardrail='accept', match='<matched id>' or 'none', subArea='<existing sub-area id>' and rationale: it assigns the next free checklist ID inside that Sub-area (reserved only) and returns the script generation prompt. STEP 3 — author the script, then call with id and response (and validationVerdict on the second pass) to run the format gate and the C1-C7 review; the script is held, not saved. STEP 4 — show the script to the user and call with id and approve=true only after they approve, or reject=true if they do not. Nothing is written to custom-checklist.json or custom-deterministic-script-mapping.json until approval, and the default checklist and default mapping are never modified.")]
+    public static async Task<string> ConfigureChecklistAsync(
+        [Description("STEP 1: the Custom Checklist Title supplied by the user. Required for steps 1 and 2.")] string? title = null,
+        [Description("STEP 1: the user's description of the checklist item — what must be true for it to pass. Required for steps 1 and 2.")] string? description = null,
+        [Description("STEP 2: your guardrails verdict — 'accept' or 'reject'. Take it from the guardrails review returned by step 1.")] string? guardrail = null,
+        [Description("STEP 2: the reason from your guardrails review; shown to the user when the verdict is 'reject'.")] string? guardrailReason = null,
+        [Description("STEP 2: your semantic-match verdict — the EXISTING checklist ID this request duplicates, or 'none' when it is genuinely new. Must be one of the candidate IDs shown in step 1.")] string? match = null,
+        [Description("STEP 2: the reason from your semantic-match review.")] string? matchReason = null,
+        [Description("STEP 2: the EXISTING Sub-area ID chosen by your classification review, e.g. '1.1'. New Areas/Sub-areas are not supported.")] string? subArea = null,
+        [Description("STEP 2: one sentence on why that Sub-area is the right home.")] string? rationale = null,
+        [Description("STEP 3/4: the reserved custom checklist ID returned by step 2, e.g. '1.1.8'.")] string? id = null,
+        [Description("STEP 3: the COMPLETE raw generator output for the reserved item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string? response = null,
+        [Description("STEP 3: the verdict from the C1-C7 review, in the validation template's response format. Omit on the first call to receive the validation prompt.")] string? validationVerdict = null,
+        [Description("STEP 4: set to true ONLY after the user has seen the generated script and approved it. Saves the item, its mapping and the merged configuration.")] bool approve = false,
+        [Description("STEP 4: set to true when the user rejects the item. Releases the reserved ID and writes nothing.")] bool reject = false,
+        [Description("Set to true to list the Areas/Sub-areas a custom item may be filed under, without changing anything.")] bool listSubAreas = false,
+        [Description("Set to true to list the drafts that are reserved but not yet approved.")] bool listPending = false,
+        CancellationToken cancellationToken = default)
+    {
+        var hints = new CustomChecklistInvocationHints
+        {
+            Classify = "call configure_checklist(title=\"<same title>\", description=\"<same description>\", "
+                     + "guardrail=\"accept\", match=\"none\", subArea=\"<existing sub-area id>\", rationale=\"<why>\")",
+            Generate = "call configure_checklist(id=\"<reserved id>\", response=\"<full raw generator output>\")",
+            Review = "call configure_checklist(id=\"<reserved id>\", response=\"<same full raw output>\", validationVerdict=\"<your VERDICT block>\")",
+            Approve = "Show the script to the user and ask whether to add this checklist item. "
+                    + "If yes: call configure_checklist(id=\"<reserved id>\", approve=true). "
+                    + "If no: call configure_checklist(id=\"<reserved id>\", reject=true).",
+            Reject = "call configure_checklist(id=\"<reserved id>\", reject=true)"
+        };
+
+        // Custom-checklist writes touch the same read-modify-write files as script saves.
+        await SaveGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (listSubAreas) return CustomChecklistHostFlow.ListSubAreas();
+            if (listPending) return CustomChecklistHostFlow.ListPending();
+
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                if (reject) return CustomChecklistHostFlow.Reject(id);
+                if (approve) return await CustomChecklistHostFlow.ApproveAsync(id, cancellationToken);
+                return CustomChecklistHostFlow.Generate(id, response, validationVerdict, hints);
+            }
+
+            if (!string.IsNullOrWhiteSpace(guardrail) || !string.IsNullOrWhiteSpace(subArea))
+                return CustomChecklistHostFlow.Classify(
+                    title, description, guardrail, guardrailReason, match, matchReason, subArea, rationale, hints);
+
+            return CustomChecklistHostFlow.Begin(title, description, hints);
+        }
+        finally
+        {
+            SaveGate.Release();
+        }
+    }
+
     [McpServerTool(Name = "show_reports")]
     [Description("Return the most recently generated audit output from the latest timestamp-and-server run directory: 'summary' for final_report.md (default) or 'json' for checklist_results.json.")]
     public static Task<string> ShowReportsAsync(
@@ -840,4 +898,22 @@ public static class AuditPrompts
       + "yourself, following the generator system prompt the tool returns. "
       + "Scripts and mapping entries for IDs that already have one are overwritten, so never skip an item because "
       + "a script already exists.";
+
+    [McpServerPrompt(Name = "configure_checklist")]
+    [Description("Add a custom checklist item under an existing Area/Sub-area using the sql-auditor MCP tools (not evaluation).")]
+    public static string ConfigureChecklist() =>
+        "Configure the SQL Auditor checklist by adding a CUSTOM checklist item, using the 'configure_checklist' "
+      + "MCP tool. This is configuration only — do not call 'evaluate', do not connect to a SQL Server and do not "
+      + "ask for a server name or credentials. "
+      + "Ask me for exactly two things: the Custom Checklist Title and a description of the checklist item. "
+      + "Never ask me for an Area, a Sub-area or a checklist ID — the tool and your classification review decide "
+      + "those. Then call configure_checklist(title=..., description=...) and follow its state machine: perform the "
+      + "guardrails, semantic-match-router and Area/Sub-area classification reviews using ONLY the prompts it "
+      + "returns, then call it again with your three verdicts to get the assigned ID and the script generation "
+      + "prompt. Write the script, submit it for the format gate and the C1-C7 review, then SHOW ME the generated "
+      + "script and ask whether to add the item. Call the tool with approve=true only after I say yes, or "
+      + "reject=true if I say no. "
+      + "Report each stage clearly: guardrail rejection, duplicate/matched checklist item, the assigned "
+      + "Area/Sub-area, the generated checklist ID, the script generation and validation status, my approval or "
+      + "rejection, and the final merged configuration update.";
 }
