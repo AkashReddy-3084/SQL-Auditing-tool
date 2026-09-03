@@ -7,7 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Backend\core\SQLAuditor.Lib.csproj" />
+    <ProjectReference Include="..\..\Backend\Application\core\SQLAuditor.Lib.csproj" />
   </ItemGroup>
 
 </Project>

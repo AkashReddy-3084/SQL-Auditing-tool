@@ -25,7 +25,7 @@ Follow the repository skill `.github/skills/evaluate-checklist/SKILL.md` exactly
    name** and **never ask for a password in chat** — for SQL Login the tool needs only the
    username; the password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched
    VS Code.
-4. Use the MCP tools, not `tools/sql-auditor.ps1` and not file-editing tools.
+4. Use the MCP tools, not `Backend/CLI/sql-auditor.ps1` and not file-editing tools.
 5. This server makes **no LLM calls — you are the AI layer.** For every item in the
    `=== COPILOT ENRICHMENT REQUIRED ===` block, author `finding`, `evidence`, `riskImpact` and
    `recommendation` from the `Script result` shown there and record them with `enrich_result`.

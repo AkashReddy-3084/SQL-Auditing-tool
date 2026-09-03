@@ -90,6 +90,8 @@ namespace SQLAuditor.Wpf
         private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
         private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
         private System.Collections.Generic.HashSet<string> _mcpFeasibleItemIds = new(StringComparer.OrdinalIgnoreCase);
+        // Documentation/admin checks stay manual even when a script is mapped (mirrors Auditor.IsScriptMapped).
+        private System.Collections.Generic.HashSet<string> _manualOnlyItemIds = new(StringComparer.OrdinalIgnoreCase);
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
         private int _manualIndex = -1;
         // Checklist position per item id, so manual items generated in parallel stay in order.
@@ -286,18 +288,18 @@ namespace SQLAuditor.Wpf
                 System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
                 // Mirrors Auditor.CanTryMcp: a script-less admin or documentation check can never be
                 // decided by MCP, so it must not be offered as AI-MCP here either.
-                var operatorEvaluatedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _manualOnlyItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                string? mappingRoot = null;
                 try
                 {
                     var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
-                    string? root = null;
                     while (dir != null)
                     {
-                        var candidate = Path.Combine(dir.FullName, "Backend", "checklist", "deterministic-script-mapping.json");
+                        var candidate = Path.Combine(dir.FullName, "Backend", "checklists", "deterministic-script-mapping.json");
                         if (File.Exists(candidate))
                         {
-                            root = dir.FullName;
+                            mappingRoot = dir.FullName;
                             using var mapDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(candidate));
                             foreach (var prop in mapDoc.RootElement.EnumerateObject())
                             {
@@ -332,7 +334,7 @@ namespace SQLAuditor.Wpf
                                             && adminCheck.ValueKind == System.Text.Json.JsonValueKind.True)
                                         || (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck)
                                             && docCheck.ValueKind == System.Text.Json.JsonValueKind.True);
-                                    if (isOperatorEvaluated) operatorEvaluatedIds.Add(prop.Name);
+                                    if (isOperatorEvaluated) _manualOnlyItemIds.Add(prop.Name);
 
                                     if (!isOperatorEvaluated
                                         && (!prop.Value.TryGetProperty("script_file", out var mappedScript)
@@ -361,6 +363,9 @@ namespace SQLAuditor.Wpf
                 {
                     foreach (var it in _loadedItems)
                     {
+                        // Admin/documentation checks keep their script but are executed by the operator.
+                        if (_manualOnlyItemIds.Contains(it.Id)) continue;
+
                         if (mappingFile.TryGetValue(it.Id, out var files) && files != null && files.Length > 0)
                         {
                             var valid = new System.Collections.Generic.List<string>();
@@ -369,7 +374,7 @@ namespace SQLAuditor.Wpf
                                 try
                                 {
                                     var candidate = f;
-                                    if (!Path.IsPathRooted(candidate)) candidate = Path.Combine(Directory.GetCurrentDirectory(), candidate.Replace('/', Path.DirectorySeparatorChar));
+                                    if (!Path.IsPathRooted(candidate)) candidate = Path.Combine(mappingRoot ?? Directory.GetCurrentDirectory(), candidate.Replace('/', Path.DirectorySeparatorChar));
                                     if (!File.Exists(candidate)) continue;
                                     // ignore auto-generated placeholders
                                     var txt = File.ReadAllText(candidate);
@@ -1941,6 +1946,8 @@ namespace SQLAuditor.Wpf
             _loadedStructure = null;
             _itemTypeMap = null;
             _itemScriptMap = null;
+            _mcpFeasibleItemIds.Clear();
+            _manualOnlyItemIds.Clear();
             _selectedIds = null;
             _evalItemMap = null;
             _evalStatusMap = null;
@@ -2616,7 +2623,7 @@ namespace SQLAuditor.Wpf
                 var repoRoot = FindRepoRootFromCwd();
                 if (repoRoot == null)
                 {
-                    MessageBox.Show(this, "Cannot locate the repository root (Backend/checklist not found).", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show(this, "Cannot locate the repository root (Backend/checklists not found).", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
                     return;
                 }
                 var basePath = System.IO.Path.Combine(repoRoot, "Backend");
@@ -2637,7 +2644,7 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var promptsDir = System.IO.Path.Combine(basePath, "agents", "prompts");
+                var promptsDir = System.IO.Path.Combine(basePath, "Modules", "generate_scripts", "prompts");
                 if (!System.IO.Directory.Exists(promptsDir))
                 {
                     MessageBox.Show(this, $"Prompts directory not found: {promptsDir}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -2735,9 +2742,9 @@ namespace SQLAuditor.Wpf
             var dir = new System.IO.DirectoryInfo(System.IO.Directory.GetCurrentDirectory());
             while (dir != null)
             {
-                var candidate = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master-checklist.json");
+                var candidate = System.IO.Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.json");
                 if (System.IO.File.Exists(candidate)) return dir.FullName;
-                var alt = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master_checklist.json");
+                var alt = System.IO.Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.json");
                 if (System.IO.File.Exists(alt)) return dir.FullName;
                 dir = dir.Parent;
             }

@@ -1,0 +1,1724 @@
+{
+  "generated": "2026-09-03T07:00:12.7447277Z",
+  "source": "02-audit-checklist.md",
+  "areas": [
+    {
+      "id": "1",
+      "title": "Architecture & Design (Weight: 8%)",
+      "sub_areas": [
+        {
+          "id": "1.1",
+          "title": "Solution & Deployment Architecture",
+          "items": [
+            {
+              "id": "1.1.1",
+              "text": "Deployment model is deliberate and documented (SQL Server / Azure SQL MI / Azure SQL DB) with rationale"
+            },
+            {
+              "id": "1.1.2",
+              "text": "Environment separation exists (Dev / Test / Prod) with isolated instances or databases"
+            },
+            {
+              "id": "1.1.3",
+              "text": "Server/database topology documented (instances, databases, elastic pools)"
+            },
+            {
+              "id": "1.1.4",
+              "text": "Compute tier / service tier appropriate for workload (vCore/DTU, Business Critical/General Purpose)"
+            },
+            {
+              "id": "1.1.5",
+              "text": "Architecture diagram exists and reflects the actual implementation"
+            },
+            {
+              "id": "1.1.6",
+              "text": "Single source of truth — no duplicate warehouses serving the same purpose"
+            },
+            {
+              "id": "1.1.7",
+              "text": "Capacity/scale approach documented (scale-up vs scale-out, read replicas)"
+            }
+          ]
+        },
+        {
+          "id": "1.2",
+          "title": "Data Architecture (Staging / ODS / DW / Marts)",
+          "items": [
+            {
+              "id": "1.2.1",
+              "text": "Clear layering defined (staging → ODS/integration → dimensional DW → data marts)"
+            },
+            {
+              "id": "1.2.2",
+              "text": "Each layer has a defined purpose and transformation responsibility"
+            },
+            {
+              "id": "1.2.3",
+              "text": "Staging area is transient/isolated and not queried by consumers"
+            },
+            {
+              "id": "1.2.4",
+              "text": "Data flow lineage is traceable end-to-end from source to mart"
+            },
+            {
+              "id": "1.2.5",
+              "text": "Schema separation used to organize layers/domains (dedicated schemas, not all in dbo)"
+            },
+            {
+              "id": "1.2.6",
+              "text": "Audit metadata captured on load (load_date, source_system, batch_id)"
+            },
+            {
+              "id": "1.2.7",
+              "text": "Historical/archival strategy defined for the DW"
+            }
+          ]
+        },
+        {
+          "id": "1.3",
+          "title": "High Availability Topology",
+          "items": [
+            {
+              "id": "1.3.1",
+              "text": "HA approach defined and matches SLA (Always On AG / failover cluster / zone-redundant / failover groups)"
+            },
+            {
+              "id": "1.3.2",
+              "text": "Redundancy configured for the production database (replicas / zone redundancy)"
+            },
+            {
+              "id": "1.3.3",
+              "text": "Read-scale replicas used for reporting where appropriate"
+            },
+            {
+              "id": "1.3.4",
+              "text": "Failover behavior documented and tested"
+            },
+            {
+              "id": "1.3.5",
+              "text": "Connection strings use listener / failover-group endpoints (not a single node)"
+            },
+            {
+              "id": "1.3.6",
+              "text": "Maintenance windows and patching approach defined (or Microsoft-managed for PaaS)"
+            },
+            {
+              "id": "1.3.7",
+              "text": "Application connection endpoint is a failover-aware **AG Listener** / FCI virtual network name — not a static client alias or DNS CNAME that must be manually repointed on failover (verify what the alias `C1SVPMLSQLAPP01` actually resolves to)"
+            },
+            {
+              "id": "1.3.8",
+              "text": "Multi-subnet AG connections use `MultiSubnetFailover=True` with an appropriate connect timeout in application connection strings"
+            },
+            {
+              "id": "1.3.9",
+              "text": "Alias / DNS resolution and failover behavior documented and validated — applications reconnect transparently on failover with no manual repoint"
+            },
+            {
+              "id": "1.3.10",
+              "text": "HA node configuration parity verified — both nodes have identical instance configuration, trace flags, MAXDOP/memory, logins, SQL Agent jobs, linked servers, and certificates"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "title": "Data Integration & ETL (Weight: 10%)",
+      "sub_areas": [
+        {
+          "id": "2.1",
+          "title": "ETL/ELT Design",
+          "items": [
+            {
+              "id": "2.1.1",
+              "text": "ETL tooling is consistent and deliberate (SSIS / Azure Data Factory / T-SQL / other)"
+            },
+            {
+              "id": "2.1.2",
+              "text": "ETL packages/pipelines follow consistent naming conventions"
+            },
+            {
+              "id": "2.1.3",
+              "text": "ETL is parameterized (no hardcoded servers, paths, dates, or credentials)"
+            },
+            {
+              "id": "2.1.4",
+              "text": "Orchestration/dependency management exists (master package/pipeline or scheduler)"
+            },
+            {
+              "id": "2.1.5",
+              "text": "Reusable/templated ETL components (no copy-paste per table)"
+            },
+            {
+              "id": "2.1.6",
+              "text": "ETL is metadata-driven or well-modularized where appropriate"
+            },
+            {
+              "id": "2.1.7",
+              "text": "ETL is logically documented (data flow, transformations, source-to-target mappings)"
+            }
+          ]
+        },
+        {
+          "id": "2.2",
+          "title": "Incremental Load & Change Data Capture",
+          "items": [
+            {
+              "id": "2.2.1",
+              "text": "Incremental load implemented where applicable (watermark / CDC / Change Tracking)"
+            },
+            {
+              "id": "2.2.2",
+              "text": "Full load reserved for small reference/dimension tables or initial loads"
+            },
+            {
+              "id": "2.2.3",
+              "text": "Watermark/control values persisted reliably (control table, not volatile)"
+            },
+            {
+              "id": "2.2.4",
+              "text": "CDC / Change Tracking configured and maintained correctly where used"
+            },
+            {
+              "id": "2.2.5",
+              "text": "Insert/Update/Delete operations handled correctly (MERGE or equivalent)"
+            },
+            {
+              "id": "2.2.6",
+              "text": "Late-arriving / out-of-order data handled without corruption"
+            }
+          ]
+        },
+        {
+          "id": "2.3",
+          "title": "Error Handling & Restartability",
+          "items": [
+            {
+              "id": "2.3.1",
+              "text": "ETL has structured error handling (TRY...CATCH, event handlers, failure paths)"
+            },
+            {
+              "id": "2.3.2",
+              "text": "Failed loads are restartable from point of failure (not full re-run)"
+            },
+            {
+              "id": "2.3.3",
+              "text": "Bad/rejected rows routed to a quarantine/error table (not silently dropped or failing the batch)"
+            },
+            {
+              "id": "2.3.4",
+              "text": "Retry logic exists for transient failures"
+            },
+            {
+              "id": "2.3.5",
+              "text": "ETL runs are idempotent (re-run does not duplicate data)"
+            },
+            {
+              "id": "2.3.6",
+              "text": "Failures trigger notifications (email/alert/monitoring)"
+            }
+          ]
+        },
+        {
+          "id": "2.4",
+          "title": "ETL Performance",
+          "items": [
+            {
+              "id": "2.4.1",
+              "text": "Bulk load patterns used (BULK INSERT / bcp / minimal logging) for large loads"
+            },
+            {
+              "id": "2.4.2",
+              "text": "Set-based operations preferred over row-by-row processing"
+            },
+            {
+              "id": "2.4.3",
+              "text": "Indexes/constraints managed during large loads (disable/rebuild where beneficial)"
+            },
+            {
+              "id": "2.4.4",
+              "text": "ETL windows avoid contention with reporting/query workloads"
+            },
+            {
+              "id": "2.4.5",
+              "text": "ETL execution times monitored and baselined"
+            },
+            {
+              "id": "2.4.6",
+              "text": "Parallelism used appropriately (no unnecessary serial execution)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "title": "T-SQL Code Quality (Weight: 8%)",
+      "sub_areas": [
+        {
+          "id": "3.1",
+          "title": "Coding Standards",
+          "items": [
+            {
+              "id": "3.1.1",
+              "text": "Consistent formatting and naming conventions across objects"
+            },
+            {
+              "id": "3.1.2",
+              "text": "No `SELECT *` in production code; explicit column lists"
+            },
+            {
+              "id": "3.1.3",
+              "text": "Schema-qualified object references (dbo.Table, not Table)"
+            },
+            {
+              "id": "3.1.4",
+              "text": "`SET NOCOUNT ON` and appropriate SET options in procedures"
+            },
+            {
+              "id": "3.1.5",
+              "text": "No deprecated syntax/features (e.g., old-style joins, `TEXT`/`NTEXT`)"
+            },
+            {
+              "id": "3.1.6",
+              "text": "Code is commented for complex logic; business rules explained"
+            },
+            {
+              "id": "3.1.7",
+              "text": "No hardcoded literals for environment-specific values"
+            }
+          ]
+        },
+        {
+          "id": "3.2",
+          "title": "Stored Procedures & Programmability",
+          "items": [
+            {
+              "id": "3.2.1",
+              "text": "Business/transformation logic encapsulated in stored procedures/functions (not ad-hoc scripts)"
+            },
+            {
+              "id": "3.2.2",
+              "text": "Set-based logic used; cursors/`WHILE` loops avoided except where justified"
+            },
+            {
+              "id": "3.2.3",
+              "text": "Scalar UDFs avoided in hot paths (inlined/replaced where they hurt performance)"
+            },
+            {
+              "id": "3.2.4",
+              "text": "Views used appropriately (no deeply nested view chains that hide cost)"
+            },
+            {
+              "id": "3.2.5",
+              "text": "Dynamic SQL, where used, is parameterized (sp_executesql) — no injection risk"
+            },
+            {
+              "id": "3.2.6",
+              "text": "Temp tables vs table variables chosen appropriately for cardinality"
+            }
+          ]
+        },
+        {
+          "id": "3.3",
+          "title": "Transactions & Error Handling",
+          "items": [
+            {
+              "id": "3.3.1",
+              "text": "Transactions scoped correctly (not held open across long operations)"
+            },
+            {
+              "id": "3.3.2",
+              "text": "`TRY...CATCH` with proper error raising/logging (THROW/RAISERROR)"
+            },
+            {
+              "id": "3.3.3",
+              "text": "`XACT_ABORT` / transaction state handling correct on error"
+            },
+            {
+              "id": "3.3.4",
+              "text": "Appropriate isolation levels used (no unnecessary SERIALIZABLE; RCSI considered)"
+            },
+            {
+              "id": "3.3.5",
+              "text": "Deadlock-prone patterns avoided; retry logic where needed"
+            },
+            {
+              "id": "3.3.6",
+              "text": "Multi-step operations maintain consistency on partial failure"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "title": "Data Modeling & Storage (Weight: 9%)",
+      "sub_areas": [
+        {
+          "id": "4.1",
+          "title": "Schema & Normalization",
+          "items": [
+            {
+              "id": "4.1.1",
+              "text": "Modeling approach is deliberate (3NF integration layer and/or dimensional marts)"
+            },
+            {
+              "id": "4.1.2",
+              "text": "Naming conventions consistent for tables, columns, and schemas"
+            },
+            {
+              "id": "4.1.3",
+              "text": "Data types appropriate and right-sized (no oversized varchar, correct numeric precision)"
+            },
+            {
+              "id": "4.1.4",
+              "text": "No stringly-typed dates/numbers; correct temporal types"
+            },
+            {
+              "id": "4.1.5",
+              "text": "Audit columns present where needed (created/modified, source, batch)"
+            },
+            {
+              "id": "4.1.6",
+              "text": "Schemas used to organize objects by layer/domain"
+            }
+          ]
+        },
+        {
+          "id": "4.2",
+          "title": "Dimensional Modeling",
+          "items": [
+            {
+              "id": "4.2.1",
+              "text": "Star schema implemented (fact + dimension tables, not flat wide tables)"
+            },
+            {
+              "id": "4.2.2",
+              "text": "Fact table grain clearly defined and documented per fact"
+            },
+            {
+              "id": "4.2.3",
+              "text": "Fact tables contain only foreign keys and measures (no descriptive attributes)"
+            },
+            {
+              "id": "4.2.4",
+              "text": "Surrogate keys used for dimensions (IDENTITY/sequence), not business keys in facts"
+            },
+            {
+              "id": "4.2.5",
+              "text": "Conformed dimensions shared across facts (no duplicate versions)"
+            },
+            {
+              "id": "4.2.6",
+              "text": "Date/Time dimension exists with required attributes"
+            },
+            {
+              "id": "4.2.7",
+              "text": "SCD strategy defined and implemented per dimension (Type 1/2/3)"
+            },
+            {
+              "id": "4.2.8",
+              "text": "SCD Type 2 valid_from/valid_to/is_current maintained correctly (where used)"
+            }
+          ]
+        },
+        {
+          "id": "4.3",
+          "title": "Indexing Strategy",
+          "items": [
+            {
+              "id": "4.3.1",
+              "text": "Every table has an appropriate clustered index (or deliberate heap justification)"
+            },
+            {
+              "id": "4.3.2",
+              "text": "Columnstore indexes used for large fact tables / analytical workloads where appropriate"
+            },
+            {
+              "id": "4.3.3",
+              "text": "Nonclustered indexes align with query/workload patterns (not arbitrary)"
+            },
+            {
+              "id": "4.3.4",
+              "text": "No redundant/duplicate/overlapping indexes"
+            },
+            {
+              "id": "4.3.5",
+              "text": "Unused indexes identified and removed (DMV evidence)"
+            },
+            {
+              "id": "4.3.6",
+              "text": "Missing-index recommendations reviewed (not blindly applied)"
+            },
+            {
+              "id": "4.3.7",
+              "text": "Fill factor and index options set deliberately where needed"
+            },
+            {
+              "id": "4.3.8",
+              "text": "Index maintenance (rebuild/reorganize) scheduled based on fragmentation"
+            }
+          ]
+        },
+        {
+          "id": "4.4",
+          "title": "Partitioning & Storage",
+          "items": [
+            {
+              "id": "4.4.1",
+              "text": "Partitioning strategy defined for large tables (by date/range) where beneficial"
+            },
+            {
+              "id": "4.4.2",
+              "text": "Partition alignment supports fast load/switch and purge (sliding window)"
+            },
+            {
+              "id": "4.4.3",
+              "text": "Filegroups used to organize storage where applicable (SQL Server/MI)"
+            },
+            {
+              "id": "4.4.4",
+              "text": "Data compression (row/page/columnstore) applied where beneficial"
+            },
+            {
+              "id": "4.4.5",
+              "text": "tempdb configured appropriately (multiple files, sizing) — SQL Server/MI"
+            },
+            {
+              "id": "4.4.6",
+              "text": "Storage growth monitored; autogrowth settings sane (fixed size, not tiny %)"
+            },
+            {
+              "id": "4.4.7",
+              "text": "Archival/purge process exists for aged data"
+            }
+          ]
+        },
+        {
+          "id": "4.5",
+          "title": "Keys & Constraints",
+          "items": [
+            {
+              "id": "4.5.1",
+              "text": "Primary keys defined on all tables"
+            },
+            {
+              "id": "4.5.2",
+              "text": "Foreign keys enforced where integrity matters (or documented trusted-by-ETL exceptions)"
+            },
+            {
+              "id": "4.5.3",
+              "text": "Unique constraints on natural/business keys where appropriate"
+            },
+            {
+              "id": "4.5.4",
+              "text": "Check constraints enforce domain rules where practical"
+            },
+            {
+              "id": "4.5.5",
+              "text": "Constraints are TRUSTED (not disabled/untrusted, which hurts the optimizer)"
+            },
+            {
+              "id": "4.5.6",
+              "text": "NOT NULL applied to mandatory columns"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5",
+      "title": "Data Quality Framework (Weight: 9%)",
+      "sub_areas": [
+        {
+          "id": "5.1",
+          "title": "DQ Framework & Governance",
+          "items": [
+            {
+              "id": "5.1.1",
+              "text": "Data quality framework formally defined with rules, ownership, and scoring"
+            },
+            {
+              "id": "5.1.2",
+              "text": "DQ rules codified (config-driven or reusable procedures), not ad-hoc manual checks"
+            },
+            {
+              "id": "5.1.3",
+              "text": "DQ KPIs defined: completeness, accuracy, timeliness, consistency, uniqueness, validity"
+            },
+            {
+              "id": "5.1.4",
+              "text": "DQ results logged and trended over time"
+            },
+            {
+              "id": "5.1.5",
+              "text": "DQ remediation workflow exists (alert → investigate → fix → verify)"
+            },
+            {
+              "id": "5.1.6",
+              "text": "DQ SLAs defined per data product / mart"
+            },
+            {
+              "id": "5.1.7",
+              "text": "DQ failures halt progression where critical (bad data not silently promoted)"
+            },
+            {
+              "id": "5.1.8",
+              "text": "Quarantine pattern: failed rows routed to error tables with failure reason"
+            }
+          ]
+        },
+        {
+          "id": "5.2",
+          "title": "Source / Staging Validation",
+          "items": [
+            {
+              "id": "5.2.1",
+              "text": "Schema validation on inbound data (column presence, types)"
+            },
+            {
+              "id": "5.2.2",
+              "text": "Completeness: all expected sources/batches received"
+            },
+            {
+              "id": "5.2.3",
+              "text": "Record count reconciliation vs. source control counts"
+            },
+            {
+              "id": "5.2.4",
+              "text": "Duplicate detection across batches"
+            },
+            {
+              "id": "5.2.5",
+              "text": "Null/empty handling: unexpected nulls flagged"
+            },
+            {
+              "id": "5.2.6",
+              "text": "Corrupt/malformed rows isolated (not failing the entire batch)"
+            },
+            {
+              "id": "5.2.7",
+              "text": "Source metadata captured (load timestamp, source, batch ID)"
+            }
+          ]
+        },
+        {
+          "id": "5.3",
+          "title": "DW / Mart Validation",
+          "items": [
+            {
+              "id": "5.3.1",
+              "text": "Referential integrity validated (FKs in facts match dimensions)"
+            },
+            {
+              "id": "5.3.2",
+              "text": "Business rule validation applied (domain rules, ranges)"
+            },
+            {
+              "id": "5.3.3",
+              "text": "Deduplication verified — no duplicate business keys after load"
+            },
+            {
+              "id": "5.3.4",
+              "text": "Aggregate consistency: detail sums equal aggregate totals"
+            },
+            {
+              "id": "5.3.5",
+              "text": "Cross-layer reconciliation (mart vs integration vs source counts)"
+            },
+            {
+              "id": "5.3.6",
+              "text": "Unknown/default dimension member usage monitored"
+            },
+            {
+              "id": "5.3.7",
+              "text": "No duplicate grain in fact tables"
+            },
+            {
+              "id": "5.3.8",
+              "text": "Freshness validation: marts updated within SLA"
+            }
+          ]
+        },
+        {
+          "id": "5.4",
+          "title": "Data-Type-Specific Validation Rules",
+          "items": [
+            {
+              "id": "5.4.1",
+              "text": "**Dates**: valid ranges; consistent handling; no invalid future dates where prohibited"
+            },
+            {
+              "id": "5.4.2",
+              "text": "**Numeric / Financial**: precision preserved; no rounding errors; currency codes valid"
+            },
+            {
+              "id": "5.4.3",
+              "text": "**String / Text**: encoding/collation consistent; max length respected; no silent truncation"
+            },
+            {
+              "id": "5.4.4",
+              "text": "**Sensitive data**: masked/protected where required; format validation applied"
+            },
+            {
+              "id": "5.4.5",
+              "text": "**Categorical / Enum**: values within expected domain; no invalid codes"
+            },
+            {
+              "id": "5.4.6",
+              "text": "**Identifiers / Keys**: uniqueness verified; format consistent; no nulls in keys"
+            },
+            {
+              "id": "5.4.7",
+              "text": "**Boolean / Flag**: only expected values; consistent representation across tables"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6",
+      "title": "Security & Access Control (Weight: 12%)",
+      "sub_areas": [
+        {
+          "id": "6.1",
+          "title": "Authentication & Authorization",
+          "items": [
+            {
+              "id": "6.1.1",
+              "text": "Microsoft Entra ID (Azure AD) authentication used where possible (over SQL auth)"
+            },
+            {
+              "id": "6.1.2",
+              "text": "Principle of least privilege applied to logins/users (no broad db_owner/sysadmin)"
+            },
+            {
+              "id": "6.1.3",
+              "text": "Database roles used for permission grants (not per-user grants)"
+            },
+            {
+              "id": "6.1.4",
+              "text": "Application connects via a dedicated least-privilege service account/identity (Managed Identity preferred)"
+            },
+            {
+              "id": "6.1.5",
+              "text": "No shared/generic accounts for administrative or application access"
+            },
+            {
+              "id": "6.1.6",
+              "text": "Guest/contractor access explicitly governed and time-bound"
+            },
+            {
+              "id": "6.1.7",
+              "text": "Regular access reviews scheduled and documented"
+            },
+            {
+              "id": "6.1.8",
+              "text": "Schema/object-level permissions align with least privilege"
+            }
+          ]
+        },
+        {
+          "id": "6.2",
+          "title": "Data Protection",
+          "items": [
+            {
+              "id": "6.2.1",
+              "text": "Transparent Data Encryption (TDE) enabled for encryption at rest"
+            },
+            {
+              "id": "6.2.2",
+              "text": "TLS enforced for data in transit (Encrypt=true; minimum TLS version set)"
+            },
+            {
+              "id": "6.2.3",
+              "text": "Always Encrypted used for highly sensitive columns where required"
+            },
+            {
+              "id": "6.2.4",
+              "text": "Dynamic Data Masking applied to sensitive columns where appropriate"
+            },
+            {
+              "id": "6.2.5",
+              "text": "Row-Level Security implemented where multi-tenant/segmented access is required"
+            },
+            {
+              "id": "6.2.6",
+              "text": "Sensitive data classified (SQL Data Discovery & Classification / labels)"
+            },
+            {
+              "id": "6.2.7",
+              "text": "Backups are encrypted"
+            },
+            {
+              "id": "6.2.8",
+              "text": "Customer-managed keys (CMK/BYOK) used where policy requires"
+            }
+          ]
+        },
+        {
+          "id": "6.3",
+          "title": "Network Security",
+          "items": [
+            {
+              "id": "6.3.1",
+              "text": "Firewall / network rules restrict access to known sources"
+            },
+            {
+              "id": "6.3.2",
+              "text": "Private endpoints / VNet integration used (Azure SQL) or network isolation (SQL Server)"
+            },
+            {
+              "id": "6.3.3",
+              "text": "Public network access disabled or tightly restricted (Azure SQL)"
+            },
+            {
+              "id": "6.3.4",
+              "text": "No broad \"allow Azure services\" / 0.0.0.0 firewall rules"
+            },
+            {
+              "id": "6.3.5",
+              "text": "Jump-host/bastion or controlled path for administrative access"
+            }
+          ]
+        },
+        {
+          "id": "6.4",
+          "title": "Secrets & Key Management",
+          "items": [
+            {
+              "id": "6.4.1",
+              "text": "Connection strings/secrets stored in a secret store (Key Vault), not config files or code"
+            },
+            {
+              "id": "6.4.2",
+              "text": "No credentials hardcoded in ETL packages, scripts, or linked servers"
+            },
+            {
+              "id": "6.4.3",
+              "text": "Managed Identity used for service-to-service auth where supported"
+            },
+            {
+              "id": "6.4.4",
+              "text": "Credential/key rotation policy defined and automated"
+            },
+            {
+              "id": "6.4.5",
+              "text": "Linked servers / external data sources use least-privilege, non-personal credentials"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "title": "Compliance & Regulatory (Weight: 7%)",
+      "sub_areas": [
+        {
+          "id": "7.1",
+          "title": "Regulatory Regime (Plug-in — TBD)",
+          "items": [
+            {
+              "id": "7.1.1",
+              "text": "Applicable regulatory/compliance regime(s) identified and documented"
+            },
+            {
+              "id": "7.1.2",
+              "text": "In-scope regulated data categories identified and inventoried"
+            },
+            {
+              "id": "7.1.3",
+              "text": "Regime-specific control set mapped into the compliance matrix"
+            },
+            {
+              "id": "7.1.4",
+              "text": "Data residency / regional processing requirements identified and met"
+            },
+            {
+              "id": "7.1.5",
+              "text": "Required agreements in place (e.g., DPA) covering the platform and services"
+            },
+            {
+              "id": "7.1.6",
+              "text": "Breach / incident notification process documented"
+            }
+          ]
+        },
+        {
+          "id": "7.2",
+          "title": "Financial Data Controls (SOX-style ITGC)",
+          "items": [
+            {
+              "id": "7.2.1",
+              "text": "Segregation of Duties enforced (developer ≠ deployer ≠ approver)"
+            },
+            {
+              "id": "7.2.2",
+              "text": "All schema/code changes go through formal change management"
+            },
+            {
+              "id": "7.2.3",
+              "text": "Audit trail for changes to financial-relevant data"
+            },
+            {
+              "id": "7.2.4",
+              "text": "Access control changes logged and reviewable"
+            },
+            {
+              "id": "7.2.5",
+              "text": "Transformation logic documented and reproducible"
+            },
+            {
+              "id": "7.2.6",
+              "text": "Source-to-target reconciliation exists for financial data"
+            },
+            {
+              "id": "7.2.7",
+              "text": "Retention of historical financial data per policy"
+            }
+          ]
+        },
+        {
+          "id": "7.3",
+          "title": "Data Privacy (Generic Placeholder)",
+          "items": [
+            {
+              "id": "7.3.1",
+              "text": "Personal data inventory exists with legal basis (if personal data is processed)"
+            },
+            {
+              "id": "7.3.2",
+              "text": "Data minimization applied — only necessary personal data stored"
+            },
+            {
+              "id": "7.3.3",
+              "text": "Right-to-erasure / rectification technically achievable"
+            },
+            {
+              "id": "7.3.4",
+              "text": "Data retention policies defined per data category"
+            },
+            {
+              "id": "7.3.5",
+              "text": "Consent / purpose tracking integrated where applicable"
+            },
+            {
+              "id": "7.3.6",
+              "text": "Cross-border transfer justified and documented (if applicable)"
+            }
+          ]
+        },
+        {
+          "id": "7.4",
+          "title": "Audit Trail & Logging",
+          "items": [
+            {
+              "id": "7.4.1",
+              "text": "SQL Audit (server/database) enabled for sensitive operations"
+            },
+            {
+              "id": "7.4.2",
+              "text": "Login/permission changes captured and reviewable"
+            },
+            {
+              "id": "7.4.3",
+              "text": "Data access to sensitive tables auditable (who accessed what, when)"
+            },
+            {
+              "id": "7.4.4",
+              "text": "Audit logs retained per compliance requirement"
+            },
+            {
+              "id": "7.4.5",
+              "text": "Audit logs stored in a tamper-resistant location (separate store / immutable)"
+            },
+            {
+              "id": "7.4.6",
+              "text": "Temporal tables / change tracking used for data history where required"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8",
+      "title": "Data Governance (Weight: 4%)",
+      "sub_areas": [
+        {
+          "id": "8.1",
+          "title": "Lineage & Cataloging",
+          "items": [
+            {
+              "id": "8.1.1",
+              "text": "Source-to-target lineage documented (ETL mappings)"
+            },
+            {
+              "id": "8.1.2",
+              "text": "Enterprise catalog (e.g., Microsoft Purview) integrated or planned"
+            },
+            {
+              "id": "8.1.3",
+              "text": "Objects tagged/classified with business domain and owner"
+            },
+            {
+              "id": "8.1.4",
+              "text": "Dependencies documented (linked servers, cross-database references)"
+            },
+            {
+              "id": "8.1.5",
+              "text": "Extended properties / documentation on key objects"
+            }
+          ]
+        },
+        {
+          "id": "8.2",
+          "title": "Ownership & Stewardship",
+          "items": [
+            {
+              "id": "8.2.1",
+              "text": "Every table/dataset has a defined data owner"
+            },
+            {
+              "id": "8.2.2",
+              "text": "Data stewards assigned per domain/subject area"
+            },
+            {
+              "id": "8.2.3",
+              "text": "Ownership documented — not tribal knowledge"
+            },
+            {
+              "id": "8.2.4",
+              "text": "Escalation path for data quality issues defined"
+            },
+            {
+              "id": "8.2.5",
+              "text": "DBA/ops ownership and responsibilities defined"
+            }
+          ]
+        },
+        {
+          "id": "8.3",
+          "title": "Metadata & Data Dictionary",
+          "items": [
+            {
+              "id": "8.3.1",
+              "text": "Data dictionary exists for DW/mart tables"
+            },
+            {
+              "id": "8.3.2",
+              "text": "Technical metadata (schema) captured and current"
+            },
+            {
+              "id": "8.3.3",
+              "text": "Business definitions/rules documented and current"
+            },
+            {
+              "id": "8.3.4",
+              "text": "Metadata accessible to consumers (discoverable)"
+            },
+            {
+              "id": "8.3.5",
+              "text": "Business glossary / terminology maintained"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "title": "Reliability & Resilience (Weight: 6%)",
+      "sub_areas": [
+        {
+          "id": "9.1",
+          "title": "Backup & Recovery",
+          "items": [
+            {
+              "id": "9.1.1",
+              "text": "Backup strategy defined and matches RPO (full/differential/log or PaaS automated)"
+            },
+            {
+              "id": "9.1.2",
+              "text": "Point-in-time restore capability verified (retention period appropriate)"
+            },
+            {
+              "id": "9.1.3",
+              "text": "Backups restore-tested regularly (not just taken)"
+            },
+            {
+              "id": "9.1.4",
+              "text": "Long-term retention (LTR) configured where required"
+            },
+            {
+              "id": "9.1.5",
+              "text": "Backups stored redundantly / geo-redundant where required"
+            },
+            {
+              "id": "9.1.6",
+              "text": "Backup failures alerted and monitored"
+            },
+            {
+              "id": "9.1.7",
+              "text": "Recovery model appropriate (Full/Simple/Bulk-logged) — SQL Server/MI"
+            }
+          ]
+        },
+        {
+          "id": "9.2",
+          "title": "High Availability & Disaster Recovery",
+          "items": [
+            {
+              "id": "9.2.1",
+              "text": "RTO and RPO defined and documented"
+            },
+            {
+              "id": "9.2.2",
+              "text": "HA solution matches SLA (Always On AG / failover groups / zone redundancy)"
+            },
+            {
+              "id": "9.2.3",
+              "text": "Geo-replication / failover group configured for DR where required"
+            },
+            {
+              "id": "9.2.4",
+              "text": "DR runbook documented"
+            },
+            {
+              "id": "9.2.5",
+              "text": "Failover tested at least annually"
+            },
+            {
+              "id": "9.2.6",
+              "text": "Secondary region/replica capacity provisioned or evaluated"
+            },
+            {
+              "id": "9.2.7",
+              "text": "Application connection resilience verified (retry logic, failover endpoints)"
+            },
+            {
+              "id": "9.2.8",
+              "text": "Availability mode (synchronous vs asynchronous commit) and failover mode (automatic vs manual) documented and aligned to RPO/RTO"
+            },
+            {
+              "id": "9.2.9",
+              "text": "AG / cluster health and replica synchronization state actively monitored — unhealthy or not-synchronizing replicas alerted"
+            },
+            {
+              "id": "9.2.10",
+              "text": "WSFC quorum / witness configured correctly for the node count (avoids split-brain); quorum model documented"
+            },
+            {
+              "id": "9.2.11",
+              "text": "Backup preference configured (backups taken from the preferred / secondary replica where used) and validated across failover"
+            },
+            {
+              "id": "9.2.12",
+              "text": "Listener / alias failover tested end-to-end — applications reconnect transparently with no manual intervention"
+            }
+          ]
+        },
+        {
+          "id": "9.3",
+          "title": "Data Integrity",
+          "items": [
+            {
+              "id": "9.3.1",
+              "text": "Consistency checks (DBCC CHECKDB) scheduled and monitored (SQL Server/MI)"
+            },
+            {
+              "id": "9.3.2",
+              "text": "Page verification set to CHECKSUM"
+            },
+            {
+              "id": "9.3.3",
+              "text": "Corruption detection alerting in place"
+            },
+            {
+              "id": "9.3.4",
+              "text": "ETL is idempotent — safe to re-run after failure"
+            },
+            {
+              "id": "9.3.5",
+              "text": "Multi-step operations maintain integrity on partial failure"
+            }
+          ]
+        },
+        {
+          "id": "9.4",
+          "title": "SLA Management",
+          "items": [
+            {
+              "id": "9.4.1",
+              "text": "Data freshness SLAs defined per mart/data product"
+            },
+            {
+              "id": "9.4.2",
+              "text": "Load completion SLAs set and monitored"
+            },
+            {
+              "id": "9.4.3",
+              "text": "SLA breach triggers alerts"
+            },
+            {
+              "id": "9.4.4",
+              "text": "Historical SLA compliance tracked and reported"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10",
+      "title": "Monitoring & Observability (Weight: 5%)",
+      "sub_areas": [
+        {
+          "id": "10.1",
+          "title": "Health & Performance Monitoring",
+          "items": [
+            {
+              "id": "10.1.1",
+              "text": "Monitoring solution in place (Azure Monitor / SQL Insights / third-party)"
+            },
+            {
+              "id": "10.1.2",
+              "text": "Key metrics tracked (CPU, memory, IO, DTU/vCore, waits)"
+            },
+            {
+              "id": "10.1.3",
+              "text": "Resource utilization trended over time"
+            },
+            {
+              "id": "10.1.4",
+              "text": "Alerts configured for resource saturation and errors"
+            },
+            {
+              "id": "10.1.5",
+              "text": "Long-running/blocking query alerting configured"
+            },
+            {
+              "id": "10.1.6",
+              "text": "Dashboard accessible to operations (not just DBAs)"
+            }
+          ]
+        },
+        {
+          "id": "10.2",
+          "title": "Query Store & DMVs",
+          "items": [
+            {
+              "id": "10.2.1",
+              "text": "Query Store enabled and configured appropriately"
+            },
+            {
+              "id": "10.2.2",
+              "text": "Query Store used to detect regressions and force plans where needed"
+            },
+            {
+              "id": "10.2.3",
+              "text": "DMVs used for ongoing performance analysis (waits, missing/unused indexes)"
+            },
+            {
+              "id": "10.2.4",
+              "text": "Wait statistics reviewed as part of routine tuning"
+            },
+            {
+              "id": "10.2.5",
+              "text": "Baselines captured for comparison over time"
+            }
+          ]
+        },
+        {
+          "id": "10.3",
+          "title": "Extended Events & Alerting",
+          "items": [
+            {
+              "id": "10.3.1",
+              "text": "Extended Events sessions used for diagnostics (over deprecated Profiler traces)"
+            },
+            {
+              "id": "10.3.2",
+              "text": "Deadlock capture configured"
+            },
+            {
+              "id": "10.3.3",
+              "text": "Error/severity alerts configured (Agent alerts or equivalent)"
+            },
+            {
+              "id": "10.3.4",
+              "text": "Alert thresholds tuned to avoid fatigue"
+            },
+            {
+              "id": "10.3.5",
+              "text": "Escalation path defined for critical alerts"
+            }
+          ]
+        },
+        {
+          "id": "10.4",
+          "title": "Job & ETL Monitoring",
+          "items": [
+            {
+              "id": "10.4.1",
+              "text": "ETL/job run history captured and retained"
+            },
+            {
+              "id": "10.4.2",
+              "text": "Job failures alert the responsible team"
+            },
+            {
+              "id": "10.4.3",
+              "text": "Job duration trends monitored"
+            },
+            {
+              "id": "10.4.4",
+              "text": "SQL Agent / scheduler jobs inventoried and owned"
+            },
+            {
+              "id": "10.4.5",
+              "text": "Log/rowcount reconciliation captured per ETL run"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11",
+      "title": "DevOps & Deployment (Weight: 6%)",
+      "sub_areas": [
+        {
+          "id": "11.1",
+          "title": "Version Control",
+          "items": [
+            {
+              "id": "11.1.1",
+              "text": "Database schema and code source-controlled (SSDT/SQL project or migration scripts)"
+            },
+            {
+              "id": "11.1.2",
+              "text": "ETL packages/pipelines source-controlled"
+            },
+            {
+              "id": "11.1.3",
+              "text": "Branching strategy defined (feature/main/release)"
+            },
+            {
+              "id": "11.1.4",
+              "text": "Pull request reviews required before merge"
+            },
+            {
+              "id": "11.1.5",
+              "text": "Commit messages descriptive and linked to work items"
+            },
+            {
+              "id": "11.1.6",
+              "text": "Secret-scanning enabled on the repository"
+            }
+          ]
+        },
+        {
+          "id": "11.2",
+          "title": "CI/CD & Database Deployment",
+          "items": [
+            {
+              "id": "11.2.1",
+              "text": "Automated build of the database project (DACPAC or migrations)"
+            },
+            {
+              "id": "11.2.2",
+              "text": "Automated deployment pipeline (Dev → Test → Prod)"
+            },
+            {
+              "id": "11.2.3",
+              "text": "Schema drift detected and reconciled between environments"
+            },
+            {
+              "id": "11.2.4",
+              "text": "No manual production changes — all via pipeline"
+            },
+            {
+              "id": "11.2.5",
+              "text": "Deployment approvals required (segregation of duties)"
+            },
+            {
+              "id": "11.2.6",
+              "text": "Rollback / recovery procedure defined and tested"
+            },
+            {
+              "id": "11.2.7",
+              "text": "Pre/post-deployment scripts managed and idempotent"
+            }
+          ]
+        },
+        {
+          "id": "11.3",
+          "title": "Environment Management",
+          "items": [
+            {
+              "id": "11.3.1",
+              "text": "Separate Dev / Test / Prod environments"
+            },
+            {
+              "id": "11.3.2",
+              "text": "Production access restricted (no developer write/deploy)"
+            },
+            {
+              "id": "11.3.3",
+              "text": "Test environment representative of production (data, scale)"
+            },
+            {
+              "id": "11.3.4",
+              "text": "Environment configuration parity maintained"
+            },
+            {
+              "id": "11.3.5",
+              "text": "Non-prod data masking/subsetting applied where sensitive"
+            }
+          ]
+        },
+        {
+          "id": "11.4",
+          "title": "Testing",
+          "items": [
+            {
+              "id": "11.4.1",
+              "text": "Unit tests exist for critical transformation logic (e.g., tSQLt)"
+            },
+            {
+              "id": "11.4.2",
+              "text": "Integration tests validate end-to-end ETL"
+            },
+            {
+              "id": "11.4.3",
+              "text": "Data validation tests run post-deployment (counts, schema checks)"
+            },
+            {
+              "id": "11.4.4",
+              "text": "Performance tests exist for critical queries/loads"
+            },
+            {
+              "id": "11.4.5",
+              "text": "Regression testing on schema changes"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12",
+      "title": "Cost Management & Capacity (Weight: 4%)",
+      "sub_areas": [
+        {
+          "id": "12.1",
+          "title": "Capacity Planning & Sizing",
+          "items": [
+            {
+              "id": "12.1.1",
+              "text": "Service tier / compute sizing based on workload analysis (not guesswork)"
+            },
+            {
+              "id": "12.1.2",
+              "text": "DTU/vCore utilization profiled (peak vs off-peak)"
+            },
+            {
+              "id": "12.1.3",
+              "text": "Elastic pools used where multiple databases share capacity efficiently"
+            },
+            {
+              "id": "12.1.4",
+              "text": "Auto-scaling / serverless considered where workload is intermittent"
+            },
+            {
+              "id": "12.1.5",
+              "text": "Growth projections modeled for next 6–12 months"
+            },
+            {
+              "id": "12.1.6",
+              "text": "Storage sizing and growth monitored"
+            }
+          ]
+        },
+        {
+          "id": "12.2",
+          "title": "Cost Optimization",
+          "items": [
+            {
+              "id": "12.2.1",
+              "text": "Reserved capacity / savings plans evaluated vs pay-as-you-go"
+            },
+            {
+              "id": "12.2.2",
+              "text": "Right-sizing reviewed periodically (over-provisioned tiers reduced)"
+            },
+            {
+              "id": "12.2.3",
+              "text": "Non-prod environments scaled down / paused when idle"
+            },
+            {
+              "id": "12.2.4",
+              "text": "Backup storage costs monitored (retention tuned)"
+            },
+            {
+              "id": "12.2.5",
+              "text": "Unused databases/objects/indexes cleaned up"
+            },
+            {
+              "id": "12.2.6",
+              "text": "Compression used to reduce storage and IO cost where beneficial"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13",
+      "title": "Documentation & Knowledge Management (Weight: 3%)",
+      "sub_areas": [
+        {
+          "id": "13.1",
+          "title": "Solution Documentation",
+          "items": [
+            {
+              "id": "13.1.1",
+              "text": "Architecture overview document exists"
+            },
+            {
+              "id": "13.1.2",
+              "text": "Data flow / source-to-target mappings documented"
+            },
+            {
+              "id": "13.1.3",
+              "text": "Business rules for transformations documented outside code"
+            },
+            {
+              "id": "13.1.4",
+              "text": "Known issues and tech debt registered"
+            }
+          ]
+        },
+        {
+          "id": "13.2",
+          "title": "Operational Runbooks",
+          "items": [
+            {
+              "id": "13.2.1",
+              "text": "Runbook exists for daily/weekly/monthly operations"
+            },
+            {
+              "id": "13.2.2",
+              "text": "Failure recovery procedures documented step-by-step"
+            },
+            {
+              "id": "13.2.3",
+              "text": "On-call / escalation procedures documented"
+            },
+            {
+              "id": "13.2.4",
+              "text": "Maintenance procedures documented (index/stats/integrity)"
+            }
+          ]
+        },
+        {
+          "id": "13.3",
+          "title": "Data Dictionary",
+          "items": [
+            {
+              "id": "13.3.1",
+              "text": "Table/column definitions documented with business context"
+            },
+            {
+              "id": "13.3.2",
+              "text": "Source-to-target mapping documented per table"
+            },
+            {
+              "id": "13.3.3",
+              "text": "Acronyms and business terminology glossary available"
+            },
+            {
+              "id": "13.3.4",
+              "text": "Documentation kept current with schema changes"
+            }
+          ]
+        },
+        {
+          "id": "13.4",
+          "title": "Knowledge Transfer",
+          "items": [
+            {
+              "id": "13.4.1",
+              "text": "Solution maintainable by someone other than the original builder"
+            },
+            {
+              "id": "13.4.2",
+              "text": "No single point of human dependency (bus factor > 1)"
+            },
+            {
+              "id": "13.4.3",
+              "text": "Onboarding materials exist for new team members"
+            },
+            {
+              "id": "13.4.4",
+              "text": "Code is self-documenting or well-commented for complex logic"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14",
+      "title": "Performance & Query Tuning (Weight: 9%)",
+      "sub_areas": [
+        {
+          "id": "14.1",
+          "title": "Execution Plans & Query Design",
+          "items": [
+            {
+              "id": "14.1.1",
+              "text": "Critical queries reviewed via execution plans (no unexpected scans/spools)"
+            },
+            {
+              "id": "14.1.2",
+              "text": "SARGable predicates used (no functions wrapping indexed columns)"
+            },
+            {
+              "id": "14.1.3",
+              "text": "Set-based rewrites applied where cursors/loops caused poor plans"
+            },
+            {
+              "id": "14.1.4",
+              "text": "Implicit conversions eliminated (data-type mismatches in joins/filters)"
+            },
+            {
+              "id": "14.1.5",
+              "text": "Excessive/unnecessary sorts and spools addressed"
+            },
+            {
+              "id": "14.1.6",
+              "text": "Key lookups minimized via covering indexes where beneficial"
+            },
+            {
+              "id": "14.1.7",
+              "text": "Query hints used sparingly and documented where present"
+            }
+          ]
+        },
+        {
+          "id": "14.2",
+          "title": "Index Tuning & Maintenance",
+          "items": [
+            {
+              "id": "14.2.1",
+              "text": "Index usage analyzed (seeks vs scans) against workload"
+            },
+            {
+              "id": "14.2.2",
+              "text": "Missing indexes reviewed and applied judiciously"
+            },
+            {
+              "id": "14.2.3",
+              "text": "Unused/duplicate indexes removed"
+            },
+            {
+              "id": "14.2.4",
+              "text": "Fragmentation-based maintenance (rebuild/reorganize) automated"
+            },
+            {
+              "id": "14.2.5",
+              "text": "Columnstore health maintained (rowgroup quality, tuple mover) where used"
+            },
+            {
+              "id": "14.2.6",
+              "text": "Fill factor tuned for volatile tables where needed"
+            }
+          ]
+        },
+        {
+          "id": "14.3",
+          "title": "Concurrency (Blocking & Deadlocks)",
+          "items": [
+            {
+              "id": "14.3.1",
+              "text": "Blocking monitored and root causes addressed"
+            },
+            {
+              "id": "14.3.2",
+              "text": "Deadlocks captured (Extended Events) and resolved"
+            },
+            {
+              "id": "14.3.3",
+              "text": "Appropriate isolation level / RCSI or snapshot isolation considered"
+            },
+            {
+              "id": "14.3.4",
+              "text": "Long transactions avoided; batch large operations"
+            },
+            {
+              "id": "14.3.5",
+              "text": "Lock escalation understood and mitigated where problematic"
+            },
+            {
+              "id": "14.3.6",
+              "text": "Reporting workloads isolated from write workloads (read replicas) where possible"
+            }
+          ]
+        },
+        {
+          "id": "14.4",
+          "title": "tempdb & Resource Management",
+          "items": [
+            {
+              "id": "14.4.1",
+              "text": "tempdb sized and file-configured correctly (SQL Server/MI)"
+            },
+            {
+              "id": "14.4.2",
+              "text": "tempdb contention monitored and mitigated"
+            },
+            {
+              "id": "14.4.3",
+              "text": "Resource Governor used where workload isolation is required (where supported)"
+            },
+            {
+              "id": "14.4.4",
+              "text": "MAXDOP and cost threshold for parallelism set deliberately"
+            },
+            {
+              "id": "14.4.5",
+              "text": "Memory grants monitored (no excessive spills to tempdb)"
+            }
+          ]
+        },
+        {
+          "id": "14.5",
+          "title": "Statistics & Parameterization",
+          "items": [
+            {
+              "id": "14.5.1",
+              "text": "Statistics kept current (auto-update on, plus manual updates after large loads)"
+            },
+            {
+              "id": "14.5.2",
+              "text": "Auto-create statistics enabled where appropriate"
+            },
+            {
+              "id": "14.5.3",
+              "text": "Parameter sniffing issues identified and mitigated (OPTIMIZE FOR, recompile, etc.)"
+            },
+            {
+              "id": "14.5.4",
+              "text": "Plan cache health reviewed (no excessive single-use plans / bloat)"
+            },
+            {
+              "id": "14.5.5",
+              "text": "Query Store used to force stable plans where regressions occur"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "merged_from": [
+    "default-checklist.json",
+    "custom-checklist.json"
+  ]
+}

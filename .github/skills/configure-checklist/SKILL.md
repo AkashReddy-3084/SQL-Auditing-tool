@@ -11,7 +11,7 @@ repository's canonical prompts, runs the deterministic validators, allocates the
 writes the files. You perform the guardrails, semantic-match and classification reviews, and the
 **user** approves the generated script before anything is saved.
 
-Use the **`configure_checklist` MCP tool**. Do **not** shell out to `tools/sql-auditor.ps1` —
+Use the **`configure_checklist` MCP tool**. Do **not** shell out to `Backend/CLI/sql-auditor.ps1` —
 that wrapper is for Copilot CLI.
 
 > **Configuration, not evaluation.** Never call `evaluate`, never ask for a SQL Server name, a
@@ -120,11 +120,11 @@ selectable in the normal evaluation flow alongside the default checklist.
 
 | File | Written when |
 |------|--------------|
-| `Backend/checklist/custom-checklist.json` | On approval — the custom item only |
-| `Backend/checklist/custom-deterministic-script-mapping.json` | On approval — the script metadata only |
-| `Backend/checklist/scripts/sql/<id>.sql` | On approval — the generated script |
-| `Backend/checklist/master-checklist.json` | Regenerated = `default-checklist.json` + `custom-checklist.json` |
-| `Backend/checklist/deterministic-script-mapping.json` | Regenerated = default mapping + custom mapping |
+| `Backend/checklists/custom-checklist.json` | On approval — the custom item only |
+| `Backend/checklists/custom-deterministic-script-mapping.json` | On approval — the script metadata only |
+| `Backend/checklists/Scripts/sql/<id>.sql` | On approval — the generated script |
+| `Backend/checklists/master-checklist.json` | Regenerated = `default-checklist.json` + `custom-checklist.json` |
+| `Backend/checklists/deterministic-script-mapping.json` | Regenerated = default mapping + custom mapping |
 
 `default-checklist.json` and `default-deterministic-script-mapping.json` are **never modified** by
 this flow.

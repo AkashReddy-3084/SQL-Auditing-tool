@@ -105,7 +105,7 @@ got that confirmation, the outcome is `Failed`.
 
 ## Reference
 
-- `Backend/agents/prompts/script_generator_{system,user}.txt` — generation contract
-- `Backend/agents/prompts/script_validation_{system,user}.txt` — C1-C7 review contract
-- `Backend/agents/modules/ScriptOutputValidator.cs` — the deterministic format gate
-- `Backend/agents/modules/ScriptGeneratorAgent.cs` — the WPF per-item loop this mirrors
+- `Backend/Modules/generate_scripts/prompts/script_generator_{system,user}.txt` — generation contract
+- `Backend/Modules/generate_scripts/prompts/script_validation_{system,user}.txt` — C1-C7 review contract
+- `Backend/Modules/generate_scripts/ScriptOutputValidator.cs` — the deterministic format gate
+- `Backend/Modules/generate_scripts/ScriptGeneratorAgent.cs` — the WPF per-item loop this mirrors
