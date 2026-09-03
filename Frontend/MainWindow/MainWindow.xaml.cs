@@ -37,6 +37,37 @@ namespace SQLAuditor.Wpf
             public string Remarks { get; set; } = string.Empty;
             public string? SelectedOutcome { get; set; }
             public bool IsSubmitted { get; set; }
+
+            // The enriched result for the submitted outcome+remarks, so re-persisting after
+            // the engine's placeholder write never repeats the LLM call.
+            public SQLAuditor.Lib.ChecklistResult? EnrichedResult { get; set; }
+            public string? EnrichedKey { get; set; }
+        }
+
+        private sealed class ManualCheckExportRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Area { get; init; } = string.Empty;
+            public string Description { get; init; } = string.Empty;
+            public string Verification { get; init; } = string.Empty;
+            public string ManualSteps { get; init; } = string.Empty;
+            public string Status { get; init; } = string.Empty;
+            public string Decision { get; init; } = string.Empty;
+            public string Evidence { get; init; } = string.Empty;
+        }
+
+        private sealed class ManualCheckImportRow
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Decision { get; init; } = string.Empty;
+            public string Evidence { get; init; } = string.Empty;
+            public string ManualSteps { get; init; } = string.Empty;
+        }
+
+        private sealed class ManualCheckImportFile
+        {
+            public System.Collections.Generic.List<ManualCheckImportRow> Rows { get; } = new();
+            public System.Collections.Generic.List<string> Issues { get; } = new();
         }
 
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
@@ -45,24 +76,49 @@ namespace SQLAuditor.Wpf
         private bool _isLlmVerified = false;
         private Auditor? _auditor;
         private System.Threading.CancellationTokenSource? _evaluationCts;
+        private System.Threading.CancellationTokenSource? _scriptGenerationCts;
         private bool _isEvaluating = false;
+        private bool _isGeneratingScripts = false;
         private bool _allowTabChange = false;
         private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
         private bool _checklistLoaded = false;
+        // guards two-way sync between the "Select All" checkbox and the individual checklist checkboxes
+        private bool _suppressSelectAllSync = false;
         // keep area association for items so UI can render Area -> Category -> Item
         private System.Collections.Generic.List<(string Area, SQLAuditor.Lib.ChecklistItem Item)>? _loadedStructure;
         private System.Collections.Generic.Dictionary<string, string>? _itemTypeMap;
         private System.Collections.Generic.Dictionary<string, string[]>? _itemScriptMap;
+        private System.Collections.Generic.HashSet<string> _mcpFeasibleItemIds = new(StringComparer.OrdinalIgnoreCase);
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _manualQueue;
         private int _manualIndex = -1;
+        // Checklist position per item id, so manual items generated in parallel stay in order.
+        private System.Collections.Generic.Dictionary<string, int>? _checklistOrder;
         private System.Collections.Generic.Dictionary<string, string>? _manualInstructions;
         private System.Collections.Generic.Dictionary<string, ManualEvaluationState>? _manualStateMap;
         private System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>? _evalItemMap;
         private System.Collections.Generic.Dictionary<string, (string Status, string Technique)>? _evalStatusMap;
         private bool _isHydratingManualUi = false;
+        // Coalesces EvalTree rebuilds: a full re-render per progress event blocks the dispatcher
+        // (and therefore the in-flight SQL/LLM continuations) once hundreds of items are loaded.
+        private bool _treeRenderQueued = false;
+        // Manual results are read-modify-written into one JSON file, so only one submission
+        // may enrich and persist at a time.
+        private readonly System.Threading.SemaphoreSlim _manualPersistLock = new(1, 1);
         // Selected checklist IDs are kept in-memory for the current session only
         private System.Collections.Generic.List<string>? _selectedIds;
+        // Checklist IDs that already have a reusable manual result in results/historical_last_run.json
+        private System.Collections.Generic.HashSet<string> _historicalManualIds = new(StringComparer.OrdinalIgnoreCase);
+        // Manual IDs the current run copied from those historical results: they arrive decided, so
+        // they have no ManualEvaluationState and must not be treated as an unfinished review.
+        private System.Collections.Generic.HashSet<string> _copiedManualIds = new(StringComparer.OrdinalIgnoreCase);
+        // guards the mapping-preview rebuild triggered by the Copy Manual Results checkbox
+        private bool _suppressCopyManualReload = false;
+        private readonly System.Collections.Generic.List<System.Windows.Controls.CheckBox> _databaseOptionCheckBoxes = new();
+        private System.Windows.Controls.CheckBox? _allDatabasesCheckBox;
+        private bool _suppressDatabaseSelectionSync = false;
+        private int _sqlConnectionInputsVersion = 0;
+        private bool _isVerifyingSql = false;
 
         public MainWindow()
         {
@@ -81,10 +137,16 @@ namespace SQLAuditor.Wpf
                     SqlUserBox.Visibility = Visibility.Collapsed;
                     SqlPassBox.Visibility = Visibility.Collapsed;
                 }
+                InvalidateSqlVerification();
             };
+            FqdnText.TextChanged += (s, e) => InvalidateSqlVerification();
+            SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
+            RefreshHistoricalManualAvailability();
+            RefreshCustomChecklistCard();
             LoadChecklistBtn.IsEnabled = true;
             Log("Opened on Login view.");
             UpdateStageIndicators();
@@ -124,12 +186,26 @@ namespace SQLAuditor.Wpf
                 {
                     Log("Agent health check failed: " + exAvail.Message);
                 }
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "progress_stream.txt");
+                string? watchedPath = null;
                 while (true)
                 {
                     if (token.IsCancellationRequested) return;
                     try
                     {
+                        var activeRunDirectory = AuditOutputPaths.ActiveRunDirectory;
+                        if (activeRunDirectory == null)
+                        {
+                            try { await Task.Delay(1000, token); } catch (TaskCanceledException) { return; }
+                            continue;
+                        }
+
+                        var path = System.IO.Path.Combine(activeRunDirectory, "progress_stream.txt");
+                        if (!string.Equals(path, watchedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            watchedPath = path;
+                            _progressStreamPos = 0;
+                        }
+
                         if (System.IO.File.Exists(path))
                         {
                             using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
@@ -154,6 +230,44 @@ namespace SQLAuditor.Wpf
             catch { }
         }
 
+        // The first run has no results/historical_last_run.json, so there is nothing to copy and
+        // the checkbox stays disabled (and unchecked).
+        private void RefreshHistoricalManualAvailability()
+        {
+            try
+            {
+                _historicalManualIds = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds();
+            }
+            catch
+            {
+                _historicalManualIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (CopyManualResultsCb == null) return;
+
+            var available = _historicalManualIds.Count > 0;
+            CopyManualResultsCb.IsEnabled = available;
+            if (!available && CopyManualResultsCb.IsChecked == true)
+            {
+                _suppressCopyManualReload = true;
+                try { CopyManualResultsCb.IsChecked = false; }
+                finally { _suppressCopyManualReload = false; }
+            }
+        }
+
+        private bool UseHistoricalManualResults =>
+            CopyManualResultsCb?.IsChecked == true && _historicalManualIds.Count > 0;
+
+        private void CopyManualResultsCb_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_suppressCopyManualReload) return;
+            Log(UseHistoricalManualResults
+                ? $"Copy Manual Results enabled — {_historicalManualIds.Count} manual result(s) available from last runs."
+                : "Copy Manual Results disabled — every manual item will be evaluated normally.");
+            // Mapping Preview classifies items by how they will be evaluated, so it is rebuilt.
+            if (_checklistLoaded) LoadChecklistBtn_Click(sender, e);
+        }
+
         private async void LoadChecklistBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_auditor == null)
@@ -162,6 +276,7 @@ namespace SQLAuditor.Wpf
                 _auditor = new Auditor("");
                 Log("No DB connection provided — using offline auditor for checklist load.");
             }
+            RefreshHistoricalManualAvailability();
             Log("Loading checklist structure...");
             try
             {
@@ -169,6 +284,10 @@ namespace SQLAuditor.Wpf
 
                 // Ensure checklist is loaded
                 System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
+                // Mirrors Auditor.CanTryMcp: a script-less admin or documentation check can never be
+                // decided by MCP, so it must not be offered as AI-MCP here either.
+                var operatorEvaluatedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
@@ -176,7 +295,58 @@ namespace SQLAuditor.Wpf
                     while (dir != null)
                     {
                         var candidate = Path.Combine(dir.FullName, "Backend", "checklist", "deterministic-script-mapping.json");
-                        if (File.Exists(candidate)) { root = dir.FullName; mappingFile = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, string[]?>>(File.ReadAllText(candidate)) ?? new(); break; }
+                        if (File.Exists(candidate))
+                        {
+                            root = dir.FullName;
+                            using var mapDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(candidate));
+                            foreach (var prop in mapDoc.RootElement.EnumerateObject())
+                            {
+                                if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                {
+                                    var arr = new System.Collections.Generic.List<string>();
+                                    foreach (var el in prop.Value.EnumerateArray())
+                                    {
+                                        var s = el.GetString();
+                                        if (!string.IsNullOrWhiteSpace(s)) arr.Add(s);
+                                    }
+                                    mappingFile[prop.Name] = arr.ToArray();
+                                }
+                                else if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                {
+                                    if (prop.Value.TryGetProperty("script_file", out var sf))
+                                    {
+                                        if (sf.ValueKind == System.Text.Json.JsonValueKind.String)
+                                        {
+                                            var s = sf.GetString();
+                                            mappingFile[prop.Name] = string.IsNullOrWhiteSpace(s) ? null : new[] { s };
+                                        }
+                                        else
+                                        {
+                                            // script_file is null (non-feasible item)
+                                            mappingFile[prop.Name] = null;
+                                        }
+                                    }
+
+                                    var isOperatorEvaluated =
+                                        (prop.Value.TryGetProperty("IsAdminCheck", out var adminCheck)
+                                            && adminCheck.ValueKind == System.Text.Json.JsonValueKind.True)
+                                        || (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck)
+                                            && docCheck.ValueKind == System.Text.Json.JsonValueKind.True);
+                                    if (isOperatorEvaluated) operatorEvaluatedIds.Add(prop.Name);
+
+                                    if (!isOperatorEvaluated
+                                        && (!prop.Value.TryGetProperty("script_file", out var mappedScript)
+                                            || mappedScript.ValueKind == System.Text.Json.JsonValueKind.Null
+                                            || (mappedScript.ValueKind == System.Text.Json.JsonValueKind.String && string.IsNullOrWhiteSpace(mappedScript.GetString())))
+                                        && prop.Value.TryGetProperty("MCP_Feasibility", out var mcpCheck)
+                                        && mcpCheck.ValueKind == System.Text.Json.JsonValueKind.True)
+                                    {
+                                        _mcpFeasibleItemIds.Add(prop.Name);
+                                    }
+                                }
+                            }
+                            break;
+                        }
                         dir = dir.Parent;
                     }
                 }
@@ -211,6 +381,7 @@ namespace SQLAuditor.Wpf
                             }
                             if (valid.Count > 0)
                             {
+                                // A mapped script wins: mirrors Auditor.IsScriptMapped.
                                 _itemTypeMap[it.Id] = "Script";
                                 _itemScriptMap[it.Id] = valid.ToArray();
                             }
@@ -261,6 +432,7 @@ namespace SQLAuditor.Wpf
                 }
 
                 var mappingRows = new System.Collections.Generic.List<dynamic>();
+                var copyManual = UseHistoricalManualResults;
                 // Use in-memory selected IDs (if any) to determine which items to show/process
                 var itemsToProcess = (_selectedIds != null && _selectedIds.Count > 0) ? (_loadedItems?.Where(i => _selectedIds.Contains(i.Id)).ToList() ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : (selectedItems.Count == 0 ? (_loadedItems ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>()) : selectedItems);
                 foreach (var it in itemsToProcess)
@@ -274,15 +446,18 @@ namespace SQLAuditor.Wpf
                     }
                     else
                     {
-                        type = _isVerified && _auditor != null ? "AI-MCP" : "AI-Manual";
+                        type = _mcpFeasibleItemIds.Contains(it.Id) ? "AI-MCP" : "AI-Manual";
 
                         // persist into maps
                         if (_itemTypeMap != null) _itemTypeMap[it.Id] = type;
                         if (_itemScriptMap != null) _itemScriptMap[it.Id] = scripts;
                     }
 
+                    // Only non-script items can be served from a previous run's manual results.
+                    var copied = copyManual && type != "Script" && _historicalManualIds.Contains(it.Id);
+
                     var area = _loadedStructure?.FirstOrDefault(x => x.Item.Id == it.Id).Area ?? string.Empty;
-                    mappingRows.Add(new { Type = type, Area = area, Category = it.Category, Id = it.Id, Description = it.Description, Verification = it.Verification, ScriptFiles = string.Join(';', scripts) });
+                    mappingRows.Add(new { Type = type, Copied = copied, Area = area, Category = it.Category, Id = it.Id, Description = it.Description, Verification = it.Verification, ScriptFiles = string.Join(';', scripts) });
                 }
 
                 // Populate TreeView grouped by Area -> Category -> Item
@@ -298,7 +473,7 @@ namespace SQLAuditor.Wpf
 
                     // populate mapping tree hierarchically: DisplayType -> Area -> Category -> Item (with counts)
                     MappingTree.Items.Clear();
-                    var normalized = mappingRows.Select(r => new { DisplayType = ((string)r.Type) == "Script" ? "Script" : "AI (MCP/Manual)", Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
+                    var normalized = mappingRows.Select(r => new { DisplayType = (bool)r.Copied ? "Copied from last runs" : (string)r.Type, Area = (string)r.Area, Category = (string)r.Category, Id = (string)r.Id, Description = (string)r.Description, ScriptFiles = (string)r.ScriptFiles });
                     var byType = normalized.GroupBy(r => r.DisplayType).OrderBy(t => t.Key);
                     foreach (var typeGrp in byType)
                     {
@@ -339,6 +514,7 @@ namespace SQLAuditor.Wpf
                 // mark that user has explicitly loaded the checklist so UI actions become available
                 _checklistLoaded = true;
                 StartEvalBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
+                GenerateScriptsBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
                 Log("Checklist loaded.");
             }
             catch (Exception ex)
@@ -355,6 +531,13 @@ namespace SQLAuditor.Wpf
 
         private async void StartEvalBtn_Click(object sender, RoutedEventArgs e)
         {
+            var targetDatabases = GetSelectedDatabaseNames();
+            if (targetDatabases.Length == 0)
+            {
+                MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             // Initialize auditor with declared FQDN for this evaluation run
             var fqdn = !string.IsNullOrWhiteSpace(FqdnText.Text) ? FqdnText.Text.Trim() : "abc.windows.net";
             await EnsureAuditor(fqdn);
@@ -384,8 +567,29 @@ namespace SQLAuditor.Wpf
             _manualIndex = -1;
             _evalItemMap = new System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)>();
             _evalStatusMap = new System.Collections.Generic.Dictionary<string, (string Status, string Technique)>();
+            _checklistOrder = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (_loadedStructure != null)
+            {
+                var checklistPosition = 0;
+                foreach (var pair in _loadedStructure) _checklistOrder[pair.Item.Id] = checklistPosition++;
+            }
 
             var selectedLookup = new System.Collections.Generic.HashSet<string>(selected);
+
+            // Mirrors the engine's reuse predicate: a non-script item with a completed manual
+            // result recorded by an earlier run is copied forward instead of being reviewed.
+            _copiedManualIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (UseHistoricalManualResults)
+            {
+                foreach (var id in selected)
+                {
+                    if (!_historicalManualIds.Contains(id)) continue;
+                    if (_itemTypeMap != null && _itemTypeMap.TryGetValue(id, out var t)
+                        && string.Equals(t, "Script", StringComparison.OrdinalIgnoreCase)) continue;
+                    _copiedManualIds.Add(id);
+                }
+            }
+
             if (_loadedStructure != null)
             {
                 foreach (var pair in _loadedStructure)
@@ -398,7 +602,7 @@ namespace SQLAuditor.Wpf
                     {
                         initialTechnique = "Script";
                     }
-                    else if (_isVerified && _auditor != null)
+                    else if (_isVerified && _auditor != null && _mcpFeasibleItemIds.Contains(pair.Item.Id))
                     {
                         initialTechnique = "AI-MCP";
                     }
@@ -408,6 +612,7 @@ namespace SQLAuditor.Wpf
             }
 
             RenderEvaluationTree();
+            UpdateEvaluationProgressDisplay();
             ShowManualAtIndex();
             Log("Starting evaluation...");
 
@@ -436,7 +641,7 @@ namespace SQLAuditor.Wpf
                                 _evalStatusMap[r.Id] = (uiOutcome, r.Technique);
                             }
 
-                            RenderEvaluationTree();
+                            RequestEvaluationTreeRender();
                             UpdateManualActionButtonStates(GetCurrentManualSelectedOutcome(), IsCurrentManualSubmitted());
                         }
                     });
@@ -457,7 +662,7 @@ namespace SQLAuditor.Wpf
                         if (_manualQueue == null) _manualQueue = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
                         if (_manualInstructions == null) _manualInstructions = new System.Collections.Generic.Dictionary<string, string>();
                         if (_manualStateMap == null) _manualStateMap = new System.Collections.Generic.Dictionary<string, ManualEvaluationState>();
-                        if (!_manualQueue.Any(m => m.Id == item.Id)) _manualQueue.Add(item);
+                        InsertManualQueueItem(item);
                         _manualInstructions[item.Id] = instructions ?? string.Empty;
 
                         var state = EnsureManualState(item.Id);
@@ -470,7 +675,7 @@ namespace SQLAuditor.Wpf
                             {
                                 _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
                             }
-                            RenderEvaluationTree();
+                            RequestEvaluationTreeRender();
                         }
                         ShowManualAtIndex();
                     });
@@ -489,17 +694,37 @@ namespace SQLAuditor.Wpf
             {
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
-                var results = await _auditor.RunChecklistAsync(progress, RequestUserInput, selected.Count == 0 ? null : selected, _evaluationCts.Token);
+                var token = _evaluationCts.Token;
+                var idsForRun = selected.Count == 0 ? null : selected;
+                var useHistorical = UseHistoricalManualResults;
+                if (useHistorical)
+                {
+                    Log($"Reusing manual results from last runs for {_copiedManualIds.Count} selected item(s); manual review is skipped for them.");
+                }
+                // The engine must not run on the dispatcher. Awaiting it directly kept every SQL
+                // and LLM continuation on the UI thread, so a manual Pass/Fail click (file I/O +
+                // full tree rebuild) stalled the in-flight script pipeline; the aborted command
+                // then left the shared connection broken and every remaining script item came
+                // back as a SQL error, which the outcome mapper scores as Fail.
+                var results = await Task.Run(
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases),
+                    token);
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
-                ReapplySubmittedManualResults();
+                await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
+                UpdateEvaluationProgressDisplay();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log("Summary report generated at results/final_report.md");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Evaluation cancelled. Existing result files were left unchanged.");
             }
             catch (Exception ex)
             {
@@ -548,12 +773,24 @@ namespace SQLAuditor.Wpf
 
                 _evaluationCts = new System.Threading.CancellationTokenSource();
                 _isEvaluating = true;
-                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token);
+                var targetDatabases = GetSelectedDatabaseNames();
+                if (targetDatabases.Length == 0)
+                {
+                    MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
+                UpdateEvaluationProgressDisplay();
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
+                MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full final_report.md are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log("Summary report generated at results/final_report.md");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Evaluation cancelled. Existing result files were left unchanged.");
             }
             catch (Exception ex)
             {
@@ -565,7 +802,7 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void SubmitBtn_Click(object sender, RoutedEventArgs e)
+        private async void SubmitBtn_Click(object sender, RoutedEventArgs e)
         {
             if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
             {
@@ -587,22 +824,21 @@ namespace SQLAuditor.Wpf
             SaveCurrentManualDraft(false);
             var state = EnsureManualState(item.Id);
 
-            var inferred = EvaluateManualOutcome(state.Remarks);
-            if (string.Equals(inferred, "Pass", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(inferred, "Fail", StringComparison.OrdinalIgnoreCase))
+            // The reviewer states the decision inside the evidence text, e.g. "Fail - no topology document".
+            var decision = ParseManualDecision(state.Remarks);
+            if (decision == null)
             {
-                // On submit, prefer explicit outcome mentioned in remarks.
-                state.SelectedOutcome = inferred;
-            }
-            else if (!string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show("Select Passed/Failed or include pass/fail in remarks before submitting.", "Manual Evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(
+                    "Start the input with your decision, 'Pass' or 'Fail', followed by the reason before submitting.",
+                    "Manual Evaluation",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
                 return;
             }
 
+            state.SelectedOutcome = decision;
             state.IsSubmitted = true;
-            PersistManualResult(item, state);
+            await PersistManualResultAsync(item, state);
 
             if (_evalStatusMap != null)
             {
@@ -614,32 +850,31 @@ namespace SQLAuditor.Wpf
             Log($"Submitted manual evaluation for {item.Id} as {state.SelectedOutcome}.");
         }
 
-        private void MarkPassedBtn_Click(object sender, RoutedEventArgs e)
+        // Reads the leading Pass/Fail verdict from the reviewer's evidence text; falls back to an
+        // unambiguous verdict word elsewhere in the text.
+        private static string? ParseManualDecision(string? text)
         {
-            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            if (string.IsNullOrWhiteSpace(text)) return null;
+
+            var leading = System.Text.RegularExpressions.Regex.Match(
+                text,
+                @"^\s*(?<decision>pass(?:ed)?|fail(?:ed)?)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (leading.Success)
             {
-                _pendingUserInput.TrySetResult("PASS");
-                Log("Marked item as Passed (manual).");
-                AdvanceManualIndex();
-                return;
+                return leading.Groups["decision"].Value.StartsWith("p", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
             }
 
-            SaveCurrentManualDraft(false);
-            SetManualOutcomeForCurrentItem("Pass", persistImmediately: true);
-        }
-
-        private void MarkFailedBtn_Click(object sender, RoutedEventArgs e)
-        {
-            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            var hasPass = System.Text.RegularExpressions.Regex.IsMatch(
+                text, @"\bpass(?:ed)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var hasFail = System.Text.RegularExpressions.Regex.IsMatch(
+                text, @"\bfail(?:ed|ure)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (hasPass ^ hasFail)
             {
-                _pendingUserInput.TrySetResult("FAIL");
-                Log("Marked item as Failed (manual).");
-                AdvanceManualIndex();
-                return;
+                return hasPass ? "Pass" : "Fail";
             }
 
-            SaveCurrentManualDraft(false);
-            SetManualOutcomeForCurrentItem("Fail", persistImmediately: true);
+            return null;
         }
 
         private void PrevManualBtn_Click(object sender, RoutedEventArgs e)
@@ -743,7 +978,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
                 if (!System.IO.File.Exists(path)) return Array.Empty<ChecklistResult>();
                 var txt = System.IO.File.ReadAllText(path);
                 return JsonSerializer.Deserialize<ChecklistResult[]>(txt) ?? Array.Empty<ChecklistResult>();
@@ -754,63 +989,320 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void MarkPendingManualAsFailed()
+        private System.Collections.Generic.List<ManualCheckExportRow> GetManualChecksForExport()
         {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
-            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
-            if (System.IO.File.Exists(path))
+            var rows = new System.Collections.Generic.List<ManualCheckExportRow>();
+            if (_evalItemMap == null || _evalStatusMap == null) return rows;
+
+            var persisted = LoadSummaryResultsFromDisk()
+                .GroupBy(result => result.Id, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var pair in _evalItemMap.OrderBy(entry => entry.Value.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
             {
-                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+                if (!_evalStatusMap.TryGetValue(pair.Key, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique))
+                {
+                    continue;
+                }
+
+                ManualEvaluationState? state = null;
+                _manualStateMap?.TryGetValue(pair.Key, out state);
+                persisted.TryGetValue(pair.Key, out var persistedResult);
+
+                var instructions = state?.Instructions ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(instructions)
+                    && _manualInstructions != null
+                    && _manualInstructions.TryGetValue(pair.Key, out var generatedInstructions))
+                {
+                    instructions = generatedInstructions;
+                }
+
+                rows.Add(new ManualCheckExportRow
+                {
+                    Id = pair.Value.Item.Id,
+                    Area = pair.Value.Area,
+                    Description = pair.Value.Item.Description,
+                    Verification = pair.Value.Item.Verification,
+                    ManualSteps = instructions,
+                    Status = statusEntry.Status,
+                    Decision = state?.SelectedOutcome
+                        ?? (persistedResult != null && HistoricalManualResultsStore.IsCompletedOutcome(persistedResult.Outcome)
+                            ? persistedResult.Outcome
+                            : string.Empty),
+                    Evidence = state?.Remarks ?? persistedResult?.Evidence ?? string.Empty,
+                });
             }
 
-            var pendingIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (_evalStatusMap != null)
+            return rows;
+        }
+
+        private System.Collections.Generic.HashSet<string> GetUnresolvedManualCheckIds()
+        {
+            var unresolved = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_evalItemMap == null || _evalStatusMap == null) return unresolved;
+
+            foreach (var pair in _evalItemMap)
             {
-                foreach (var kv in _evalStatusMap)
+                if (!_evalStatusMap.TryGetValue(pair.Key, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
+                    || _copiedManualIds.Contains(pair.Key))
                 {
-                    if (string.Equals(kv.Value.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
-                        && (string.Equals(kv.Value.Status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(kv.Value.Status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                }
+
+                var status = statusEntry.Status ?? string.Empty;
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
+                {
+                    continue;
+                }
+
+                if (_manualStateMap != null
+                    && _manualStateMap.TryGetValue(pair.Key, out var state)
+                    && state.IsSubmitted)
+                {
+                    continue;
+                }
+
+                unresolved.Add(pair.Key);
+            }
+
+            return unresolved;
+        }
+
+        private static void WriteManualChecksCsv(string path, System.Collections.Generic.IEnumerable<ManualCheckExportRow> rows)
+        {
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine(string.Join(",", new[]
+            {
+                "Checklist ID", "Area", "Description", "Verification", "Manual Steps",
+                "Current Status", "Decision", "Evidence",
+            }.Select(ToCsvField)));
+
+            foreach (var row in rows)
+            {
+                csv.AppendLine(string.Join(",", new[]
+                {
+                    row.Id, row.Area, row.Description, row.Verification, row.ManualSteps,
+                    row.Status, row.Decision, row.Evidence,
+                }.Select(ToCsvField)));
+            }
+
+            System.IO.File.WriteAllText(path, csv.ToString(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        }
+
+        private static string ToCsvField(string? value) =>
+            $"\"{(value ?? string.Empty).Replace("\"", "\"\"")}\"";
+
+        private static ManualCheckImportFile ReadManualChecksCsv(string path)
+        {
+            var result = new ManualCheckImportFile();
+            using var parser = new Microsoft.VisualBasic.FileIO.TextFieldParser(path, System.Text.Encoding.UTF8)
+            {
+                TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited,
+                HasFieldsEnclosedInQuotes = true,
+                TrimWhiteSpace = false,
+            };
+            parser.SetDelimiters(",");
+
+            var headers = parser.ReadFields();
+            if (headers == null || headers.Length == 0)
+                throw new InvalidDataException("The CSV is empty or has no header row.");
+
+            var headerIndexes = headers
+                .Select((header, index) => new { Header = (header ?? string.Empty).Trim().TrimStart('\uFEFF'), Index = index })
+                .GroupBy(entry => entry.Header, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First().Index, StringComparer.OrdinalIgnoreCase);
+
+            var requiredHeaders = new[] { "Checklist ID", "Decision", "Evidence" };
+            var missingHeaders = requiredHeaders.Where(header => !headerIndexes.ContainsKey(header)).ToArray();
+            if (missingHeaders.Length > 0)
+                throw new InvalidDataException("Missing required CSV column(s): " + string.Join(", ", missingHeaders));
+
+            var seenIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (!parser.EndOfData)
+            {
+                var lineNumber = parser.LineNumber;
+                string[]? fields;
+                try
+                {
+                    fields = parser.ReadFields();
+                }
+                catch (Microsoft.VisualBasic.FileIO.MalformedLineException ex)
+                {
+                    result.Issues.Add($"Line {lineNumber}: malformed CSV ({ex.Message}).");
+                    continue;
+                }
+
+                if (fields == null || fields.All(string.IsNullOrWhiteSpace)) continue;
+
+                string Field(string header)
+                {
+                    if (!headerIndexes.TryGetValue(header, out var index) || index >= fields.Length) return string.Empty;
+                    return fields[index]?.Trim() ?? string.Empty;
+                }
+
+                var id = Field("Checklist ID");
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    result.Issues.Add($"Line {lineNumber}: Checklist ID is empty.");
+                    continue;
+                }
+
+                if (!seenIds.Add(id))
+                {
+                    result.Issues.Add($"Line {lineNumber}: duplicate Checklist ID '{id}'.");
+                    continue;
+                }
+
+                var decision = Field("Decision").ToLowerInvariant() switch
+                {
+                    "pass" or "passed" or "p" => "Pass",
+                    "fail" or "failed" or "f" => "Fail",
+                    "" => string.Empty,
+                    _ => "Invalid",
+                };
+                if (decision.Length == 0)
+                {
+                    result.Issues.Add($"{id}: Decision is empty; enter Pass or Fail.");
+                    continue;
+                }
+                if (decision == "Invalid")
+                {
+                    result.Issues.Add($"{id}: Decision must be Pass or Fail.");
+                    continue;
+                }
+
+                var evidence = Field("Evidence");
+                if (string.IsNullOrWhiteSpace(evidence))
+                {
+                    result.Issues.Add($"{id}: Evidence is empty.");
+                    continue;
+                }
+
+                result.Rows.Add(new ManualCheckImportRow
+                {
+                    Id = id,
+                    Decision = decision,
+                    Evidence = evidence,
+                    ManualSteps = Field("Manual Steps"),
+                });
+            }
+
+            return result;
+        }
+
+        private async Task<(int Applied, int Ignored)> ApplyImportedManualChecksAsync(
+            System.Collections.Generic.IEnumerable<ManualCheckImportRow> importedRows)
+        {
+            if (_evalItemMap == null || _evalStatusMap == null) return (0, importedRows.Count());
+
+            var appliedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ignored = 0;
+            foreach (var imported in importedRows)
+            {
+                if (!_evalItemMap.TryGetValue(imported.Id, out var pair)
+                    || !_evalStatusMap.TryGetValue(imported.Id, out var statusEntry)
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
+                    || _copiedManualIds.Contains(imported.Id))
+                {
+                    ignored++;
+                    continue;
+                }
+
+                var state = EnsureManualState(imported.Id);
+                if (state.IsSubmitted)
+                {
+                    ignored++;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(state.Instructions) && !string.IsNullOrWhiteSpace(imported.ManualSteps))
+                    state.Instructions = imported.ManualSteps;
+                state.SelectedOutcome = imported.Decision;
+                state.Remarks = imported.Evidence;
+                state.IsSubmitted = true;
+                state.EnrichedResult = null;
+                state.EnrichedKey = null;
+
+                await PersistManualResultAsync(pair.Item, state);
+                _evalStatusMap[imported.Id] = (
+                    string.Equals(imported.Decision, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed",
+                    "AI-Manual");
+                appliedIds.Add(imported.Id);
+            }
+
+            _manualQueue?.RemoveAll(item => appliedIds.Contains(item.Id));
+            if (_manualQueue == null || _manualQueue.Count == 0)
+                _manualIndex = -1;
+            else if (_manualIndex >= _manualQueue.Count)
+                _manualIndex = _manualQueue.Count - 1;
+
+            ShowManualAtIndex();
+            RenderEvaluationTree();
+            return (appliedIds.Count, ignored);
+        }
+
+        private int MarkPendingManualAsSkipped(
+            System.Collections.Generic.IReadOnlyCollection<string> pendingIds,
+            string csvPath)
+        {
+            if (pendingIds.Count == 0) return 0;
+            if (_evalItemMap == null) return 0;
+
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            var exportedFileName = System.IO.Path.GetFileName(csvPath);
+            var skippedCount = 0;
+
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
+            {
+                var list = System.IO.File.Exists(path)
+                    ? JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path))
+                        ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>()
+                    : new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+
+                foreach (var id in pendingIds)
+                {
+                    if (!_evalItemMap.TryGetValue(id, out var pair)) continue;
+                    var item = pair.Item;
+                    var evidence = $"Manual evaluation was skipped for this report. Verification steps were exported to {exportedFileName} for offline completion.";
+                    var skippedResult = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(
+                        new SQLAuditor.Lib.ChecklistResult(
+                            item.Id,
+                            item.Description,
+                            item.Verification,
+                            SQLAuditor.Lib.SkippedEvaluation.Outcome,
+                            evidence,
+                            item.ScriptFile,
+                            "AI-Manual"));
+                    var index = list.FindIndex(result => string.Equals(result.Id, item.Id, StringComparison.OrdinalIgnoreCase));
+                    if (index >= 0) list[index] = skippedResult;
+                    else list.Add(skippedResult);
+                    skippedCount++;
+
+                    if (_evalStatusMap != null)
                     {
-                        pendingIds.Add(kv.Key);
+                        _evalStatusMap[item.Id] = (SQLAuditor.Lib.SkippedEvaluation.Outcome, "AI-Manual");
                     }
                 }
+
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+                System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
             }
 
-            if (_manualQueue != null)
+            _manualQueue?.RemoveAll(item => pendingIds.Contains(item.Id));
+            if (_manualQueue == null || _manualQueue.Count == 0)
             {
-                foreach (var it in _manualQueue)
-                {
-                    pendingIds.Add(it.Id);
-                }
+                _manualIndex = -1;
             }
-
-            foreach (var id in pendingIds)
+            else if (_manualIndex >= _manualQueue.Count)
             {
-                if (_evalItemMap == null || !_evalItemMap.TryGetValue(id, out var pair)) continue;
-                var item = pair.Item;
-                var failEvidence = "Marked as Fail because manual evaluation was skipped by the operator.";
-                var failResult = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, "Fail", failEvidence, item.ScriptFile, "AI-Manual");
-                failResult = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(failResult);
-                var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
-                if (idx >= 0) list[idx] = failResult;
-                else list.Add(failResult);
-
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = ("Failed", "AI-Manual");
-                }
+                _manualIndex = _manualQueue.Count - 1;
             }
-
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
-
-            if (_manualQueue != null) _manualQueue.Clear();
-            _manualIndex = -1;
-            ManualTitle.Text = "Manual steps";
-            ManualStepsText.Text = string.Empty;
-            ManualOutputBox.Text = string.Empty;
+            ShowManualAtIndex();
             RenderEvaluationTree();
+            return skippedCount;
         }
 
         private void UpdateSummaryView(System.Collections.Generic.IReadOnlyCollection<ChecklistResult> results)
@@ -820,6 +1312,7 @@ namespace SQLAuditor.Wpf
             var passed = resultList.Count(r => string.Equals(r.Outcome, "Pass", StringComparison.OrdinalIgnoreCase));
             var failed = resultList.Count(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
             var review = resultList.Count(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase));
+            var skipped = resultList.Count(r => SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(r.Outcome));
             var script = resultList.Count(r => string.Equals(r.Technique, "Script", StringComparison.OrdinalIgnoreCase));
             var mcp = resultList.Count(r => string.Equals(r.Technique, "AI-MCP", StringComparison.OrdinalIgnoreCase));
             var manual = resultList.Count(r => string.Equals(r.Technique, "AI-Manual", StringComparison.OrdinalIgnoreCase));
@@ -848,7 +1341,8 @@ namespace SQLAuditor.Wpf
                 {
                     new SummaryMetricItem { Label = "Passed", Value = passed, Total = Math.Max(total, 1), Detail = "Items marked Pass", BarBrush = System.Windows.Media.Brushes.ForestGreen },
                     new SummaryMetricItem { Label = "Failed", Value = failed, Total = Math.Max(total, 1), Detail = "Items marked Fail", BarBrush = System.Windows.Media.Brushes.IndianRed },
-                    new SummaryMetricItem { Label = "Needs Review", Value = review, Total = Math.Max(total, 1), Detail = "Items requiring follow-up", BarBrush = System.Windows.Media.Brushes.Goldenrod }
+                    new SummaryMetricItem { Label = "Needs Review", Value = review, Total = Math.Max(total, 1), Detail = "Items requiring follow-up", BarBrush = System.Windows.Media.Brushes.Goldenrod },
+                    new SummaryMetricItem { Label = "Skipped", Value = skipped, Total = Math.Max(total, 1), Detail = "Exported and excluded from scoring", BarBrush = System.Windows.Media.Brushes.SlateGray }
                 };
             }
 
@@ -869,6 +1363,8 @@ namespace SQLAuditor.Wpf
             if (string.Equals(outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return "Evaluating";
             if (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Passed", StringComparison.OrdinalIgnoreCase)) return "Passed";
             if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase) && string.Equals(outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) return "Pending Manual Evaluation";
+            if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(outcome)) return SQLAuditor.Lib.SkippedEvaluation.Outcome;
+            if (SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(outcome)) return "Not Applicable";
             if (string.Equals(outcome, "Not Started", StringComparison.OrdinalIgnoreCase)) return "Not Started";
             return "Failed";
         }
@@ -879,14 +1375,61 @@ namespace SQLAuditor.Wpf
             if (string.Equals(status, "Evaluating", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DarkOrange;
             if (string.Equals(status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DodgerBlue;
             if (string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.Goldenrod;
+            if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)) return System.Windows.Media.Brushes.SlateGray;
             if (string.Equals(status, "Not Started", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DimGray;
+            if (string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.SlateGray;
             return System.Windows.Media.Brushes.IndianRed;
+        }
+
+        // Queues one rebuild at background priority instead of rendering synchronously on every
+        // engine progress event, so status updates never monopolise the dispatcher.
+        private void RequestEvaluationTreeRender()
+        {
+            if (_treeRenderQueued) return;
+            _treeRenderQueued = true;
+            this.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
+            {
+                _treeRenderQueued = false;
+                RenderEvaluationTree();
+                UpdateEvaluationProgressDisplay();
+            }));
+        }
+
+        private static bool IsTerminalEvaluationStatus(string status)
+        {
+            return string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Skipped", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Complete", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Error", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateEvaluationProgressDisplay()
+        {
+            if (_evalItemMap == null || _evalStatusMap == null)
+            {
+                EvalProgressBar.Value = 0;
+                EvalProgressBar.Maximum = 1;
+                EvalProgressText.Text = "0 / 0";
+                return;
+            }
+
+            var total = _evalItemMap.Count;
+            var finished = _evalStatusMap.Count(kvp => _evalItemMap.ContainsKey(kvp.Key) && IsTerminalEvaluationStatus(kvp.Value.Status));
+            var max = Math.Max(total, 1);
+
+            EvalProgressBar.Minimum = 0;
+            EvalProgressBar.Maximum = max;
+            EvalProgressBar.Value = Math.Min(finished, max);
+            EvalProgressText.Text = $"{finished} / {total}";
         }
 
         private void RenderEvaluationTree()
         {
             if (_evalItemMap == null || _evalStatusMap == null) return;
-
             EvalTree.Items.Clear();
             var techniqueOrder = new[] { "Script", "AI-MCP", "AI-Manual" };
 
@@ -961,7 +1504,7 @@ namespace SQLAuditor.Wpf
             return "NeedsReview";
         }
 
-        private void ApplyDeferredManualDecision(string response)
+        private async Task ApplyDeferredManualDecisionAsync(string response)
         {
             try
             {
@@ -984,7 +1527,7 @@ namespace SQLAuditor.Wpf
                     _evalStatusMap[item.Id] = (status, "AI-Manual");
                 }
                 RenderEvaluationTree();
-                PersistManualResult(item, state);
+                await PersistManualResultAsync(item, state);
                 UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
                 Log($"Stored deferred manual result for {item.Id}: {outcome}");
 
@@ -1004,6 +1547,33 @@ namespace SQLAuditor.Wpf
 
             return _manualQueue[_manualIndex];
         }
+
+        // Manual guidance now arrives in completion order, but the reviewer steps through the queue
+        // by index, so each item is placed at its checklist position instead of being appended.
+        private void InsertManualQueueItem(SQLAuditor.Lib.ChecklistItem item)
+        {
+            _manualQueue ??= new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>();
+            if (_manualQueue.Any(m => string.Equals(m.Id, item.Id, StringComparison.OrdinalIgnoreCase))) return;
+
+            var order = ChecklistOrderOf(item.Id);
+            var position = _manualQueue.Count;
+            for (var i = 0; i < _manualQueue.Count; i++)
+            {
+                if (ChecklistOrderOf(_manualQueue[i].Id) > order)
+                {
+                    position = i;
+                    break;
+                }
+            }
+
+            _manualQueue.Insert(position, item);
+
+            // Keep the reviewer on the item they are currently looking at.
+            if (_manualIndex >= position) _manualIndex++;
+        }
+
+        private int ChecklistOrderOf(string id) =>
+            _checklistOrder != null && _checklistOrder.TryGetValue(id, out var index) ? index : int.MaxValue;
 
         private ManualEvaluationState EnsureManualState(string itemId)
         {
@@ -1057,80 +1627,78 @@ namespace SQLAuditor.Wpf
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
         }
 
-        private void SetManualOutcomeForCurrentItem(string outcome, bool persistImmediately = false)
+        private async Task PersistManualResultAsync(
+            SQLAuditor.Lib.ChecklistItem item,
+            ManualEvaluationState state,
+            bool forceWrite = false)
         {
-            var item = GetCurrentManualItem();
-            if (item == null)
-            {
-                Log("No pending manual checklist item selected.");
-                return;
-            }
-
-            var state = EnsureManualState(item.Id);
-            var changed = !string.Equals(state.SelectedOutcome, outcome, StringComparison.OrdinalIgnoreCase);
-            state.SelectedOutcome = outcome;
-
-            if (persistImmediately)
-            {
-                state.IsSubmitted = true;
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
-                    RenderEvaluationTree();
-                }
-                PersistManualResult(item, state);
-                UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
-                Log($"Marked {item.Id} as {outcome}.");
-                return;
-            }
-
-            if (changed && state.IsSubmitted)
-            {
-                state.IsSubmitted = false;
-                if (_evalStatusMap != null)
-                {
-                    _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
-                    RenderEvaluationTree();
-                }
-            }
-
-            UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
-            Log($"Selected {outcome} for {item.Id}. Click Submit to save.");
-        }
-
-        private void PersistManualResult(SQLAuditor.Lib.ChecklistItem item, ManualEvaluationState state)
-        {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
-            var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
-            if (System.IO.File.Exists(path))
-            {
-                try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
-            }
-
             var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
-            var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
-            var updated = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual")
+            var key = outcome + "\u0001" + state.Remarks;
+
+            await _manualPersistLock.WaitAsync();
+            try
             {
-                McpUsage = null,
-                McpExecutionTimeMs = null,
-                McpEvidence = null
-            };
-            // Back-fill the report fields (Score, Severity, Finding, Recommendation, ...)
-            // so manually evaluated items match the schema used by the report generator.
-            updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(updated);
+                SQLAuditor.Lib.ChecklistResult updated;
+                if (state.EnrichedResult != null && string.Equals(state.EnrichedKey, key, StringComparison.Ordinal))
+                {
+                    updated = state.EnrichedResult;
+                }
+                else
+                {
+                    if (_auditor != null)
+                    {
+                        Log($"Reviewing manual evidence for {item.Id}...");
+                        updated = await _auditor.BuildManualResultAsync(item, outcome, state.Instructions, state.Remarks);
+                    }
+                    else
+                    {
+                        var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
+                        updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(
+                            new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual"));
+                    }
 
-            var idx = list.FindIndex(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0) list[idx] = updated;
-            else list.Add(updated);
+                    state.EnrichedResult = updated;
+                    state.EnrichedKey = key;
+                }
 
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-            System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+                if (forceWrite || !_isEvaluating)
+                    WriteManualResultToDisk(updated);
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to save manual result for {item.Id}: {ex.Message}");
+            }
+            finally
+            {
+                _manualPersistLock.Release();
+            }
         }
 
-        // Re-writes operator-submitted manual Pass/Fail decisions to checklist_results.json.
-        // The engine persists manual items as "Evaluating" placeholders at the end of a run,
-        // which can clobber decisions made while evaluation was still in progress.
-        private void ReapplySubmittedManualResults()
+        private static void WriteManualResultToDisk(SQLAuditor.Lib.ChecklistResult updated)
+        {
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            // The engine writes this same file from its own thread at the end of a run.
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
+            {
+                var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
+                if (System.IO.File.Exists(path))
+                {
+                    try { list = JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path)) ?? new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); } catch { list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>(); }
+                }
+
+                var idx = list.FindIndex(x => string.Equals(x.Id, updated.Id, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0) list[idx] = updated;
+                else list.Add(updated);
+
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+                System.IO.File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+            }
+        }
+
+        // Writes operator-submitted manual Pass/Fail decisions after the engine has persisted
+        // the complete run. During evaluation they remain in memory, so cancellation cannot
+        // mix new manual rows into an earlier checklist_results.json.
+        private async Task ReapplySubmittedManualResultsAsync()
         {
             if (_manualQueue == null || _manualStateMap == null) return;
             foreach (var item in _manualQueue)
@@ -1140,14 +1708,14 @@ namespace SQLAuditor.Wpf
                     && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                      || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
                 {
-                    try { PersistManualResult(item, state); } catch { }
+                    await PersistManualResultAsync(item, state, forceWrite: true);
                 }
             }
         }
 
         private System.Collections.Generic.IReadOnlyCollection<ChecklistResult>? LoadPersistedResults()
         {
-            var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
+            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             if (!System.IO.File.Exists(path)) return null;
             try
             {
@@ -1156,47 +1724,31 @@ namespace SQLAuditor.Wpf
             catch { return null; }
         }
 
-        // Regenerates final_report.md from the current checklist_results.json so the report
-        // reflects re-applied manual decisions instead of the engine's placeholder write.
-        private void RegenerateReportFromPersisted()
+        // Regenerates final_report.md and audit_report.xlsx from the current
+        // checklist_results.json so both reports reflect re-applied manual decisions
+        // instead of the engine's placeholder write. historical_last_run.json is refreshed
+        // only when the reviewer explicitly asks for the report.
+        private void RegenerateReportFromPersisted(bool refreshHistoricalManualResults = false)
         {
             try
             {
-                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
-                var path = System.IO.Path.Combine(dir, "checklist_results.json");
-                if (!System.IO.File.Exists(path)) return;
-                var arr = JsonSerializer.Deserialize<ChecklistResult[]>(System.IO.File.ReadAllText(path)) ?? Array.Empty<ChecklistResult>();
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    path,
-                    System.IO.Path.Combine(dir, "final_report.md"),
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Length,
-                    });
+                var message = SQLAuditor.Lib.Auditor.GenerateReports(refreshHistoricalManualResults);
+                if (!string.IsNullOrWhiteSpace(message)) Log(message.Replace(Environment.NewLine, " | "));
+                RefreshHistoricalManualAvailability();
             }
-            catch { }
+            catch (Exception ex) { Log("Failed to regenerate reports: " + ex.Message); }
         }
 
         private void UpdateManualActionButtonStates(string? selectedOutcome, bool isSubmitted)
         {
-            if (MarkPassedBtn == null || MarkFailedBtn == null || SubmitBtn == null || ManualOutputBox == null)
+            if (SubmitBtn == null || ManualOutputBox == null)
             {
                 return;
             }
 
             var isEnabled = IsCurrentManualReadyForInput();
-            MarkPassedBtn.IsEnabled = isEnabled;
-            MarkFailedBtn.IsEnabled = isEnabled;
             SubmitBtn.IsEnabled = isEnabled;
             ManualOutputBox.IsEnabled = isEnabled;
-
-            MarkPassedBtn.Opacity = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
-            MarkPassedBtn.BorderThickness = string.Equals(selectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
-
-            MarkFailedBtn.Opacity = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.7;
-            MarkFailedBtn.BorderThickness = string.Equals(selectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase) ? new Thickness(3) : new Thickness(1);
 
             SubmitBtn.Opacity = isSubmitted ? 1.0 : 0.85;
             SubmitBtn.BorderThickness = isSubmitted ? new Thickness(3) : new Thickness(1);
@@ -1255,7 +1807,20 @@ namespace SQLAuditor.Wpf
 
                 var technique = statusEntry.Technique;
                 var status = statusEntry.Status;
-                if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase))
+                if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)
+                    || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(status))
+                {
+                    continue;
+                }
+
+                var isDecided = string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase);
+
+                if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
+                    && !_copiedManualIds.Contains(item.Id)
+                    // A manual item the engine already decided (e.g. a result copied from a previous
+                    // run) carries a stored outcome, so it must not be reported as unanswered.
+                    && !isDecided)
                 {
                     ManualEvaluationState? manualState = null;
                     if (_manualStateMap == null || !_manualStateMap.TryGetValue(item.Id, out manualState) || manualState == null)
@@ -1267,7 +1832,7 @@ namespace SQLAuditor.Wpf
                     if (!string.Equals(manualState.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(manualState.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
                     {
-                        messages.Add($"{item.Id}: choose Passed or Failed.");
+                        messages.Add($"{item.Id}: enter Pass or Fail with the reason and submit.");
                         continue;
                     }
 
@@ -1345,10 +1910,10 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var defaultPath = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "final_report.md");
+                var defaultPath = AuditOutputPaths.GetCurrentFilePath("final_report.md");
                 if (!System.IO.File.Exists(defaultPath))
                 {
-                    MessageBox.Show("No final report found in results/. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show($"No final report found at {defaultPath}. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 var dlg = new SaveFileDialog() { FileName = "final_report.md", Filter = "Markdown|*.md|All Files|*.*" };
@@ -1364,29 +1929,71 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private void ExitBtn_Click(object sender, RoutedEventArgs e)
+        private bool HasActiveOperationInProgress()
         {
-            try
+            return _isEvaluating || _isGeneratingScripts;
+        }
+
+        private void ResetChecklistSessionStateForExit()
+        {
+            _checklistLoaded = false;
+            _loadedItems = null;
+            _loadedStructure = null;
+            _itemTypeMap = null;
+            _itemScriptMap = null;
+            _selectedIds = null;
+            _evalItemMap = null;
+            _evalStatusMap = null;
+            _manualQueue = null;
+            _manualInstructions = null;
+            _manualStateMap = null;
+            _manualIndex = -1;
+            _copiedManualIds.Clear();
+            _historicalManualIds.Clear();
+            ChecklistTree.Items.Clear();
+            MappingTree.Items.Clear();
+            Log("Checklist state refreshed on exit.");
+        }
+
+        private void HandleExitNavigation()
+        {
+            if (HasActiveOperationInProgress())
             {
-                if (_isEvaluating)
+                var currentPage = MainTabs.SelectedIndex == 0 ? "Login" : MainTabs.SelectedIndex == 1 ? "Checklist" : MainTabs.SelectedIndex == 2 ? "Evaluate" : "Summary";
+                var result = MessageBox.Show(
+                    $"A {currentPage} operation is still in progress. Do you want to cancel it and exit?",
+                    "Exit with active operation",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result != MessageBoxResult.Yes)
                 {
-                    var choice = MessageBox.Show(
-                        "An evaluation is still running. Exit anyway?",
-                        "Exit SQL Auditor",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning);
-                    if (choice != MessageBoxResult.Yes) return;
-
-                    try { _evaluationCts?.Cancel(); } catch { }
+                    return;
                 }
+            }
 
-                try { _progressWatcherCts?.Cancel(); } catch { }
-            }
-            catch { }
-            finally
+            CancelActiveEvaluationIfNeeded();
+            _scriptGenerationCts?.Cancel();
+            _isGeneratingScripts = false;
+
+            if (MainTabs.SelectedIndex == 1)
             {
-                Application.Current.Shutdown();
+                ResetChecklistSessionStateForExit();
             }
+
+            var destination = MainTabs.SelectedIndex == 1 ? 0 : 1;
+            SetTabIndex(destination);
+            UpdateStageIndicators();
+        }
+
+        private void ExitHeaderBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
+        }
+
+        private void ExitSummaryBtn_Click(object sender, RoutedEventArgs e)
+        {
+            HandleExitNavigation();
         }
 
         private async Task EnsureAuditor(string fqdn)
@@ -1454,21 +2061,204 @@ namespace SQLAuditor.Wpf
             finally { _allowTabChange = false; }
         }
 
+        private void CancelActiveEvaluationIfNeeded()
+        {
+            if (_pendingUserInput != null && !_pendingUserInput.Task.IsCompleted)
+            {
+                try { _pendingUserInput.TrySetCanceled(); } catch { }
+            }
+
+            if (_evaluationCts != null && !_evaluationCts.IsCancellationRequested)
+            {
+                try { _evaluationCts.Cancel(); } catch { }
+            }
+
+            _isEvaluating = false;
+            Log("Evaluation cancelled by exit request.");
+        }
+
+        private void InvalidateSqlVerification()
+        {
+            var hadConnectionState = _isVerified || _isVerifyingSql || _auditor != null;
+            _sqlConnectionInputsVersion++;
+            _isVerified = false;
+            _auditor = null;
+            ResetDatabaseSelection();
+            if (hadConnectionState)
+                AccessStatus.Text = "Connection details changed. Verify access again.";
+            UpdateStageIndicators();
+        }
+
+        private void ResetDatabaseSelection()
+        {
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                DatabaseSelectorToggle.IsChecked = false;
+                DatabaseSelectorToggle.IsEnabled = false;
+                DatabaseSelectorPanel.Visibility = Visibility.Collapsed;
+                DatabaseSelectionText.Text = "Select Databases";
+                DatabaseSelectionText.ToolTip = null;
+                DatabaseOptionsPanel.Children.Clear();
+                _databaseOptionCheckBoxes.Clear();
+                _allDatabasesCheckBox = null;
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+            UpdateStartEvaluationEnabled();
+        }
+
+        private void PopulateDatabaseSelection(System.Collections.Generic.IEnumerable<string> databaseNames)
+        {
+            var names = databaseNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                DatabaseOptionsPanel.Children.Clear();
+                _databaseOptionCheckBoxes.Clear();
+
+                _allDatabasesCheckBox = CreateDatabaseOption("All Databases", null, true);
+                DatabaseOptionsPanel.Children.Add(_allDatabasesCheckBox);
+
+                foreach (var name in names)
+                {
+                    var option = CreateDatabaseOption(name, name, false);
+                    _databaseOptionCheckBoxes.Add(option);
+                    DatabaseOptionsPanel.Children.Add(option);
+                }
+
+                DatabaseSelectorToggle.IsChecked = false;
+                DatabaseSelectorToggle.IsEnabled = names.Length > 0;
+                DatabaseSelectorPanel.Visibility = Visibility.Visible;
+                DatabaseSelectionText.Text = "Select Databases";
+                DatabaseSelectionText.ToolTip = null;
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+            UpdateDatabaseSelectionSummary();
+        }
+
+        private System.Windows.Controls.CheckBox CreateDatabaseOption(
+            string label,
+            string? databaseName,
+            bool isAllDatabases)
+        {
+            var option = new System.Windows.Controls.CheckBox
+            {
+                Content = label,
+                Tag = databaseName,
+                Padding = new Thickness(6, 5, 6, 5),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                FontWeight = isAllDatabases ? FontWeights.SemiBold : FontWeights.Normal
+            };
+            option.Checked += DatabaseOption_Changed;
+            option.Unchecked += DatabaseOption_Changed;
+            return option;
+        }
+
+        private void DatabaseOption_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_suppressDatabaseSelectionSync) return;
+
+            _suppressDatabaseSelectionSync = true;
+            try
+            {
+                if (ReferenceEquals(sender, _allDatabasesCheckBox))
+                {
+                    var selectAll = _allDatabasesCheckBox?.IsChecked == true;
+                    foreach (var option in _databaseOptionCheckBoxes)
+                        option.IsChecked = selectAll;
+                }
+                else if (_allDatabasesCheckBox != null)
+                {
+                    _allDatabasesCheckBox.IsChecked =
+                        _databaseOptionCheckBoxes.Count > 0 &&
+                        _databaseOptionCheckBoxes.All(option => option.IsChecked == true);
+                }
+            }
+            finally
+            {
+                _suppressDatabaseSelectionSync = false;
+            }
+
+            UpdateDatabaseSelectionSummary();
+        }
+
+        private string[] GetSelectedDatabaseNames()
+        {
+            return _databaseOptionCheckBoxes
+                .Where(option => option.IsChecked == true && option.Tag is string)
+                .Select(option => (string)option.Tag)
+                .ToArray();
+        }
+
+        private void UpdateDatabaseSelectionSummary()
+        {
+            var selected = GetSelectedDatabaseNames();
+            DatabaseSelectionText.Text = selected.Length switch
+            {
+                0 => "Select Databases",
+                1 => selected[0],
+                _ when selected.Length == _databaseOptionCheckBoxes.Count => "All Databases",
+                _ => $"{selected.Length} databases selected"
+            };
+            DatabaseSelectionText.ToolTip = selected.Length == 0
+                ? null
+                : string.Join(Environment.NewLine, selected);
+            UpdateStartEvaluationEnabled();
+        }
+
         private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
         {
             var fqdn = FqdnText.Text.Trim();
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
+            _isVerified = false;
+            _auditor = null;
+            ResetDatabaseSelection();
+            var verificationVersion = _sqlConnectionInputsVersion;
+            _isVerifyingSql = true;
             AccessStatus.Text = "Testing connection...";
             VerifyBtn.IsEnabled = false;
             try
             {
                 await EnsureAuditor(fqdn);
-                var ok = await _auditor!.TestConnectionAsync();
+                if (verificationVersion != _sqlConnectionInputsVersion || _auditor == null)
+                {
+                    Log("Discarded SQL verification because the connection details changed.");
+                    return;
+                }
+                var candidateAuditor = _auditor;
+                var ok = await candidateAuditor.TestConnectionAsync();
+                if (verificationVersion != _sqlConnectionInputsVersion)
+                {
+                    Log("Discarded SQL verification because the connection details changed.");
+                    return;
+                }
                 if (ok)
                 {
+                    var databases = await candidateAuditor.GetAvailableDatabasesAsync();
+                    if (verificationVersion != _sqlConnectionInputsVersion)
+                    {
+                        Log("Discarded database discovery because the connection details changed.");
+                        return;
+                    }
+                    _auditor = candidateAuditor;
                     _isVerified = true;
-                    AccessStatus.Text = $"Verified: {fqdn}";
-                    Log($"Connection to {fqdn} verified.");
+                    PopulateDatabaseSelection(databases);
+                    AccessStatus.Text = databases.Length == 0
+                        ? $"Verified: {fqdn}. No accessible user databases found."
+                        : $"Verified: {fqdn}. {databases.Length} database(s) available.";
+                    Log($"Connection to {fqdn} verified; {databases.Length} user database(s) available.");
                 }
                 else
                 {
@@ -1485,6 +2275,7 @@ namespace SQLAuditor.Wpf
             }
             finally
             {
+                _isVerifyingSql = false;
                 VerifyBtn.IsEnabled = true;
                 UpdateStartEvaluationEnabled();
                 UpdateStageIndicators();
@@ -1542,14 +2333,15 @@ namespace SQLAuditor.Wpf
         // The ONLY control that navigates from Login to the Checklist page.
         private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
         {
-            if (!_isVerified) return;
+            var targetDatabases = GetSelectedDatabaseNames();
+            if (!_isVerified || targetDatabases.Length == 0) return;
 
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();
 
             SetTabIndex(1);
             LoadChecklistBtn.IsEnabled = true;
-            Log("Proceeding to checklist.");
+            Log($"Proceeding to checklist with {targetDatabases.Length} database target(s).");
             try
             {
                 await PopulateChecklistStructureAsync();
@@ -1564,10 +2356,111 @@ namespace SQLAuditor.Wpf
 
         private void UpdateStartEvaluationEnabled()
         {
+            var ready = _isVerified && GetSelectedDatabaseNames().Length > 0;
+
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = _isVerified;
+                StartEvaluationBtn.IsEnabled = ready;
             }
+
+            // Configuring a custom checklist runs guardrails, classification and script
+            // generation through the LLM provider, so it also needs a verified provider.
+            if (AddCustomChecklistItemBtn != null)
+            {
+                AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified;
+            }
+        }
+
+        // Read-only row shown in the Custom Checklist card.
+        private sealed class CustomChecklistCardItem
+        {
+            public string Id { get; init; } = "";
+            public string Title { get; init; } = "";
+            public string SubAreaLabel { get; init; } = "";
+        }
+
+        // Renders the custom items already present in custom-checklist.json, via the same
+        // configuration store the rest of the feature uses. Informational only.
+        private void RefreshCustomChecklistCard()
+        {
+            try
+            {
+                var items = SQLAuditor.Lib.ChecklistConfigurationStore.GetCatalog()
+                    .Where(i => i.IsCustom)
+                    .OrderBy(i => i.Id, System.Collections.Generic.Comparer<string>.Create(
+                        SQLAuditor.Lib.ChecklistConfigurationStore.CompareIds))
+                    .Select(i => new CustomChecklistCardItem
+                    {
+                        Id = i.Id,
+                        Title = string.IsNullOrWhiteSpace(i.Title) ? i.Text : i.Title,
+                        SubAreaLabel = string.IsNullOrWhiteSpace(i.SubAreaTitle)
+                            ? i.SubAreaId
+                            : $"{i.SubAreaId} · {i.SubAreaTitle}"
+                    })
+                    .ToList();
+
+                CustomChecklistItems.ItemsSource = items;
+
+                var hasItems = items.Count > 0;
+                CustomChecklistScroll.Visibility = hasItems ? Visibility.Visible : Visibility.Collapsed;
+                CustomChecklistEmptyText.Visibility = hasItems ? Visibility.Collapsed : Visibility.Visible;
+                CustomChecklistStatus.Text = hasItems
+                    ? $"{items.Count} custom checklist item(s) configured."
+                    : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                CustomChecklistItems.ItemsSource = null;
+                CustomChecklistScroll.Visibility = Visibility.Collapsed;
+                CustomChecklistEmptyText.Visibility = Visibility.Visible;
+                CustomChecklistStatus.Text = "Could not load custom checklist items: " + ex.Message;
+            }
+        }
+
+        // Opens the Add Configure Checklist page, then the Custom Checklist Progress page, and
+        // finally lands on the existing Checklist page with default + custom items available.
+        private async void ConfigureChecklistBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var editor = new ConfigureChecklistWindow { Owner = this };
+            if (editor.ShowDialog() != true || editor.Requests.Count == 0) return;
+
+            Log($"Configuring {editor.Requests.Count} custom checklist item(s)...");
+
+            var progressWindow = new CustomChecklistProgressWindow(editor.Requests) { Owner = this };
+            progressWindow.Start();
+            progressWindow.ShowDialog();
+
+            var result = progressWindow.Result;
+            if (result != null)
+            {
+                foreach (var outcome in result.Outcomes)
+                {
+                    Log(outcome.IsAdded
+                        ? $"Custom checklist {outcome.AssignedId} added under {outcome.SubAreaId} ({outcome.SubAreaTitle})."
+                        : $"Custom checklist '{outcome.Title}' not added — {outcome.Status}: {outcome.Detail}");
+                }
+            }
+            else
+            {
+                Log("Custom checklist configuration was cancelled.");
+            }
+
+            RefreshCustomChecklistCard();
+
+            // Land on the Checklist page so both default and custom items can be selected.
+            _auditor?.EnsureLlmEvaluators();
+            SetTabIndex(1);
+            LoadChecklistBtn.IsEnabled = true;
+            try
+            {
+                await PopulateChecklistStructureAsync();
+                Log("Checklist reloaded with the merged default + custom configuration.");
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to reload the checklist: " + ex.Message);
+            }
+            UpdateStageIndicators();
         }
 
         private void Send_Click(object sender, RoutedEventArgs e)
@@ -1634,34 +2527,221 @@ namespace SQLAuditor.Wpf
             }
         }
 
+        private void SelectAllChecklistCb_Checked(object sender, RoutedEventArgs e) => SetAllChecklistChecked(true);
+
+        private void SelectAllChecklistCb_Unchecked(object sender, RoutedEventArgs e) => SetAllChecklistChecked(false);
+
+        private void SetAllChecklistChecked(bool isChecked)
+        {
+            if (_suppressSelectAllSync) return;
+            _suppressSelectAllSync = true;
+            try
+            {
+                foreach (var areaObj in ChecklistTree.Items)
+                {
+                    if (areaObj is System.Windows.Controls.TreeViewItem areaNode)
+                    {
+                        if (areaNode.Header is System.Windows.Controls.StackPanel areaPanel)
+                        {
+                            foreach (var child in areaPanel.Children)
+                            {
+                                if (child is System.Windows.Controls.CheckBox areaCb) areaCb.IsChecked = isChecked;
+                            }
+                        }
+                        SetChildrenChecked(areaNode, isChecked);
+                    }
+                }
+            }
+            finally
+            {
+                _suppressSelectAllSync = false;
+            }
+        }
+
+        private void ItemCb_SelectionChanged(object? sender, RoutedEventArgs e)
+        {
+            if (_suppressSelectAllSync) return;
+            SyncSelectAllState();
+        }
+
+        private void SyncSelectAllState()
+        {
+            var total = 0;
+            var selected = 0;
+            foreach (var cb in EnumerateChecklistItemCheckBoxes())
+            {
+                total++;
+                if (cb.IsChecked == true) selected++;
+            }
+
+            _suppressSelectAllSync = true;
+            try
+            {
+                SelectAllChecklistCb.IsChecked = total > 0 && selected == total;
+            }
+            finally
+            {
+                _suppressSelectAllSync = false;
+            }
+        }
+
+        private System.Collections.Generic.IEnumerable<System.Windows.Controls.CheckBox> EnumerateChecklistItemCheckBoxes()
+        {
+            foreach (var areaObj in ChecklistTree.Items)
+            {
+                if (areaObj is not System.Windows.Controls.TreeViewItem areaNode) continue;
+                foreach (var catObj in areaNode.Items)
+                {
+                    if (catObj is not System.Windows.Controls.TreeViewItem catNode) continue;
+                    foreach (var itemObj in catNode.Items)
+                    {
+                        if (itemObj is System.Windows.Controls.TreeViewItem itemTvi && itemTvi.Header is System.Windows.Controls.CheckBox cb)
+                        {
+                            yield return cb;
+                        }
+                    }
+                }
+            }
+        }
+
         private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
         {
-            // Temporarily disabled: generating/updating scripts for unmapped items is not allowed.
-            Log("Generate Scripts action is currently disabled — will not update or create unmapped scripts.");
-            MessageBox.Show(this, "Generate Scripts is temporarily disabled and will not modify scripts for unmapped checklist items.", "Generate Scripts Disabled", MessageBoxButton.OK, MessageBoxImage.Information);
-            // The intended operator-driven flow (commented-out) is shown below.
-            // When re-enabled, the button SHOULD be the *only* code path that writes
-            // new scripts into Backend/checklist/scripts/sql and updates
-            // Backend/checklist/deterministic-script-mapping.json via Auditor.SaveGeneratedScriptAsync.
-            // DO NOT add other automatic writers elsewhere in the codebase.
+            GenerateScriptsBtn.IsEnabled = false;
+            _isGeneratingScripts = true;
+            _scriptGenerationCts = new System.Threading.CancellationTokenSource();
 
-            /* Example (commented):
-            await EnsureAuditor(FqdnText.Text.Trim());
-            var selected = /* gather selected checklist items * / ;
-            foreach (var item in selected)
+            try
             {
-                // The script content should be created externally (GHCP Copilot),
-                // then pasted or loaded here. The tool must NOT generate scripts
-                // automatically without operator confirmation.
-                string scriptText = /* operator-provided script contents * /;
-                // Persist intentionally via the auditor API
-                var savedPath = await _auditor.SaveGeneratedScriptAsync(item.Id, scriptText, item.Id + ".sql");
-                Log($"Saved generated script for {item.Id} -> {savedPath}");
-            }
-            */
+                // Resolve the Backend base path (the ScriptGeneratorAgent expects it)
+                var repoRoot = FindRepoRootFromCwd();
+                if (repoRoot == null)
+                {
+                    MessageBox.Show(this, "Cannot locate the repository root (Backend/checklist not found).", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                var basePath = System.IO.Path.Combine(repoRoot, "Backend");
 
-            await Task.CompletedTask;
-            return;
+                // Use the same LLM provider config as the rest of the app
+                string llmBaseUrl, llmApiKey, llmModel;
+                int llmTimeout;
+                try
+                {
+                    llmBaseUrl = ProviderConfig.BaseUrl;
+                    llmApiKey = ProviderConfig.ApiKey;
+                    llmModel = ProviderConfig.Model;
+                    llmTimeout = (int)ProviderConfig.Timeout.TotalSeconds;
+                }
+                catch (Exception exCfg)
+                {
+                    MessageBox.Show(this, $"LLM configuration error: {exCfg.Message}\n\nEnsure .env is configured.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                var promptsDir = System.IO.Path.Combine(basePath, "agents", "prompts");
+                if (!System.IO.Directory.Exists(promptsDir))
+                {
+                    MessageBox.Show(this, $"Prompts directory not found: {promptsDir}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                // Gather selected checklist items and convert to ScriptGenChecklistItem
+                var selectedItems = new System.Collections.Generic.List<SQLAuditor.Agents.ScriptGenChecklistItem>();
+                if (_loadedStructure != null && _selectedIds != null && _selectedIds.Count > 0)
+                {
+                    foreach (var id in _selectedIds)
+                    {
+                        var match = _loadedStructure.FirstOrDefault(x => x.Item.Id == id);
+                        if (match.Item != null)
+                        {
+                            selectedItems.Add(new SQLAuditor.Agents.ScriptGenChecklistItem
+                            {
+                                ChecklistId = match.Item.Id,
+                                Category = match.Item.Category ?? "",
+                                CheckName = match.Item.Description,
+                                Scope = "",
+                                Description = match.Item.Description,
+                                ExpectedOutcome = match.Item.Description
+                            });
+                        }
+                    }
+                }
+
+                if (selectedItems.Count == 0)
+                {
+                    MessageBox.Show(this, "No checklist items selected. Please select items first.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                var confirm = MessageBox.Show(this,
+                    $"Generate scripts for {selectedItems.Count} selected checklist item(s)?\n\nThis will call the configured LLM to create T-SQL/PowerShell audit scripts.",
+                    "Generate Scripts", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (confirm != MessageBoxResult.Yes) return;
+
+                Log($"Starting script generation for {selectedItems.Count} items...");
+
+                var llmTimeoutCopy = llmTimeout;
+                var llmBaseUrlCopy = llmBaseUrl;
+                var llmApiKeyCopy = llmApiKey;
+                var llmModelCopy = llmModel;
+                var basePathCopy = basePath;
+
+                var progressWindow = new ScriptGenerationProgressWindow(selectedItems.Count);
+                progressWindow.Owner = this;
+
+                progressWindow.RunGeneration(async (progress, ct) =>
+                {
+                    var processor = new SQLAuditor.Agents.ChecklistItemProcessor(
+                        llmBaseUrlCopy, llmApiKeyCopy, llmModelCopy, promptsDir, llmTimeoutCopy, maxRetries: 3);
+                    var validator = new SQLAuditor.Agents.ScriptOutputValidator();
+                    var agent = new SQLAuditor.Agents.ScriptGeneratorAgent(processor, validator, basePathCopy);
+
+                    return await agent.RunAsync(progress, selectedItems, ct);
+                });
+
+                progressWindow.ShowDialog();
+
+                var result = progressWindow.Result;
+                if (result != null)
+                {
+                    Log($"Script generation complete — Generated: {result.Generated.Count}, Skipped: {result.Skipped.Count}, Failed: {result.Failed.Count}");
+
+                    if (result.Skipped.Count > 0)
+                    {
+                        var skippedMsg = string.Join("\n", result.Skipped.Select(s => $"  {s.ChecklistId}: {s.Reason}"));
+                        Log($"Skipped items:\n{skippedMsg}");
+                    }
+                }
+                else
+                {
+                    Log("Script generation was cancelled.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Script generation error: {ex.Message}");
+                MessageBox.Show(this, $"Script generation failed:\n{ex.Message}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                _isGeneratingScripts = false;
+                _scriptGenerationCts?.Dispose();
+                _scriptGenerationCts = null;
+                GenerateScriptsBtn.IsEnabled = _checklistLoaded;
+            }
+        }
+
+        private static string? FindRepoRootFromCwd()
+        {
+            var dir = new System.IO.DirectoryInfo(System.IO.Directory.GetCurrentDirectory());
+            while (dir != null)
+            {
+                var candidate = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master-checklist.json");
+                if (System.IO.File.Exists(candidate)) return dir.FullName;
+                var alt = System.IO.Path.Combine(dir.FullName, "Backend", "checklist", "master_checklist.json");
+                if (System.IO.File.Exists(alt)) return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
         }
 
         private void AreaCb_Unchecked(object? sender, RoutedEventArgs e)
@@ -1708,11 +2788,12 @@ namespace SQLAuditor.Wpf
                 Stage2Label.FontWeight = MainTabs.SelectedIndex == 1 ? FontWeights.Bold : FontWeights.Normal;
                 Stage3Label.FontWeight = MainTabs.SelectedIndex == 2 ? FontWeights.Bold : FontWeights.Normal;
                 Stage4Label.FontWeight = MainTabs.SelectedIndex == 3 ? FontWeights.Bold : FontWeights.Normal;
+                ExitHeaderBtn.Visibility = MainTabs.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
 
                 // Allow loading checklist at any time (user action required)
                 LoadChecklistBtn.IsEnabled = true;
-                // Keep Generate Scripts disabled for now (feature temporarily inactive)
-                GenerateScriptsBtn.IsEnabled = false;
+                // Enable Generate Scripts when checklist is loaded and items are selected
+                GenerateScriptsBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
                 StartEvalBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
             }
             catch { }
@@ -1779,6 +2860,8 @@ namespace SQLAuditor.Wpf
                             {
                                 var item = pair.Item;
                                 var cb = new System.Windows.Controls.CheckBox() { Content = item.Id + " " + item.Description, Tag = item };
+                                cb.Checked += ItemCb_SelectionChanged;
+                                cb.Unchecked += ItemCb_SelectionChanged;
                                 var node = new System.Windows.Controls.TreeViewItem() { Header = cb };
                                 catNode.Items.Add(node);
                             }
@@ -1786,6 +2869,8 @@ namespace SQLAuditor.Wpf
                         }
                         ChecklistTree.Items.Add(areaHeader);
                     }
+
+                    SyncSelectAllState();
                 });
             }
             catch (Exception ex)
@@ -1798,7 +2883,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                var dir = AuditOutputPaths.ActiveRunDirectory ?? AuditOutputPaths.RootDirectory;
                 System.IO.Directory.CreateDirectory(dir);
                 var path = System.IO.Path.Combine(dir, "ui_log.txt");
                 var line = $"{DateTime.UtcNow:O} {message}\n";
@@ -1849,8 +2934,8 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var path = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results", "checklist_results.json");
-                if (!System.IO.File.Exists(path)) { Log("No results/checklist_results.json found"); return; }
+                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                if (!System.IO.File.Exists(path)) { Log($"No checklist results found at {path}"); return; }
                 var txt = System.IO.File.ReadAllText(path);
                 var arr = JsonSerializer.Deserialize<SQLAuditor.Lib.ChecklistResult[]>(txt) ?? Array.Empty<SQLAuditor.Lib.ChecklistResult>();
 
@@ -1859,19 +2944,8 @@ namespace SQLAuditor.Wpf
                 // the report produced automatically at the end of an assessment.
                 try
                 {
-                    var outDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
-                    System.IO.Directory.CreateDirectory(outDir);
-                    var outPath = System.IO.Path.Combine(outDir, "final_report.md");
-                    new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                        path,
-                        outPath,
-                        new SqlAuditor.Reporting.ReportMetadata
-                        {
-                            ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                            Auditors = "SQL Auditor Tool (automated)",
-                            TotalChecklistItems = arr.Length,
-                        });
-                    Log("Rendered report saved to results/final_report.md");
+                    RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
+                    Log($"Rendered reports saved to {AuditOutputPaths.CurrentRunDirectory}");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
 
@@ -1883,6 +2957,139 @@ namespace SQLAuditor.Wpf
             {
                 Log("Generate summary error: " + ex.Message);
                 MessageBox.Show("The summary could not be generated:\n\n" + ex.Message, "Generate Summary failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void ExportManualAndGenerateBtn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isEvaluating)
+                {
+                    MessageBox.Show("Evaluation is still running. Wait for completion so every manual check and its guidance can be exported.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var resultsPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                if (!System.IO.File.Exists(resultsPath))
+                {
+                    MessageBox.Show("No completed evaluation results were found. Run the evaluation first.", "No evaluation results", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var manualChecks = GetManualChecksForExport();
+                if (manualChecks.Count == 0)
+                {
+                    MessageBox.Show("The current evaluation does not contain any manual checks to export.", "No manual checks", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                var pendingIds = GetUnresolvedManualCheckIds();
+                var confirmation = MessageBox.Show(
+                    $"Export {manualChecks.Count} manual check(s) to CSV and generate the reports?\n\n"
+                    + $"{pendingIds.Count} unanswered manual check(s) will be marked Skipped and excluded from all scores. "
+                    + "Submitted and previously copied manual decisions will be preserved.",
+                    "Export manual checks and generate",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+                if (confirmation != MessageBoxResult.Yes) return;
+
+                var dialog = new SaveFileDialog
+                {
+                    Title = "Export Manual Checks",
+                    FileName = $"manual_checks_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                    DefaultExt = ".csv",
+                    Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                    InitialDirectory = AuditOutputPaths.CurrentRunDirectory,
+                    AddExtension = true,
+                    OverwritePrompt = true,
+                };
+                if (dialog.ShowDialog(this) != true) return;
+
+                WriteManualChecksCsv(dialog.FileName, manualChecks);
+                var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
+                RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
+
+                var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
+                UpdateSummaryView(results);
+                SetTabIndex(3);
+                UpdateStageIndicators();
+
+                Log($"Exported {manualChecks.Count} manual check(s) to {dialog.FileName}; {skippedCount} unanswered check(s) were skipped.");
+                MessageBox.Show(
+                    $"Manual checks exported to:\n{dialog.FileName}\n\n"
+                    + $"{skippedCount} unanswered manual check(s) were excluded from scoring. Reports were generated in:\n{AuditOutputPaths.CurrentRunDirectory}",
+                    "Reports generated",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                Log("Manual CSV export failed: " + ex.Message);
+                MessageBox.Show("The manual checks could not be exported or the reports could not be generated:\n\n" + ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void ImportManualCsvBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_isEvaluating)
+            {
+                MessageBox.Show("Evaluation is still running. Wait for completion before importing manual decisions.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (_evalItemMap == null || _evalStatusMap == null
+                || !System.IO.File.Exists(AuditOutputPaths.GetCurrentFilePath("checklist_results.json")))
+            {
+                MessageBox.Show("Start and complete the new evaluation before importing the filled CSV.", "No completed evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var dialog = new OpenFileDialog
+            {
+                Title = "Import Filled Manual Checks",
+                DefaultExt = ".csv",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false,
+            };
+            if (dialog.ShowDialog(this) != true) return;
+
+            ImportManualCsvBtn.IsEnabled = false;
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            try
+            {
+                var importFile = ReadManualChecksCsv(dialog.FileName);
+                var (applied, ignored) = await ApplyImportedManualChecksAsync(importFile.Rows);
+
+                var issuePreview = string.Join("\n", importFile.Issues.Take(8));
+                var moreIssues = importFile.Issues.Count > 8
+                    ? $"\n...and {importFile.Issues.Count - 8} more row issue(s)."
+                    : string.Empty;
+                var details = string.IsNullOrWhiteSpace(issuePreview)
+                    ? string.Empty
+                    : "\n\nRows not imported:\n" + issuePreview + moreIssues;
+
+                Log($"Imported {applied} manual decision(s) from {dialog.FileName}; ignored {ignored} row(s), {importFile.Issues.Count} row issue(s).");
+                MessageBox.Show(
+                    $"Imported {applied} manual decision(s).\n"
+                    + $"Ignored {ignored} row(s) that were not selected manual checks or were already completed.\n"
+                    + $"Rows needing correction: {importFile.Issues.Count}."
+                    + details
+                    + "\n\nWhen all required rows are resolved, click Generate Summary / Report.",
+                    "Manual CSV imported",
+                    MessageBoxButton.OK,
+                    applied > 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                Log("Manual CSV import failed: " + ex.Message);
+                MessageBox.Show("The manual CSV could not be imported:\n\n" + ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                System.Windows.Input.Mouse.OverrideCursor = null;
+                ImportManualCsvBtn.IsEnabled = true;
             }
         }
     }

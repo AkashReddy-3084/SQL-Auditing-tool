@@ -26,10 +26,48 @@ namespace SQLAuditor
                 return RunResolveReviewCommand(args);
             }
 
+            // Record Copilot-authored audit wording for a script-evaluated item.
+            if (args.Length > 0 && string.Equals(args[0], "enrich_result", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunEnrichResultCommand(args);
+            }
+
+            // Generate deterministic audit scripts for checklist items (NOT evaluation).
+            // Copilot CLI is the AI: this surfaces the generator prompt so Copilot can author
+            // each script, then 'save_generated_script' validates and saves it.
+            if (args.Length > 0 && string.Equals(args[0], "generate_scripts", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunGenerateScriptsCommandAsync(args);
+            }
+
+            // Save one Copilot-generated script for a checklist item (used after generate_scripts).
+            if (args.Length > 0 && string.Equals(args[0], "save_generated_script", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunSaveGeneratedScriptCommandAsync(args);
+            }
+
+            // Add a CUSTOM checklist item under an existing Area/Sub-area (NOT evaluation).
+            // Copilot CLI is the AI: this surfaces the guardrail, semantic-match and classification
+            // prompts, reserves the ID, serves the script generation prompt, and only writes to the
+            // custom configuration once the user approves.
+            if (args.Length > 0 &&
+                (string.Equals(args[0], "configure_checklist", StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(args[0], "configure-checklist", StringComparison.OrdinalIgnoreCase)))
+            {
+                return await RunConfigureChecklistCommandAsync(args);
+            }
+
             // Print a previously-generated report (summary Markdown or raw JSON).
             if (args.Length > 0 && (string.Equals(args[0], "show_reports", StringComparison.OrdinalIgnoreCase) || args.Contains("--show-reports")))
             {
                 return RunShowReportsCommand(args);
+            }
+
+            // Refresh results/historical_last_run.json and render final_report.md + audit_report.xlsx.
+            // Evaluation never does this automatically here: the user is asked first.
+            if (args.Length > 0 && string.Equals(args[0], "generate_report", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunGenerateReportCommand(args);
             }
 
             Console.WriteLine("SQL Auditor — lightweight console interface");
@@ -162,6 +200,23 @@ namespace SQLAuditor
             // so the Copilot CLI skill can generate guidance and record decisions.
             bool copilotMode = opts.ContainsKey("copilot");
 
+            // --- Step 1: how manual checklist items are handled ---
+            // The choice is always the user's; it is never inferred by the CLI or by Copilot.
+            bool? useHistoricalManualResults = ResolveManualResultsMode(opts);
+            if (useHistoricalManualResults is null)
+            {
+                if (copilotMode)
+                {
+                    PrintManualResultsModeQuestion();
+                    return 2;
+                }
+                useHistoricalManualResults = PromptManualResultsMode();
+            }
+
+            Console.WriteLine(useHistoricalManualResults.Value
+                ? "Manual items: reusing historical_last_run.json from the latest completed run where available."
+                : "Manual items: fresh evaluation (previous manual results are not copied).");
+
             // Values come from flags/env first; anything missing is prompted for,
             // one detail at a time. Secrets are never hardcoded.
 
@@ -270,14 +325,19 @@ namespace SQLAuditor
             var announced = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var progress = new Progress<SQLAuditor.Lib.ChecklistResult>(r =>
             {
-                if (string.Equals(r.Outcome, "Evaluating", StringComparison.OrdinalIgnoreCase))
+                // Console has no synchronization context, so these callbacks arrive on pool threads
+                // from every evaluation stage at once.
+                lock (announced)
                 {
-                    if (announced.Add(r.Id))
-                        Console.WriteLine($"  [{r.Id}] evaluating... ({r.Technique}; manual items may take a moment)");
-                }
-                else
-                {
-                    Console.WriteLine($"  [{r.Id}] {r.Outcome,-11} ({r.Technique}) - {r.Description}");
+                    if (string.Equals(r.Outcome, "Evaluating", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (announced.Add(r.Id))
+                            Console.WriteLine($"  [{r.Id}] evaluating... ({r.Technique}; manual items may take a moment)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  [{r.Id}] {r.Outcome,-11} ({r.Technique}) - {r.Description}");
+                    }
                 }
             });
 
@@ -285,7 +345,11 @@ namespace SQLAuditor
             try
             {
                 // Non-interactive: no user prompts. Manual-only items resolve to NeedsReview.
-                results = await auditor.RunChecklistAsync(progress, null, validIds, cts.Token);
+                // Reports are NOT generated here; the user is asked for them after the run.
+                results = await auditor.RunChecklistAsync(
+                    progress, null, validIds, cts.Token,
+                    useHistoricalManualResults.Value,
+                    generateReports: false);
             }
             finally
             {
@@ -321,9 +385,18 @@ namespace SQLAuditor
             }
 
             // In Copilot mode, surface the NeedsReview items in a clearly delimited block
-            // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide).
+            // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide),
+            // and the script-evaluated items so it can author their audit wording.
             if (copilotMode)
             {
+                Console.WriteLine();
+                Console.WriteLine("NOTE: every enrich_result field also accepts a file form (--finding-file / --evidence-file / --risk-file /");
+                Console.WriteLine("      --recommendation-file <path>). Use it whenever the text contains a quote character, otherwise the");
+                Console.WriteLine("      shell truncates the value at that quote.");
+                Console.Write(SQLAuditor.Lib.Auditor.BuildScriptEnrichmentRequest(
+                    results,
+                    id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence-file \"<file holding the evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
+
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
 
@@ -344,15 +417,21 @@ namespace SQLAuditor
                 if (manualPending.Count > 0)
                 {
                     Console.WriteLine();
-                    Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail, or skip to keep NeedsReview.");
+                    Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail/not-applicable, or skip to keep NeedsReview.");
                     Console.WriteLine("(Manual verification steps are listed above.)");
                     var updated = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var r in manualPending)
                     {
                         Console.WriteLine();
                         Console.WriteLine($"--- {r.Id}: {r.Description} ---");
-                        var ans = Prompt("Mark item (p=Pass, f=Fail, s=Skip) [s]:").Trim().ToLowerInvariant();
-                        string decision = ans switch { "p" or "pass" => "Pass", "f" or "fail" => "Fail", _ => string.Empty };
+                        var ans = Prompt("Mark item (p=Pass, f=Fail, na=Not Applicable, s=Skip) [s]:").Trim().ToLowerInvariant();
+                        string decision = ans switch
+                        {
+                            "p" or "pass" => "Pass",
+                            "f" or "fail" => "Fail",
+                            "na" or "n/a" or "notapplicable" or "not applicable" => SQLAuditor.Lib.NotApplicableEvidence.Outcome,
+                            _ => string.Empty
+                        };
                         if (decision.Length == 0)
                         {
                             Console.WriteLine("Skipped (kept NeedsReview).");
@@ -378,15 +457,62 @@ namespace SQLAuditor
             }
 
             Console.WriteLine();
-            Console.WriteLine("Summary:");
+            Console.WriteLine(copilotMode ? "Summary (PROVISIONAL - script verdicts only):" : "Summary:");
             foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key))
                 Console.WriteLine($"  {g.Key,-12}: {g.Count()}");
+            if (copilotMode)
+            {
+                Console.WriteLine("Not Applicable is decided during enrichment, so these counts are not final. Once every item has been");
+                Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include Not Applicable.");
+            }
 
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var jsonDefault = Path.Combine(resultsDir, "checklist_results.json");
             Console.WriteLine();
             Console.WriteLine($"Results JSON : {jsonDefault}");
-            Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
+
+            // The summary/report is never produced automatically: the user decides, and only
+            // then is results/historical_last_run.json refreshed from the new manual results.
+            if (copilotMode)
+            {
+                Console.WriteLine();
+                Console.WriteLine("=== REPORT GENERATION DECISION REQUIRED ===");
+                Console.WriteLine($"Evaluation completed and {jsonDefault} has been updated.");
+                Console.WriteLine("No report has been generated. After every item is enriched and reviewed, ask the user:");
+                Console.WriteLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
+                Console.WriteLine("If the user says YES, run: sql-auditor generate_report");
+                Console.WriteLine("  -> refreshes historical_last_run.json in the current run directory with the newly evaluated manual results,");
+                Console.WriteLine($"     then writes {Path.Combine(resultsDir, "final_report.md")} and {Path.Combine(resultsDir, "audit_report.xlsx")}.");
+                Console.WriteLine("If the user says NO, stop here: keep checklist_results.json, do not refresh the historical file,");
+                Console.WriteLine("and do not generate final_report.md or the Excel workbook. Never decide this yourself.");
+                Console.WriteLine("=== END REPORT GENERATION DECISION REQUIRED ===");
+            }
+            else
+            {
+                Console.WriteLine();
+                Console.WriteLine("Evaluation completed. Do you want to generate the summary/report?");
+                var generate = false;
+                if (!Console.IsInputRedirected)
+                {
+                    var ans = Prompt("Generate final_report.md and the Excel report now? (y/n) [y]:").Trim().ToLowerInvariant();
+                    generate = ans.Length == 0 || ans is "y" or "yes";
+                }
+                else
+                {
+                    Console.WriteLine("(Non-interactive session: skipped. Run 'sqlauditor generate_report' when you want the reports.)");
+                }
+
+                if (generate)
+                {
+                    Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports());
+                    Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
+                    Console.WriteLine($"Excel        : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+                }
+                else
+                {
+                    Console.WriteLine($"No report generated. {jsonDefault} is up to date; run 'sqlauditor generate_report' later.");
+                }
+            }
 
             var jsonOut = GetOption(opts, "json");
             if (!string.IsNullOrWhiteSpace(jsonOut))
@@ -414,10 +540,14 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("Usage: sqlauditor evaluate [options]");
             Console.WriteLine();
-            Console.WriteLine("Any option not supplied is prompted for interactively (server, then");
-            Console.WriteLine("login details, then checklist IDs).");
+            Console.WriteLine("Any option not supplied is prompted for interactively (manual-results");
+            Console.WriteLine("source, then server, then login details, then checklist IDs).");
             Console.WriteLine();
             Console.WriteLine("Options:");
+            Console.WriteLine("  --manual-results <last-runs|fresh>");
+            Console.WriteLine("                      How manual/AI-Manual items are handled: reuse the results");
+            Console.WriteLine("                      recorded in the latest run's historical_last_run.json, or evaluate");
+            Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
             Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
             Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
@@ -427,7 +557,8 @@ namespace SQLAuditor
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
             Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
-            Console.WriteLine("                      Copilot CLI skill to review via 'resolve_review'.");
+            Console.WriteLine("                      Copilot CLI skill to review via 'resolve_review', and");
+            Console.WriteLine("                      script items for it to word via 'enrich_result'.");
             Console.WriteLine("  --help              Show this help.");
             Console.WriteLine();
             Console.WriteLine("The CLI performs no LLM calls: Copilot CLI is the AI layer. No .env or");
@@ -435,7 +566,86 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
-            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost");
+            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --fresh");
+        }
+
+        // ---------------------------------------------------------------------
+        // Manual-results source: reuse the last runs, or evaluate fresh.
+        // The user always decides; neither the CLI nor Copilot may pick for them.
+        // ---------------------------------------------------------------------
+        static bool? ResolveManualResultsMode(System.Collections.Generic.Dictionary<string, string> opts)
+        {
+            var mode = GetOption(opts, "manual-results") ?? GetOption(opts, "manualresults");
+            if (!string.IsNullOrWhiteSpace(mode))
+            {
+                switch (mode.Trim().ToLowerInvariant())
+                {
+                    case "1":
+                    case "last":
+                    case "last-runs":
+                    case "lastruns":
+                    case "historical":
+                    case "reuse":
+                        return true;
+                    case "2":
+                    case "fresh":
+                    case "new":
+                    case "none":
+                        return false;
+                }
+            }
+
+            if (opts.ContainsKey("use-last-runs") || opts.ContainsKey("use-historical")) return true;
+            if (opts.ContainsKey("fresh")) return false;
+            return null;
+        }
+
+        static bool PromptManualResultsMode()
+        {
+            var available = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds().Count;
+
+            Console.WriteLine();
+            Console.WriteLine("How should manual checklist items be handled?");
+            Console.WriteLine("  1) Use the Last Runs  — Do you want me to use the last runs results for the manual steps?");
+            Console.WriteLine("  2) Fresh Evaluation   — Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?");
+            Console.WriteLine(available > 0
+                ? $"     ({available} manual result(s) available in results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName})"
+                : $"     (no results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} yet — option 1 falls back to a fresh manual evaluation)");
+
+            if (Console.IsInputRedirected)
+            {
+                Console.WriteLine("Non-interactive session: defaulting to a fresh evaluation. Pass --manual-results last-runs to reuse.");
+                return false;
+            }
+
+            while (true)
+            {
+                var ans = Prompt("Choose [1/2]:").Trim().ToLowerInvariant();
+                if (ans is "1" or "last" or "last-runs") return true;
+                if (ans is "2" or "fresh") return false;
+                Console.WriteLine("Enter 1 (use the last runs) or 2 (fresh evaluation).");
+            }
+        }
+
+        static void PrintManualResultsModeQuestion()
+        {
+            var available = SQLAuditor.Lib.HistoricalManualResultsStore.AvailableIds().Count;
+
+            Console.WriteLine();
+            Console.WriteLine("=== MANUAL RESULTS SOURCE REQUIRED ===");
+            Console.WriteLine("Before any evaluation starts, the user must choose how manual checklist items are handled.");
+            Console.WriteLine("Ask the user these two options and wait for their answer — never decide this yourself:");
+            Console.WriteLine("  Option 1 — Use the Last Runs:");
+            Console.WriteLine("      \"Do you want me to use the last runs results for the manual steps?\"");
+            Console.WriteLine("  Option 2 — Fresh Evaluation:");
+            Console.WriteLine("      \"Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?\"");
+            Console.WriteLine(available > 0
+                ? $"results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} currently holds {available} reusable manual result(s)."
+                : $"results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} does not exist yet, so Option 1 falls back safely to a fresh manual evaluation.");
+            Console.WriteLine("Then run evaluate again, adding EXACTLY ONE of:");
+            Console.WriteLine("  --manual-results last-runs     (Option 1)");
+            Console.WriteLine("  --manual-results fresh         (Option 2)");
+            Console.WriteLine("=== END MANUAL RESULTS SOURCE REQUIRED ===");
         }
 
         // Emits NeedsReview items in a clearly delimited block so the Copilot CLI skill
@@ -488,6 +698,10 @@ namespace SQLAuditor
             Console.WriteLine("     Do NOT add extra sections or headings outside this format.");
             Console.WriteLine("  2. Ask the user for their finding / evidence.");
             Console.WriteLine("  3. Decide Pass or Fail together with the user, then record it with the resolve_review command.");
+            Console.WriteLine("     If the verification shows the control does not exist on this server at all - every value the user");
+            Console.WriteLine("     reports is absent, empty, zero or irrelevant to it - the item is not assessable: record it with");
+            Console.WriteLine("     --decision notapplicable and the reason in --notes. It is then excluded from every score and");
+            Console.WriteLine("     reported as Not Applicable, never as Pass or Fail. A zero that itself proves compliance is a Pass.");
             Console.WriteLine("Do NOT write a final summary until every item has been resolved.");
 
             foreach (var r in pending)
@@ -508,7 +722,7 @@ namespace SQLAuditor
                 {
                     Console.WriteLine("(No baseline guidance was generated for this item.)");
                 }
-                Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail> --notes \"<user's rationale>\"");
+                Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail|notapplicable> --notes \"<user's rationale>\"");
             }
             Console.WriteLine("=== END COPILOT REVIEW REQUIRED ===");
         }
@@ -524,13 +738,13 @@ namespace SQLAuditor
             var opts = ParseOptions(args);
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
-                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview> [--notes <text>]");
+                Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> [--notes <text> | --notes-file <path>]");
                 return 0;
             }
 
             var id = GetOption(opts, "id");
             var decision = GetOption(opts, "decision");
-            var notes = GetOption(opts, "notes");
+            var notes = ReadValueOption(opts, "notes");
 
             if (string.IsNullOrWhiteSpace(id))
             {
@@ -539,19 +753,399 @@ namespace SQLAuditor
             }
             if (string.IsNullOrWhiteSpace(decision))
             {
-                Console.Error.WriteLine("Error: --decision is required (pass, fail, or needsreview).");
+                Console.Error.WriteLine("Error: --decision is required (pass, fail, needsreview, or notapplicable).");
                 return 2;
             }
 
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
             if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
             {
-                Console.WriteLine($"Updated [{id}] -> {newOutcome}. results/checklist_results.json and results/final_report.md regenerated.");
+                Console.WriteLine($"Updated [{id}] -> {newOutcome}. Outputs regenerated in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
+                if (SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(newOutcome))
+                {
+                    Console.WriteLine($"[{id}] is excluded from every score and is listed on the 'Not Applicable Items' sheet. "
+                        + "Report it as Not Applicable, never as Pass or Fail.");
+                    return 0;
+                }
+                Console.WriteLine($"NEXT: run 'sql-auditor enrich_result --id {id} ...' with audit wording you derive from the reviewer's evidence "
+                    + "- finding, evidence, riskImpact and recommendation - using only facts the reviewer stated. "
+                    + "Their raw words must not stay as the report Finding.");
                 return 0;
             }
 
-            Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview.");
+            Console.Error.WriteLine($"Could not resolve '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and decision is pass/fail/needsreview/notapplicable.");
             return 2;
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `enrich_result` subcommand
+        // Writes the audit wording Copilot authored for a script-evaluated item into
+        // results/checklist_results.json and regenerates the report. Outcome, Score,
+        // Severity and Databases Verified are script-derived and cannot be set here.
+        // ---------------------------------------------------------------------
+        static int RunEnrichResultCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]");
+                Console.WriteLine("       Every field also accepts a file form: --finding-file / --evidence-file / --risk-file / --recommendation-file <path>.");
+                Console.WriteLine("       Use the file form whenever the text contains a quote character.");
+                return 0;
+            }
+
+            var id = GetOption(opts, "id");
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                Console.Error.WriteLine("Error: --id is required.");
+                return 2;
+            }
+
+            var finding = ReadValueOption(opts, "finding");
+            var evidence = ReadValueOption(opts, "evidence");
+            var risk = ReadValueOption(opts, "risk") ?? ReadValueOption(opts, "riskimpact");
+            var recommendation = ReadValueOption(opts, "recommendation");
+
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation, out var markedNotApplicable))
+            {
+                if (markedNotApplicable)
+                    Console.WriteLine($"Enriched [{id}] -> Outcome {SQLAuditor.Lib.NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail.");
+                else
+                    Console.WriteLine($"Enriched [{id}].");
+                Console.WriteLine($"Outputs regenerated in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
+                return 0;
+            }
+
+            Console.Error.WriteLine($"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");
+            return 2;
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `generate_scripts` subcommand
+        // Copilot CLI is the AI: this prints the generator system prompt plus a per-item
+        // request so Copilot can author each read-only script, then save it with
+        // `save_generated_script`. It never calls an LLM and needs no SQL Server.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunGenerateScriptsCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor generate_scripts --items <ids>");
+                Console.WriteLine("  Example: sqlauditor generate_scripts --items 1.1.2,3.1.1");
+                return 0;
+            }
+
+            var itemsCsv = GetOption(opts, "items");
+            if (string.IsNullOrWhiteSpace(itemsCsv))
+            {
+                Console.Error.WriteLine("Error: --items is required (comma-separated checklist IDs, e.g. 1.1.2,3.1.1).");
+                return 2;
+            }
+
+            var ids = itemsCsv
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            try
+            {
+                var (checklistItems, unknown) = await SQLAuditor.Lib.ScriptGenerationSkill.LoadItemsAsync(ids);
+                if (checklistItems.Count == 0)
+                {
+                    Console.Error.WriteLine("Error: none of the requested checklist IDs exist. Unknown: " + string.Join(", ", unknown));
+                    return 2;
+                }
+
+                var text = SQLAuditor.Lib.ScriptGenerationSkill.BuildGenerationInstructions(
+                    checklistItems,
+                    unknown,
+                    "run: sqlauditor save_generated_script --id <id> --response-file <path-to-raw-response-file>");
+                Console.WriteLine(text);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
+                return 3;
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `save_generated_script` subcommand
+        // Validates and saves one Copilot-generated script (used after generate_scripts).
+        // The raw response can be supplied via --response-file <path> (preferred for large
+        // scripts) or inline via --response "<text>". Called without a verdict it returns the
+        // standard C1-C7 validation prompt; pass the review back via --validation-file/--validation.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunSaveGeneratedScriptCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor save_generated_script --id <id> (--response-file <path> | --response \"<raw response>\")");
+                Console.WriteLine("                                       [--validation-file <path> | --validation \"<verdict>\"]");
+                Console.WriteLine("  Without a verdict it prints the C1-C7 validation prompt and saves nothing.");
+                return 0;
+            }
+
+            var id = GetOption(opts, "id");
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                Console.Error.WriteLine("Error: --id is required.");
+                return 2;
+            }
+
+            var response = GetOption(opts, "response");
+            var responseFile = GetOption(opts, "response-file") ?? GetOption(opts, "responsefile");
+            if (string.IsNullOrWhiteSpace(response) && !string.IsNullOrWhiteSpace(responseFile))
+            {
+                if (!File.Exists(responseFile))
+                {
+                    Console.Error.WriteLine($"Error: --response-file not found: {responseFile}");
+                    return 2;
+                }
+                response = await File.ReadAllTextAsync(responseFile);
+            }
+
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                Console.Error.WriteLine("Error: supply the generated script via --response-file <path> or --response \"<text>\".");
+                return 2;
+            }
+
+            var verdict = GetOption(opts, "validation");
+            var verdictFile = GetOption(opts, "validation-file") ?? GetOption(opts, "validationfile");
+            if (string.IsNullOrWhiteSpace(verdict) && !string.IsNullOrWhiteSpace(verdictFile))
+            {
+                if (!File.Exists(verdictFile))
+                {
+                    Console.Error.WriteLine($"Error: --validation-file not found: {verdictFile}");
+                    return 2;
+                }
+                verdict = await File.ReadAllTextAsync(verdictFile);
+            }
+
+            try
+            {
+                var result = await SQLAuditor.Lib.ScriptGenerationSkill.SaveGeneratedScriptAsync(
+                    id,
+                    response,
+                    verdict,
+                    "run: sqlauditor save_generated_script --id <id> --response-file <path> --validation-file <path-to-verdict-file>");
+                Console.WriteLine(result);
+                // A validation failure is surfaced to Copilot as a non-zero exit so it retries.
+                return result.StartsWith("VALIDATION FAILED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("VALIDATION REJECTED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("VALIDATION VERDICT NOT RECOGNISED", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("CORRECTED SCRIPT STILL INVALID", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
+                return 3;
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `configure_checklist` subcommand
+        // Configure Checklist -> Guardrails -> Semantic Match Router -> Area/Sub-area
+        // Classification -> Script Generation -> User Review/Approval -> Save Custom Checklist +
+        // Mapping -> Update Final Merged Configuration.
+        // Copilot CLI performs the three reviews from the prompts this command serves; the command
+        // itself makes no LLM calls and never connects to a SQL Server.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunConfigureChecklistCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                PrintConfigureChecklistUsage();
+                return 0;
+            }
+
+            var hints = new SQLAuditor.Lib.CustomChecklistInvocationHints
+            {
+                Classify = "run: sqlauditor configure_checklist --title \"<title>\" --description \"<description>\" "
+                         + "--guardrail accept --match none --sub-area <existing sub-area id> --rationale \"<why>\"",
+                Generate = "run: sqlauditor configure_checklist --id <id> --response-file <path-to-raw-response-file>",
+                Review = "run: sqlauditor configure_checklist --id <id> --response-file <path> --validation-file <path-to-verdict-file>",
+                Approve = "After the user approves, run: sqlauditor configure_checklist --id <id> --approve",
+                Reject = "run: sqlauditor configure_checklist --id <id> --reject"
+            };
+
+            try
+            {
+                if (opts.ContainsKey("list-sub-areas") || opts.ContainsKey("sub-areas"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.ListSubAreas());
+                    return 0;
+                }
+
+                if (opts.ContainsKey("list") || opts.ContainsKey("pending"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.ListPending());
+                    return 0;
+                }
+
+                var id = GetOption(opts, "id");
+
+                if (!string.IsNullOrWhiteSpace(id) && opts.ContainsKey("reject"))
+                {
+                    Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.Reject(id));
+                    return 0;
+                }
+
+                if (!string.IsNullOrWhiteSpace(id) && opts.ContainsKey("approve"))
+                {
+                    var approved = await SQLAuditor.Lib.CustomChecklistHostFlow.ApproveAsync(id);
+                    Console.WriteLine(approved);
+                    return approved.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    var response = GetOption(opts, "response");
+                    var responseFile = GetOption(opts, "response-file") ?? GetOption(opts, "responsefile");
+                    if (string.IsNullOrWhiteSpace(response) && !string.IsNullOrWhiteSpace(responseFile))
+                    {
+                        if (!File.Exists(responseFile))
+                        {
+                            Console.Error.WriteLine($"Error: --response-file not found: {responseFile}");
+                            return 2;
+                        }
+                        response = await File.ReadAllTextAsync(responseFile);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(response))
+                    {
+                        Console.Error.WriteLine(
+                            "Error: supply the generated script via --response-file <path> or --response \"<text>\", "
+                            + "or use --approve / --reject to finish the item.");
+                        return 2;
+                    }
+
+                    var verdict = GetOption(opts, "validation");
+                    var verdictFile = GetOption(opts, "validation-file") ?? GetOption(opts, "validationfile");
+                    if (string.IsNullOrWhiteSpace(verdict) && !string.IsNullOrWhiteSpace(verdictFile))
+                    {
+                        if (!File.Exists(verdictFile))
+                        {
+                            Console.Error.WriteLine($"Error: --validation-file not found: {verdictFile}");
+                            return 2;
+                        }
+                        verdict = await File.ReadAllTextAsync(verdictFile);
+                    }
+
+                    var generated = SQLAuditor.Lib.CustomChecklistHostFlow.Generate(id, response, verdict, hints);
+                    Console.WriteLine(generated);
+                    return generated.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION FAILED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION REJECTED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("VALIDATION VERDICT NOT RECOGNISED", StringComparison.OrdinalIgnoreCase)
+                        || generated.StartsWith("CORRECTED SCRIPT STILL INVALID", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                var title = GetOption(opts, "title");
+                var description = GetOption(opts, "description") ?? GetOption(opts, "desc");
+
+                if (opts.ContainsKey("guardrail") || opts.ContainsKey("sub-area") || opts.ContainsKey("subarea"))
+                {
+                    var classified = SQLAuditor.Lib.CustomChecklistHostFlow.Classify(
+                        title,
+                        description,
+                        GetOption(opts, "guardrail"),
+                        GetOption(opts, "guardrail-reason"),
+                        GetOption(opts, "match") ?? GetOption(opts, "matched-id"),
+                        GetOption(opts, "match-reason"),
+                        GetOption(opts, "sub-area") ?? GetOption(opts, "subarea"),
+                        GetOption(opts, "rationale"),
+                        hints);
+                    Console.WriteLine(classified);
+                    return classified.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+                }
+
+                Console.WriteLine(SQLAuditor.Lib.CustomChecklistHostFlow.Begin(title, description, hints));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
+                return 3;
+            }
+        }
+
+        static void PrintConfigureChecklistUsage()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Usage: sqlauditor configure_checklist [options]");
+            Console.WriteLine();
+            Console.WriteLine("Adds a CUSTOM checklist item under an EXISTING Area/Sub-area. The default checklist");
+            Console.WriteLine("and the default mapping are never modified. New Areas/Sub-areas are not supported.");
+            Console.WriteLine();
+            Console.WriteLine("Flow (one command per step):");
+            Console.WriteLine("  1) --title \"<t>\" --description \"<d>\"");
+            Console.WriteLine("       Pre-screens the request and returns the guardrails, semantic-match and");
+            Console.WriteLine("       classification prompts for you (the AI) to review.");
+            Console.WriteLine("  2) --title \"<t>\" --description \"<d>\" --guardrail <accept|reject>");
+            Console.WriteLine("       [--guardrail-reason \"<why>\"] --match <existing id|none> [--match-reason \"<why>\"]");
+            Console.WriteLine("       --sub-area <id> [--rationale \"<why>\"]");
+            Console.WriteLine("       Records the verdicts, assigns the next free checklist ID inside the Sub-area,");
+            Console.WriteLine("       and returns the script generation prompt.");
+            Console.WriteLine("  3) --id <id> --response-file <path> [--validation-file <path>]");
+            Console.WriteLine("       Runs the format gate, then the C1-C7 review, and holds the script for approval.");
+            Console.WriteLine("  4) --id <id> --approve      Saves the item + mapping and merges the final config.");
+            Console.WriteLine("     --id <id> --reject       Releases the reserved ID; nothing is written.");
+            Console.WriteLine();
+            Console.WriteLine("Other options:");
+            Console.WriteLine("  --list-sub-areas    Print every Area/Sub-area a custom item may be filed under.");
+            Console.WriteLine("  --list              Print the drafts reserved but not yet approved.");
+            Console.WriteLine("  --help              Show this help.");
+            Console.WriteLine();
+            Console.WriteLine("The CLI performs no LLM calls: Copilot CLI is the AI layer. This command never");
+            Console.WriteLine("connects to a SQL Server and never asks for credentials.");
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `generate_report` subcommand
+        // Runs only when the user has explicitly asked for the summary/report. Refreshes
+        // results/historical_last_run.json from the newly evaluated manual results, then
+        // renders results/final_report.md and results/audit_report.xlsx.
+        // ---------------------------------------------------------------------
+        static int RunGenerateReportCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor generate_report [--no-historical-refresh]");
+                Console.WriteLine("  Refreshes historical_last_run.json with the manual results in");
+                Console.WriteLine("  checklist_results.json, then writes final_report.md and audit_report.xlsx");
+                Console.WriteLine("  in the latest timestamp-and-server run directory under results.");
+                return 0;
+            }
+
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath))
+            {
+                Console.Error.WriteLine($"No results found at {jsonPath}. Run 'evaluate' first.");
+                return 2;
+            }
+
+            Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports(!opts.ContainsKey("no-historical-refresh")));
+            Console.WriteLine($"Report : {Path.Combine(resultsDir, "final_report.md")}");
+            Console.WriteLine($"Excel  : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+
+            var tally = SQLAuditor.Lib.Auditor.BuildOutcomeTally();
+            if (!string.IsNullOrEmpty(tally))
+                Console.WriteLine($"Final outcome counts: {tally}");
+
+            return 0;
         }
 
         // ---------------------------------------------------------------------
@@ -561,7 +1155,7 @@ namespace SQLAuditor
         {
             var opts = ParseOptions(args);
             var kind = GetOption(opts, "kind") ?? "summary";
-            var resultsDir = Path.Combine(Directory.GetCurrentDirectory(), "results");
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var path = string.Equals(kind, "json", StringComparison.OrdinalIgnoreCase)
                 ? Path.Combine(resultsDir, "checklist_results.json")
                 : Path.Combine(resultsDir, "final_report.md");
@@ -570,6 +1164,13 @@ namespace SQLAuditor
             {
                 Console.Error.WriteLine($"No report found at {path}. Run 'evaluate' first.");
                 return 2;
+            }
+
+            var tally = SQLAuditor.Lib.Auditor.BuildOutcomeTally();
+            if (!string.IsNullOrEmpty(tally))
+            {
+                Console.WriteLine($"Final outcome counts (after enrichment and review): {tally}");
+                Console.WriteLine();
             }
 
             Console.WriteLine(File.ReadAllText(path));
@@ -594,7 +1195,12 @@ namespace SQLAuditor
                 }
                 else if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
                 {
-                    val = args[++i];
+                    // A quote inside the text makes the shell split one argument into several,
+                    // so every following token is re-joined instead of silently dropped.
+                    var sb = new System.Text.StringBuilder(args[++i]);
+                    while (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                        sb.Append(' ').Append(args[++i]);
+                    val = sb.ToString();
                 }
                 opts[key] = val;
             }
@@ -603,6 +1209,14 @@ namespace SQLAuditor
 
         static string? GetOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
             => opts.TryGetValue(key, out var v) ? v : null;
+
+        // Wording that quotes script values is passed by file so no shell can mangle it.
+        static string? ReadValueOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
+        {
+            var file = GetOption(opts, key + "-file") ?? GetOption(opts, key + "file");
+            if (!string.IsNullOrWhiteSpace(file) && File.Exists(file)) return File.ReadAllText(file);
+            return GetOption(opts, key);
+        }
 
         static string Prompt(string msg)
         {

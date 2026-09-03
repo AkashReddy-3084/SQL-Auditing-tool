@@ -1,27 +1,11 @@
-Checklist Item: {{CHECKLIST_ITEM_ID}}
-Description: {{CHECKLIST_ITEM_DESCRIPTION}}
-Verification: {{CHECKLIST_ITEM_VERIFICATION}}
 SQL Server: {{SQL_SERVER_NAME}}
 SQL Snapshot:
 {{SQL_SNAPSHOT}}
 
-Assess the checklist item using ONLY the SQL snapshot.
+Assess the checklist item below using ONLY the snapshot above, applying the feasibility, Not Applicable and field rules from the system prompt.
 
-Evaluation rules:
-1. First determine feasibility from available snapshot signals.
-2. If snapshot includes relevant object/code indicators (for example module counts, TRY/CATCH usage counts, THROW/RAISERROR usage, NOCOUNT usage, cursor/while usage, deprecated type counts), treat as potentially feasible.
-3. Use feasible=false only when key required signals are absent.
-4. When feasible=true but confidence is limited, use outcome=NeedsReview with specific evidence.
-5. Never copy these instructions in the response.
+Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
 
-Report fields (fill all of them so the summary report renders correctly):
-1. score: integer 0-3 (0 = not implemented, 1 = partial, 2 = implemented, 3 = best practice). Default to 0 when the snapshot shows no supporting evidence.
-2. implementationStatus: the label matching the score (Not Implemented | Partial | Implemented | Best Practice).
-3. severity: Critical | High | Medium | Low | Informational, aligned with the size of the gap.
-4. finding: one concise sentence stating the observed state.
-5. recommendation: remediation guidance when score < 2; empty string when score >= 2.
-6. effort: Low | Medium | High.
-7. riskImpact: short phrase describing the risk if the gap is not addressed.
-8. scoreImpact: integer equal to (3 - score).
-
-Return strict JSON only with keys: outcome, evidence, feasible, reasoning, score, implementationStatus, severity, finding, recommendation, effort, riskImpact, scoreImpact.
+Return strict JSON only with keys: outcome, feasible, score, severity, finding, evidence, recommendation, effort, riskImpact.

@@ -8,10 +8,13 @@ The SQL Auditing Tool evaluates SQL environment compliance against a checklist u
 - AI-MCP: AI evaluation using SQL metadata snapshot and model prompts.
 - AI-Manual: manual operator validation with AI-generated instructions.
 
-Primary outputs are written to the `results/` folder:
+Primary outputs are grouped by audit run under
+`results/<yyyyMMdd_HHmmss_fff>_<sanitized-server-name>/`:
 
 - `checklist_results.json`
+- `historical_last_run.json`
 - `final_report.md`
+- `audit_report.xlsx`
 - `progress_stream.txt`
 - `ui_log.txt`
 
@@ -78,33 +81,44 @@ graph TD
   A["Start App"] --> B["Verify Access<br/>Build connection string from auth mode"]
   B --> C{"Connection valid?"}
   C -- "No" --> C1["Stay on Login<br/>Show failure status"]
-  C -- "Yes" --> D["Load checklist structure"]
+  C -- "Yes" --> C2["Discover accessible online<br/>user databases"]
+  C2 --> C3["Select databases<br/>or All Databases"]
+  C3 --> D["Load checklist structure"]
   D --> E["Load deterministic mapping"]
   E --> F["Classify selected items<br/>Script mapped vs AI items"]
 
   F --> G["Run Script Pipeline"]
-  F --> H["Run AI Pipeline"]
+  F --> H0{"Can MCP decide this item?"}
+  H0 -- "Yes" --> H["MCP Stage<br/>concurrent workers"]
+  H0 -- "No (documentation / admin /<br/>no provider or SQL)" --> M["Manual Stage<br/>concurrent workers"]
 
-  G --> G1["Execute mapped SQL files"]
-  G1 --> G2["Derive outcome from script evidence"]
+  G --> G1{"Mapped script scope"}
+  G1 -- "SERVER" --> G2["Execute on master connection"]
+  G1 -- "DATABASE" --> G3["Open one connection per<br/>configured database"]
+  G3 --> G4["Execute reusable current-database SQL"]
+  G2 --> G5["Parse Result / Score /<br/>DatabaseQueried / Finding"]
+  G4 --> G5
+  G5 --> G6["Worst score and any Fail<br/>govern the item"]
 
-  H --> H1{"SQL connection available?"}
-  H1 -- "Yes" --> H2["Try AI-MCP evaluation"]
+  H --> H2["Evaluate against the<br/>per-run SQL snapshot"]
   H2 --> H3{"MCP feasible and parsed?"}
   H3 -- "Yes" --> H4["Store AI-MCP result"]
-  H3 -- "No" --> H5["Queue AI-Manual"]
-  H1 -- "No" --> H5
+  H3 -- "No" --> H5["Hand item to the manual queue<br/>and take the next item"]
+  H5 --> M
 
-  H5 --> H6["Generate manual instructions"]
+  M --> H6["Generate manual instructions"]
   H6 --> H7["Collect operator PASS or FAIL evidence"]
   H7 --> H8["Store AI-Manual result"]
 
-  G2 --> I["Merge all results"]
+  F -- "Reuse enabled and historical result exists" --> H9["Copy result from historical_last_run.json"]
+
+  G6 --> I["Merge all results"]
   H4 --> I
   H8 --> I
+  H9 --> I
 
   I --> J["Write checklist_results.json"]
-  J --> K["Build summary metrics and final_report.md"]
+  J --> K["On request: refresh historical_last_run.json, build final_report.md + audit_report.xlsx"]
   K --> L["Display Summary tab"]
 ```
 
@@ -112,25 +126,82 @@ graph TD
 
 1. Script technique
 - Used when checklist item has mapped script(s).
-- Executes SQL and captures textual evidence.
-- Outcome derived using evidence heuristics (`Pass`, `Fail`, `NeedsReview`).
+- `SERVER` scripts execute on the shared master connection. `DATABASE` scripts execute once per
+  configured user database, using `InitialCatalog`; selected names are never inserted into SQL.
+- Legacy database scripts that enumerate `sys.databases` receive a session-local filtered catalog
+  containing only the current target. Newly generated scripts query only current-database catalogs.
+- Captures the final structured `Result`, `Score`, `DatabaseQueried`, and `Finding` row. Across
+  database executions, the minimum score wins and any `Fail` makes the item fail.
 
 2. AI-MCP technique
 - Used for unmapped items when SQL connectivity is available.
-- Builds SQL snapshot (server metadata + user DB summaries).
+- Reads the per-run SQL snapshot (server metadata + user DB summaries). The snapshot describes the
+  server rather than the checklist item, so it is collected once per run and shared by every item.
 - Sends prompt to model provider and parses structured response.
 - If response is feasible and parseable, uses AI-MCP result.
+- An item it cannot decide is handed to the manual stage; the worker immediately takes the next item.
+- If the snapshot holds no supporting artefact for the item (every relevant value irrelevant,
+  NULL, empty or zero), the control does not exist to be assessed: the evidence opens with
+  `Not Applicable.` and the outcome is `Not Applicable`, which is excluded from all scoring.
 
 3. AI-Manual technique
 - Fallback when MCP is unavailable, infeasible, or when no SQL connection.
 - Generates manual verification steps (LLM first, static prompt fallback).
 - Operator provides PASS/FAIL or notes; result is persisted.
 
+## Evaluation Concurrency
+
+The script pipeline, the MCP stage and the manual stage all run at the same time, so no stage waits
+for another to finish:
+
+- MCP evaluation and manual-step generation are separate provider calls joined by an unbounded
+  queue. Deferring an item costs the MCP stage nothing, and manual guidance for already-deferred
+  items is written while later items are still being evaluated.
+- Documentation and admin checks never qualify for MCP, so they reach the manual stage immediately
+  instead of waiting behind MCP evaluations.
+- Each stage processes several items at once (`Auditor.MaxAiStageWorkers`). Every MCP worker owns
+  its SQL connection, because one connection cannot serve concurrent evaluations.
+- The manual stage runs single-threaded when the host collects operator input inline, so the
+  reviewer is still prompted for one item at a time.
+- The queue is closed only after every MCP worker stops producing, so no deferred item is lost and
+  no manual worker waits forever.
+
+Ordering is not part of the contract: each item still produces exactly one result, and scoring reads
+the merged results rather than their arrival order.
+
+## Script Generation
+
+- `ChecklistItemProcessor` asks the configured model to classify feasibility, script type, and
+  `SERVER` or `DATABASE` scope, then generate the read-only four-column contract.
+- `ScriptOutputValidator` applies the deterministic format gate; the C1-C7 review can return a
+  complete corrected script before save.
+- `ScriptGeneratorAgent` and `ScriptGenerationSkill` save the script and its scope in
+  `deterministic-script-mapping.json`.
+- A `DATABASE` script is generated for `DB_NAME()` only. Runtime database selection belongs to
+  `Auditor`, which keeps scripts reusable across different audit runs.
+
+## Scoring and Reports
+
+- A script's score is factual input from its final result row. Database fan-out does not rescore
+  it; `SqlScriptResultParser` selects the minimum returned score (0-3).
+- Category score is `sum(item scores) / (scored items * 3)`. Area score is the average of its
+  scored category percentages. Overall score is the weighted average of scored areas, with weights
+  renormalized when an area has no scored items.
+- Not Applicable items have no score and are excluded at item, category, area, and overall levels.
+- `checklist_results.json` is the persisted source for both reports. `SummaryReportGenerator`
+  writes `final_report.md`; `ExcelReportGenerator` uses the same `ScoreCalculator` and writes
+  `audit_report.xlsx` with Summary, Area Detail, Checklists, Risk Register, and Not Applicable
+  Items sheets.
+
 ## Main Modules and Responsibilities
 
 - `Backend/core/Auditor.cs`
   - Core orchestrator for checklist loading, pipeline execution, and result persistence.
-  - Normalizes SQL connection variants and coordinates Script/AI flows.
+  - Normalizes SQL connection variants, discovers user databases, routes scripts by scope, and
+    coordinates Script/AI flows.
+
+- `Backend/agents/modules/reporting/SummaryReportGenerator.cs` and `ExcelReportGenerator.cs`
+  - Share the score calculator and render Markdown and Excel from persisted checklist results.
 
 - `Backend/agents/modules/SqlServerMcpEvaluator.cs`
   - Collects SQL snapshot and performs model-based evaluation for AI-MCP.
@@ -145,17 +216,58 @@ graph TD
 - `Backend/agents/modules/PromptTemplateStore.cs`
   - Resolves and renders prompt templates from `Backend/agents/prompts/`.
 
+- `Backend/agents/modules/application/HistoricalManualResultsStore.cs`
+  - Reads/writes `results/historical_last_run.json` (manual and AI-Manual results keyed by
+    checklist ID) so completed manual evaluations can be reused by a later run.
+  - Refreshed only at report generation; shared by WPF, CLI and IDE/MCP.
+
 - `Frontend/MainWindow/MainWindow.xaml(.cs)`
   - Implements staged UX and user-driven evaluation lifecycle.
   - Handles checklist selection, manual evidence capture, and summary rendering.
 
 ## Data and File Boundaries
 
-- Checklist definition: `Backend/checklist/master-checklist.json`.
-- Deterministic mapping: `Backend/checklist/deterministic-script-mapping.json`.
+- Checklist definition (merged runtime file): `Backend/checklist/master-checklist.json`.
+- Deterministic mapping (merged runtime file): `Backend/checklist/deterministic-script-mapping.json`.
+- Both merged files are generated by `ChecklistConfigurationStore` and are never edited by hand:
+  - `master-checklist.json` = `default-checklist.json` + `custom-checklist.json`
+  - `deterministic-script-mapping.json` = `default-deterministic-script-mapping.json`
+    + `custom-deterministic-script-mapping.json`
+  - The `default-*` files are seeded once from the shipped runtime files and are the only home for
+    default checklist data. The Configure Checklist flow never modifies them.
+  - `custom-checklist-pending.json` holds reserved-but-unapproved drafts; entries are removed on
+    approval or rejection, so nothing unapproved reaches the custom configuration.
+- Runtime database selection: in-memory only; WPF passes selected names to `Auditor`. It is not
+  written into scripts, mappings, result files, or provider configuration.
 - SQL script assets: `Backend/checklist/scripts/sql/`.
 - Prompt templates: `Backend/agents/prompts/`.
 - Runtime artifacts: `results/`.
+
+## Custom Checklist Configuration
+
+Custom checks are added under an EXISTING Area/Sub-area only; new Areas/Sub-areas are not
+supported. The pipeline is identical in every host:
+
+```
+Custom Checklist -> Guardrails -> Semantic Match Router -> Area/Sub-area Classification
+-> Script & Logic Generator -> User Verification -> custom-checklist.json
+-> custom-deterministic-script-mapping.json -> Merge Final Configuration
+```
+
+- `CustomChecklistSkill` owns the deterministic stages, the canonical prompt templates
+  (`custom_checklist_guardrails_*`, `custom_checklist_match_*`, `custom_checklist_classify_*`) and
+  the shortlist of nearest existing items the match router reasons over.
+- `ChecklistConfigurationStore` allocates the next free ID inside the chosen sub-area under a
+  named mutex, so concurrent additions can never collide, and regenerates the merged files.
+- Script generation reuses `ChecklistItemProcessor`, `ScriptOutputValidator` and the existing
+  `script_generator_*` / `script_validation_*` prompts unchanged.
+- WPF drives the AI stages through the configured provider (`CustomChecklistAiAgent` +
+  `CustomChecklistPipeline`, surfaced by `ConfigureChecklistWindow` and
+  `CustomChecklistProgressWindow`). The CLI (`sqlauditor configure_checklist`) and the MCP server
+  (`configure_checklist` tool) use `CustomChecklistHostFlow`, where Copilot is the AI layer and
+  follows the same templates.
+- Approved custom items participate in the existing Script / AI-MCP / AI-Manual pipelines,
+  scoring, historical manual results, reporting and export with no special-casing.
 
 ## Deployment/Execution Modes
 

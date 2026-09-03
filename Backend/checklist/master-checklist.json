@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-03T05:49:22.870743Z",
+  "generated": "2026-09-02T10:37:17.1364521Z",
   "source": "02-audit-checklist.md",
   "areas": [
     {
@@ -1716,5 +1716,9 @@
         }
       ]
     }
+  ],
+  "merged_from": [
+    "default-checklist.json",
+    "custom-checklist.json"
   ]
 }

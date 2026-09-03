@@ -1,0 +1,16 @@
+Review this generated audit script against the C1-C7 checks in the system prompt.
+
+**Checklist ID**: {checklist_id}
+**Category**: {category}
+**Check Name**: {check_name}
+**Description**: {description}
+**Expected Outcome**: {expected_outcome}
+**Script Type**: {script_type}
+**Scope**: {scope}
+**Scoring Logic**: {scoring_logic}
+
+---SCRIPT_TO_VALIDATE_START---
+{script_content}
+---SCRIPT_TO_VALIDATE_END---
+
+Return the verdict in the required response format. If the script is INVALID and repairable, you MUST return the complete corrected replacement between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- — never a partial diff — keeping the required output fields and read-only behaviour.

@@ -62,6 +62,43 @@
             <Setter Property="MinHeight" Value="38" />
         </Style>
 
+        <Style x:Key="DatabaseSelectorToggle" TargetType="ToggleButton">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,9" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="TreeView">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -204,6 +241,7 @@
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage2Label" Text="2  Checklist" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage3Label" Text="3  Evaluate" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage4Label" Text="4  Summary" FontSize="14" FontWeight="SemiBold" /></Border>
+                    <Button x:Name="ExitHeaderBtn" Content="Exit" Style="{StaticResource DangerButton}" Click="ExitHeaderBtn_Click" Margin="12,0,0,0" MinWidth="90" Visibility="Collapsed" />
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -255,13 +293,101 @@
                                         </StackPanel>
 
                                         <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <StackPanel x:Name="DatabaseSelectorPanel" Visibility="Collapsed" Margin="0,14,0,0">
+                                            <TextBlock Text="Databases" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <Grid>
+                                                <ToggleButton x:Name="DatabaseSelectorToggle" Style="{StaticResource DatabaseSelectorToggle}" IsEnabled="False">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock x:Name="DatabaseSelectionText" Text="Select Databases" TextTrimming="CharacterEllipsis" />
+                                                        <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="{StaticResource MutedBrush}" StrokeThickness="1.5" Margin="12,4,2,0" />
+                                                    </Grid>
+                                                </ToggleButton>
+                                                <Popup x:Name="DatabaseSelectorPopup"
+                                                       Placement="Bottom"
+                                                       PlacementTarget="{Binding ElementName=DatabaseSelectorToggle}"
+                                                       VerticalOffset="4"
+                                                       AllowsTransparency="True"
+                                                       StaysOpen="False"
+                                                       IsOpen="{Binding IsChecked, ElementName=DatabaseSelectorToggle, Mode=TwoWay}">
+                                                    <Border Width="{Binding ActualWidth, ElementName=DatabaseSelectorToggle}"
+                                                            Background="{StaticResource SurfaceBrush}"
+                                                            BorderBrush="{StaticResource BorderBrushSoft}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="4"
+                                                            Padding="8">
+                                                        <Border.Effect>
+                                                            <DropShadowEffect BlurRadius="12" ShadowDepth="3" Color="#330F172A" Opacity="0.25" />
+                                                        </Border.Effect>
+                                                        <ScrollViewer MaxHeight="240" VerticalScrollBarVisibility="Auto">
+                                                            <StackPanel x:Name="DatabaseOptionsPanel" />
+                                                        </ScrollViewer>
+                                                    </Border>
+                                                </Popup>
+                                            </Grid>
+                                        </StackPanel>
                                         <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Custom Checklist card (right): read-only view of items already added, plus the entry point to the existing Add Configure Checklist modal. -->
+                                <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" VerticalAlignment="Top" Width="420" Margin="24,0,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Custom Checklist" FontSize="24" FontWeight="Bold" />
+                                        <TextBlock Text="View and manage custom checklist items." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" TextWrapping="Wrap" />
+
+                                        <Border Background="{StaticResource SurfaceBrush}"
+                                                BorderBrush="{StaticResource BorderBrushSoft}"
+                                                BorderThickness="1"
+                                                CornerRadius="12"
+                                                Padding="12"
+                                                MinHeight="220">
+                                            <Grid>
+                                                <TextBlock x:Name="CustomChecklistEmptyText"
+                                                           Text="No custom checklist items have been added yet."
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           TextWrapping="Wrap"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"
+                                                           TextAlignment="Center"
+                                                           Visibility="Collapsed" />
+                                                <ScrollViewer x:Name="CustomChecklistScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+                                                    <ItemsControl x:Name="CustomChecklistItems">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1" Padding="2,8">
+                                                                    <StackPanel>
+                                                                        <StackPanel Orientation="Horizontal">
+                                                                            <TextBlock Text="{Binding Id}" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" />
+                                                                            <TextBlock Text="{Binding SubAreaLabel}" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="8,1,0,0" TextTrimming="CharacterEllipsis" />
+                                                                        </StackPanel>
+                                                                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </ScrollViewer>
+                                            </Grid>
+                                        </Border>
+
+                                        <TextBlock x:Name="CustomChecklistStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <Button x:Name="AddCustomChecklistItemBtn"
+                                                Content="Add New Custom Checklist Item"
+                                                Style="{StaticResource ModernButton}"
+                                                Margin="0,18,0,0"
+                                                HorizontalAlignment="Left"
+                                                IsEnabled="False"
+                                                Click="ConfigureChecklistBtn_Click" />
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
 
-                            <!-- Only this button navigates to the Checklist page; enabled once SQL connection verifies. -->
-                            <Button x:Name="StartEvaluationBtn" Content="Configure Checklist" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
+                            <!-- Only this button navigates to the Checklist page; enabled once the SQL connection verifies. -->
+                            <Button x:Name="StartEvaluationBtn" Content="Continue to Checklist" Style="{StaticResource ModernButton}" Width="220" Margin="0,24,0,0" HorizontalAlignment="Center" IsEnabled="False" Click="StartEvaluationBtn_Click" />
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -289,7 +415,15 @@
 
                             <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
-                                    <TextBlock DockPanel.Dock="Top" Text="Checklist (select items to evaluate)" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                                        <CheckBox x:Name="SelectAllChecklistCb" DockPanel.Dock="Right" Content="Select All" VerticalAlignment="Center" Margin="12,0,0,0"
+                                                  Checked="SelectAllChecklistCb_Checked" Unchecked="SelectAllChecklistCb_Unchecked" />
+                                        <CheckBox x:Name="CopyManualResultsCb" DockPanel.Dock="Right" Content="Copy Manual Results (Last Runs)" VerticalAlignment="Center" Margin="12,0,0,0"
+                                                  IsEnabled="False"
+                                                  ToolTip="Reuse manual/AI-Manual results recorded in results/historical_last_run.json instead of re-verifying those items."
+                                                  Checked="CopyManualResultsCb_Changed" Unchecked="CopyManualResultsCb_Changed" />
+                                        <TextBlock Text="Checklist (select items to evaluate)" FontWeight="Bold" FontSize="16" VerticalAlignment="Center" />
+                                    </DockPanel>
                                     <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
                                     <TreeView x:Name="ChecklistTree" />
                                 </DockPanel>
@@ -324,7 +458,14 @@
 
                             <Border Grid.Column="0" Style="{StaticResource CardBorder}" Background="{StaticResource SurfaceAltBrush}">
                                 <DockPanel>
-                                    <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,12" />
+                                    <TextBlock DockPanel.Dock="Top" Text="Evaluation Status" FontWeight="Bold" FontSize="16" Margin="0,0,0,8" />
+                                    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                                        <TextBlock Text="Progress" FontWeight="SemiBold" FontSize="12" Foreground="#58657A" Margin="0,0,0,6" />
+                                        <Grid>
+                                            <ProgressBar x:Name="EvalProgressBar" Height="12" Minimum="0" Maximum="100" Value="0" />
+                                            <TextBlock x:Name="EvalProgressText" Text="0 / 0" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" FontWeight="SemiBold" Foreground="#1F2937" />
+                                        </Grid>
+                                    </StackPanel>
                                     <!-- TreeView uses its own built-in ScrollViewer; no outer wrapper (avoids nested-ScrollViewer mouse-wheel capture). -->
                                     <TreeView x:Name="EvalTree" Margin="0,0,0,6"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -367,20 +508,25 @@
                                             <TextBlock x:Name="ManualStepsText" Text="" TextWrapping="Wrap" FontSize="14" LineHeight="22" />
                                         </ScrollViewer>
 
-                                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Input / Evidence" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
-                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="ManualOutputBox_TextChanged" />
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Text="Provide your decision for the above manual item Pass/Fail along with reason text" TextWrapping="Wrap" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
+                                        <TextBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="ManualOutputBox" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="ManualOutputBox_TextChanged"
+                                                 ToolTip="Start with Pass or Fail, then the reason. Example: Pass - topology document reviewed and all instances are listed." />
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
                                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Button x:Name="MarkPassedBtn" Content="Passed" Style="{StaticResource SuccessButton}" Width="110" Click="MarkPassedBtn_Click" Margin="0,0,10,0" />
-                                            <Button x:Name="MarkFailedBtn" Content="Failed" Style="{StaticResource DangerButton}" Width="110" Click="MarkFailedBtn_Click" Margin="0,0,10,0" />
                                             <Button x:Name="SubmitBtn" Content="Submit" Style="{StaticResource ModernButton}" Width="120" Click="SubmitBtn_Click" />
                                         </StackPanel>
                                     </Grid>
                                 </Border>
 
                                 <Border Grid.Row="1" Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Margin="0,16,0,0">
-                                    <Button x:Name="GenSummaryBtn" Content="Generate Summary / Report" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="GenSummaryBtn_Click" />
+                                    <StackPanel>
+                                        <Button x:Name="GenSummaryBtn" Content="Generate Summary / Report" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="GenSummaryBtn_Click" Margin="0,0,0,10" />
+                                        <Button x:Name="ImportManualCsvBtn" Content="Import Filled Manual CSV" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Stretch" Click="ImportManualCsvBtn_Click" Margin="0,0,0,10"
+                                            ToolTip="Apply Pass/Fail decisions and evidence from a previously exported manual-check CSV to this completed evaluation." />
+                                        <Button x:Name="ExportManualAndGenerateBtn" Content="Export Manual CSV + Generate" Style="{StaticResource ModernButton}" HorizontalAlignment="Stretch" Click="ExportManualAndGenerateBtn_Click"
+                                                ToolTip="Export all manual checks for offline completion, mark unanswered manual checks as Skipped, and generate the reports without scoring them." />
+                                    </StackPanel>
                                 </Border>
                             </Grid>
                         </Grid>
@@ -486,7 +632,7 @@
                             </Border>
 
                             <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-                                <Button x:Name="ExitBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitBtn_Click" />
+                                <Button x:Name="ExitSummaryBtn" Content="Exit" Style="{StaticResource SecondaryButton}" MinWidth="110" Click="ExitSummaryBtn_Click" />
                             </StackPanel>
                         </Grid>
                     </ScrollViewer>

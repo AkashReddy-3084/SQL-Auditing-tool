@@ -38,6 +38,11 @@ public sealed class ChecklistItemResult
     public double? ScoreImpact { get; set; }
     public string? Evidence { get; set; }
 
+    // Persisted under the JSON key "Databases Verified" (note the space). Consumed
+    // by the Excel report; the Markdown generator ignores it.
+    [JsonPropertyName("Databases Verified")]
+    public string? DatabasesVerified { get; set; }
+
     // ---- Derived helpers (not serialized) ---------------------------------
     [JsonIgnore]
     public int AreaNumber
@@ -61,7 +66,19 @@ public sealed class ChecklistItemResult
     }
 
     [JsonIgnore]
-    public bool IsScored => NotApplicable != true && Score.HasValue;
+    public bool IsScored => !IsNotApplicable && !IsSkipped && Score.HasValue;
+
+    /// <summary>
+    /// The control does not exist to be assessed (Outcome "Not Applicable"). Such items are
+    /// reported under "Items Not Applicable" and take no part in any score, whatever Score
+    /// they carry.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsNotApplicable =>
+        NotApplicable == true || SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(Outcome);
+
+    [JsonIgnore]
+    public bool IsSkipped => SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(Outcome);
 }
 
 /// <summary>Report-level metadata supplied by the WPF UI or defaults.</summary>
@@ -107,7 +124,7 @@ public sealed class AreaScore
     public required AreaDefinition Area { get; init; }
     public List<ChecklistItemResult> Items { get; init; } = new();
     public int ScoredCount => Items.Count(i => i.IsScored);
-    public int NotApplicableCount => Items.Count(i => i.NotApplicable == true);
+    public int NotApplicableCount => Items.Count(i => i.IsNotApplicable);
 
     public IReadOnlyList<CategoryScore> Categories =>
         Items
@@ -226,7 +243,10 @@ public sealed class ReportInputEnricher
 
     private void EnrichItem(ChecklistItemResult item)
     {
-        if (item.Score is null && item.NotApplicable != true)
+        var notApplicable = item.IsNotApplicable;
+        var skipped = item.IsSkipped;
+
+        if (item.Score is null && !notApplicable && !skipped)
         {
             item.Score = item.Outcome?.Trim().ToLowerInvariant() switch
             {
@@ -240,23 +260,38 @@ public sealed class ReportInputEnricher
 
         if (string.IsNullOrWhiteSpace(item.Severity))
         {
-            item.Severity = item.Score switch
-            {
-                0 => "High",
-                1 => "Medium",
-                2 => "Low",
-                _ => "Informational",
-            };
+            item.Severity = notApplicable || skipped
+                ? "Informational"
+                : item.Score switch
+                {
+                    0 => "High",
+                    1 => "Medium",
+                    2 => "Low",
+                    _ => "Informational",
+                };
             UsedDummyValues = true;
         }
 
         if (string.IsNullOrWhiteSpace(item.Finding))
         {
-            item.Finding = item.Score >= 2
+            item.Finding = skipped
+                ? $"Manual evaluation deferred: {item.Description}."
+                : item.Score >= 2
                 ? $"Control satisfied: {item.Description}"
                 : $"Gap identified: {item.Description}";
             UsedDummyValues = true;
         }
+
+        if (string.IsNullOrWhiteSpace(item.Evidence))
+        {
+            item.Evidence = string.IsNullOrWhiteSpace(item.ScriptFile)
+                ? $"Assessed via {item.Technique}."
+                : $"Assessed via {item.Technique}; script: {item.ScriptFile}.";
+        }
+
+        // N/A and skipped items need no remediation, effort, risk or score impact: they are
+        // outside the scored population entirely.
+        if (notApplicable || skipped) return;
 
         if (string.IsNullOrWhiteSpace(item.Recommendation) && item.Score < 2)
         {
@@ -285,13 +320,6 @@ public sealed class ReportInputEnricher
         {
             item.ScoreImpact = 3 - item.Score.Value;
             UsedDummyValues = true;
-        }
-
-        if (string.IsNullOrWhiteSpace(item.Evidence))
-        {
-            item.Evidence = string.IsNullOrWhiteSpace(item.ScriptFile)
-                ? $"Assessed via {item.Technique}."
-                : $"Assessed via {item.Technique}; script: {item.ScriptFile}.";
         }
     }
 }
@@ -405,7 +433,8 @@ public sealed class SummaryReportGenerator
         double? overall, RiskRating rating)
     {
         var scored = items.Count(i => i.IsScored);
-        var na = items.Count(i => i.NotApplicable == true);
+        var na = items.Count(i => i.IsNotApplicable);
+        var skipped = items.Count(i => i.IsSkipped);
         var critical = items.Count(i => IsCritical(i));
         var high = items.Count(i => string.Equals(i.Severity, "High", StringComparison.OrdinalIgnoreCase));
 
@@ -419,10 +448,16 @@ public sealed class SummaryReportGenerator
         sb.AppendLine($"| **Risk Rating** | {rating.Icon} **{rating.Label}** |");
         sb.AppendLine($"| **Total Checklist Items** | {m.TotalChecklistItems} |");
         sb.AppendLine($"| **Items Scored** | {scored} |");
-        sb.AppendLine($"| **Items N/A** | {na} |");
+        sb.AppendLine($"| **Items Not Applicable** | {na} |");
+        sb.AppendLine($"| **Items Skipped** | {skipped} |");
         sb.AppendLine($"| **Critical Findings** | {critical} |");
         sb.AppendLine($"| **High Findings** | {high} |");
         sb.AppendLine();
+        if (skipped > 0)
+        {
+            sb.AppendLine("> Skipped manual checks were exported for offline review and are excluded from all scores.");
+            sb.AppendLine();
+        }
 
         // 1.2 Area Scorecard
         sb.AppendLine("### 1.2 Area Scorecard");
@@ -531,7 +566,7 @@ public sealed class SummaryReportGenerator
             var n = 1;
             foreach (var i in a.Items.OrderBy(i => i.Id))
             {
-                var score = i.NotApplicable == true ? "N/A" : (i.Score?.ToString() ?? "—");
+                var score = i.IsNotApplicable ? "N/A" : (i.Score?.ToString() ?? "—");
                 sb.AppendLine($"| {n++} | {i.Id} | {Clean(i.Finding)} | {i.Severity} | {score} |");
             }
             sb.AppendLine();
@@ -608,14 +643,14 @@ public sealed class SummaryReportGenerator
     // ---- helpers ------------------------------------------------------------
 
     private static bool IsCritical(ChecklistItemResult i) =>
-        i.NotApplicable != true &&
+        !i.IsNotApplicable &&
         (string.Equals(i.Severity, "Critical", StringComparison.OrdinalIgnoreCase)
          || i.Score == 0
          || string.Equals(i.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
 
     private static List<ChecklistItemResult> TopRecommendations(IEnumerable<ChecklistItemResult> items, int take) =>
         items
-            .Where(i => i.NotApplicable != true
+            .Where(i => !i.IsNotApplicable
                         && !string.IsNullOrWhiteSpace(i.Recommendation)
                         && (i.Score ?? 3) < 2)
             .OrderByDescending(i => i.ScoreImpact ?? 0)

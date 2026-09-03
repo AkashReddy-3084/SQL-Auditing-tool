@@ -19,13 +19,30 @@ if ($Args -eq $null -or $Args.Length -eq 0) {
     exit 0
 }
 
-# Candidate exe location (project targets net10.0)
+# Candidate exe location (project targets net8.0)
 $exeCandidates = @()
-$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','core','bin','Debug','net10.0','SQLAuditor.exe')
+$exeCandidates += [System.IO.Path]::Combine($repoRoot, 'Backend','core','bin','Debug','net8.0','SQLAuditor.exe')
 
 $exePath = $null
 foreach ($p in $exeCandidates) {
     if (Test-Path $p) { $exePath = $p; break }
+}
+
+# Rebuild when the cached executable predates CLI or engine source changes.
+if ($exePath) {
+    $exeTimestamp = (Get-Item $exePath).LastWriteTimeUtc
+    $newerSource = Get-ChildItem (Join-Path $repoRoot 'Backend') -Recurse -File |
+        Where-Object {
+            $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and
+            ($_.Extension -eq '.cs' -or $_.Extension -eq '.csproj') -and
+            $_.LastWriteTimeUtc -gt $exeTimestamp
+        } |
+        Select-Object -First 1
+
+    if ($newerSource) {
+        Write-Host "SQLAuditor source is newer than the cached executable. Rebuilding..."
+        $exePath = $null
+    }
 }
 
 # If exe not found, try building the project
