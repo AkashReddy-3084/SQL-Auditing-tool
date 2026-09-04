@@ -811,9 +811,7 @@ WHERE d.name = DB_NAME();";
         /// manual review entirely. The caller must decide this explicitly; the engine never infers it.
         /// </param>
         /// <param name="generateReports">
-        /// When true (WPF), final_report.md and audit_report.xlsx are produced as soon as the run
-        /// finishes. The CLI and IDE hosts pass false and generate the reports only after the user
-        /// explicitly asks for them.
+        /// When true, the five-file report suite is produced as soon as the run finishes.
         /// </param>
         public Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
             => RunChecklistAsync(progress, requestUserInput, selectedIds, cancellationToken, useHistoricalManualResults, generateReports, null);
@@ -1543,8 +1541,8 @@ WHERE d.name = DB_NAME();";
         }
 
         /// <summary>
-        /// Produces final_report.md and audit_report.xlsx in the active run directory from its
-        /// persisted checklist_results.json. Report generation is also the moment
+        /// Produces the five client-facing artifacts in the active run directory from its persisted
+        /// checklist_results.json. Report generation is also the moment
         /// historical_last_run.json is refreshed, so the historical file always mirrors the
         /// manual results of the latest reported audit.
         /// </summary>
@@ -1584,30 +1582,31 @@ WHERE d.name = DB_NAME();";
                 TotalChecklistItems = total,
             };
 
-            try
+            foreach (var directory in new[] { resultsDir, AuditOutputPaths.RootDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    jsonPath, Path.Combine(resultsDir, "final_report.md"), metadata);
-                messages.Add($"{Path.Combine(resultsDir, "final_report.md")} generated.");
-            }
-            catch (Exception ex)
-            {
-                messages.Add($"Report generation error: {ex.Message}");
-                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Report generation error: {ex.Message}\r\n"); } catch { }
+                foreach (var legacyFileName in new[] { "final_report.md", "audit_report.xlsx" })
+                {
+                    try { File.Delete(Path.Combine(directory, legacyFileName)); }
+                    catch (Exception ex)
+                    {
+                        var message = $"Could not remove legacy report {Path.Combine(directory, legacyFileName)}: {ex.Message}";
+                        messages.Add(message);
+                        try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n"); } catch { }
+                    }
+                }
             }
 
-            // The workbook is scored from the same JSON. Isolated so a workbook failure never
-            // breaks the Markdown report or the audit run.
-            try
+            var suite = new SqlAuditor.Reporting.ReportSuiteGenerator();
+            foreach (var message in suite.GenerateFromFile(
+                jsonPath,
+                resultsDir,
+                metadata,
+                error =>
+                {
+                    try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} {error}\r\n"); } catch { }
+                }))
             {
-                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
-                    jsonPath, Path.Combine(resultsDir, "audit_report.xlsx"), metadata);
-                messages.Add($"{Path.Combine(resultsDir, "audit_report.xlsx")} generated.");
-            }
-            catch (Exception ex)
-            {
-                messages.Add($"Excel report generation error: {ex.Message}");
-                try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} Excel report generation error: {ex.Message}\r\n"); } catch { }
+                messages.Add(message);
             }
 
             return string.Join(Environment.NewLine, messages);
@@ -1708,38 +1707,8 @@ WHERE d.name = DB_NAME();";
             }
             catch { return false; }
 
-            // Regenerate the Markdown report from the updated results.
-            try
-            {
-                var reportPath = Path.Combine(resultsDir, "final_report.md");
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    reportPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Count,
-                    });
-            }
-            catch { }
-
-            // Regenerate the Excel workbook from the updated results using the same
-            // scoring pipeline. Isolated so a workbook failure never fails the resolve.
-            try
-            {
-                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
-                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    excelPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Count,
-                    });
-            }
-            catch { }
+            // Keep every generated artifact synchronized with the resolved decision.
+            try { GenerateReports(refreshHistoricalManualResults: false); } catch { }
 
             newOutcome = outcome;
             return true;
@@ -1841,38 +1810,8 @@ WHERE d.name = DB_NAME();";
             }
             catch { return false; }
 
-            try
-            {
-                var reportPath = Path.Combine(resultsDir, "final_report.md");
-                new SqlAuditor.Reporting.SummaryReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    reportPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Count,
-                    });
-            }
-            catch { }
-
-            // The workbook is scored from the same JSON, so it has to be refreshed here too;
-            // otherwise the enriched wording and any N/A re-stamp never reach audit_report.xlsx
-            // in the CLI/IDE flows. Isolated so a workbook failure never fails the enrichment.
-            try
-            {
-                var excelPath = Path.Combine(resultsDir, "audit_report.xlsx");
-                new SqlAuditor.Reporting.ExcelReportGenerator().GenerateFromFile(
-                    jsonPath,
-                    excelPath,
-                    new SqlAuditor.Reporting.ReportMetadata
-                    {
-                        ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                        Auditors = "SQL Auditor Tool (automated)",
-                        TotalChecklistItems = arr.Count,
-                    });
-            }
-            catch { }
+            // Keep every generated artifact synchronized with the enriched wording and N/A state.
+            try { GenerateReports(refreshHistoricalManualResults: false); } catch { }
 
             return true;
         }

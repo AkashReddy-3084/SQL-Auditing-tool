@@ -718,9 +718,9 @@ namespace SQLAuditor.Wpf
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
-                // checklist_results.json and the full final_report.md are produced
+                // checklist_results.json and the full five-file report suite are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
             }
             catch (OperationCanceledException)
             {
@@ -784,9 +784,9 @@ namespace SQLAuditor.Wpf
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
-                // checklist_results.json and the full final_report.md are produced
+                // checklist_results.json and the full five-file report suite are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath("final_report.md")}");
+                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
             }
             catch (OperationCanceledException)
             {
@@ -1724,8 +1724,8 @@ namespace SQLAuditor.Wpf
             catch { return null; }
         }
 
-        // Regenerates final_report.md and audit_report.xlsx from the current
-        // checklist_results.json so both reports reflect re-applied manual decisions
+        // Regenerates the five-file report suite from the current checklist_results.json
+        // so every artifact reflects re-applied manual decisions
         // instead of the engine's placeholder write. historical_last_run.json is refreshed
         // only when the reviewer explicitly asks for the report.
         private void RegenerateReportFromPersisted(bool refreshHistoricalManualResults = false)
@@ -1910,13 +1910,13 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var defaultPath = AuditOutputPaths.GetCurrentFilePath("final_report.md");
+                var defaultPath = AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName);
                 if (!System.IO.File.Exists(defaultPath))
                 {
                     MessageBox.Show($"No final report found at {defaultPath}. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                var dlg = new SaveFileDialog() { FileName = "final_report.md", Filter = "Markdown|*.md|All Files|*.*" };
+                var dlg = new SaveFileDialog() { FileName = SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName, Filter = "Markdown|*.md|All Files|*.*" };
                 if (dlg.ShowDialog() == true)
                 {
                     System.IO.File.Copy(defaultPath, dlg.FileName, true);
@@ -2883,11 +2883,15 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var dir = AuditOutputPaths.ActiveRunDirectory ?? AuditOutputPaths.RootDirectory;
-                System.IO.Directory.CreateDirectory(dir);
-                var path = System.IO.Path.Combine(dir, "ui_log.txt");
+                // Only a started run has a directory to log into; nothing is written to results/ itself.
+                var dir = AuditOutputPaths.ActiveRunDirectory;
                 var line = $"{DateTime.UtcNow:O} {message}\n";
-                System.IO.File.AppendAllText(path, line);
+                if (dir != null)
+                {
+                    System.IO.Directory.CreateDirectory(dir);
+                    var path = System.IO.Path.Combine(dir, "ui_log.txt");
+                    System.IO.File.AppendAllText(path, line);
+                }
                 System.Diagnostics.Debug.WriteLine(message);
                 try
                 {

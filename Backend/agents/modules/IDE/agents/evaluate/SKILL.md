@@ -30,9 +30,9 @@ CLI `evaluate` command and reuses the same evaluation engine.
    have a completed result in `results/historical_last_run.json` are copied forward and skip
    manual-step generation and manual review entirely.
 4. Non-interactive: no operator prompts; manual-only items resolve to `NeedsReview`.
-5. Write `results/checklist_results.json` (engine does this). Reports are **not** generated here:
-   the user is asked afterwards, and `generate_report` refreshes
-   `results/historical_last_run.json` and writes `final_report.md` + `audit_report.xlsx`.
+5. Write `results/checklist_results.json` and automatically generate `Audit Checklist.md`,
+   `Audit Report.md`, `Risk Register.md`, `OT Server SQL Assessment Readout 3.html`, and
+   `audit-report-vrsvpsql1c-mlcot-local.xlsx` in the active run directory.
 
 ## Output
 - Per-item lines: `[<id>] <Outcome> (<Technique>) - <Description>`
@@ -47,7 +47,7 @@ CLI `evaluate` command and reuses the same evaluation engine.
   `PROVIDER_API_KEY`, and `MODEL` are ignored here.
 
 ## Reuses
-- `SQLAuditor.Lib.Auditor.RunChecklistAsync(progress, requestUserInput: null, selectedIds, ct, useHistoricalManualResults, generateReports: false)`
+- `SQLAuditor.Lib.Auditor.RunChecklistAsync(progress, requestUserInput: null, selectedIds, ct, useHistoricalManualResults, generateReports: true)`
 - `SQLAuditor.Lib.Auditor.GenerateReports(refreshHistoricalManualResults)` (via the `generate_report` tool)
 - `SQLAuditor.Lib.HistoricalManualResultsStore` (load / reuse / refresh)
 - `SQLAuditor.Lib.Auditor.GetChecklistStructureAsync()` (for ID validation)
