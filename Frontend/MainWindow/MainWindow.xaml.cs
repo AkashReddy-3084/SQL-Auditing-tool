@@ -286,7 +286,10 @@ namespace SQLAuditor.Wpf
                 System.Collections.Generic.Dictionary<string, string[]?> mappingFile = new System.Collections.Generic.Dictionary<string, string[]?>();
                 // Mirrors Auditor.CanTryMcp: a script-less admin or documentation check can never be
                 // decided by MCP, so it must not be offered as AI-MCP here either.
+                var operatorEvaluatedIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 _mcpFeasibleItemIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                // Mapped script paths are stored relative to the repo root, so the root that provided
+                // the mapping is what resolves them (the process working directory is not the root).
                 string? mappingRoot = null;
                 try
                 {
@@ -331,6 +334,7 @@ namespace SQLAuditor.Wpf
                                             && adminCheck.ValueKind == System.Text.Json.JsonValueKind.True)
                                         || (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck)
                                             && docCheck.ValueKind == System.Text.Json.JsonValueKind.True);
+                                    if (isOperatorEvaluated) operatorEvaluatedIds.Add(prop.Name);
 
                                     if (!isOperatorEvaluated
                                         && (!prop.Value.TryGetProperty("script_file", out var mappedScript)
@@ -348,7 +352,15 @@ namespace SQLAuditor.Wpf
                         dir = dir.Parent;
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Log("Failed to read deterministic-script-mapping.json: " + ex.Message);
+                }
+
+                if (mappingRoot == null)
+                {
+                    Log("deterministic-script-mapping.json not found — every item will preview as AI-Manual/AI-MCP.");
+                }
 
                 // prepare maps
                 _itemTypeMap = new System.Collections.Generic.Dictionary<string, string>();
@@ -1724,13 +1736,13 @@ namespace SQLAuditor.Wpf
 
         // Regenerates final_report.md and audit_report.xlsx from the current
         // checklist_results.json so both reports reflect re-applied manual decisions
-        // instead of the engine's placeholder write. historical_last_run.json is refreshed
-        // only when the reviewer explicitly asks for the report.
-        private void RegenerateReportFromPersisted(bool refreshHistoricalManualResults = false)
+        // instead of the engine's placeholder write. Report generation is also when
+        // historical_last_run.json is refreshed with newly evaluated manual results.
+        private void RegenerateReportFromPersisted()
         {
             try
             {
-                var message = SQLAuditor.Lib.Auditor.GenerateReports(refreshHistoricalManualResults);
+                var message = SQLAuditor.Lib.Auditor.GenerateReports();
                 if (!string.IsNullOrWhiteSpace(message)) Log(message.Replace(Environment.NewLine, " | "));
                 RefreshHistoricalManualAvailability();
             }
@@ -1939,7 +1951,6 @@ namespace SQLAuditor.Wpf
             _loadedStructure = null;
             _itemTypeMap = null;
             _itemScriptMap = null;
-            _mcpFeasibleItemIds.Clear();
             _selectedIds = null;
             _evalItemMap = null;
             _evalStatusMap = null;
@@ -2335,26 +2346,6 @@ namespace SQLAuditor.Wpf
             var targetDatabases = GetSelectedDatabaseNames();
             if (!_isVerified || targetDatabases.Length == 0) return;
 
-            // A run without a verified provider still produces valid Outcome/Score from SQL, but no
-            // Finding/Evidence/Recommendation/RiskImpact, so say so before the report is written.
-            if (!_isLlmVerified)
-            {
-                var proceed = MessageBox.Show(
-                    this,
-                    "The LLM provider is not verified.\n\n"
-                    + "Script items will still be evaluated and scored from SQL, but they will carry no "
-                    + "Finding, Evidence, Recommendation or Risk Impact, AI-MCP will be unavailable, and "
-                    + "manual guidance cannot be generated.\n\n"
-                    + "Verify the provider on the Login page for a complete report.\n\n"
-                    + "Continue anyway?",
-                    "LLM provider not verified",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning);
-
-                if (proceed != MessageBoxResult.Yes) return;
-                Log("WARNING: starting evaluation without a verified LLM provider - script items will have no Finding/Evidence/Recommendation/Risk Impact.");
-            }
-
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();
 
@@ -2382,15 +2373,12 @@ namespace SQLAuditor.Wpf
                 StartEvaluationBtn.IsEnabled = ready;
             }
 
-            // Configuring a custom checklist runs guardrails, classification and script
-            // generation through the LLM provider, so it also needs a verified provider.
             if (AddCustomChecklistItemBtn != null)
             {
                 AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified;
             }
         }
 
-        // Read-only row shown in the Custom Checklist card.
         private sealed class CustomChecklistCardItem
         {
             public string Id { get; init; } = "";
@@ -2398,23 +2386,21 @@ namespace SQLAuditor.Wpf
             public string SubAreaLabel { get; init; } = "";
         }
 
-        // Renders the custom items already present in custom-checklist.json, via the same
-        // configuration store the rest of the feature uses. Informational only.
         private void RefreshCustomChecklistCard()
         {
             try
             {
                 var items = SQLAuditor.Lib.ChecklistConfigurationStore.GetCatalog()
-                    .Where(i => i.IsCustom)
-                    .OrderBy(i => i.Id, System.Collections.Generic.Comparer<string>.Create(
+                    .Where(item => item.IsCustom)
+                    .OrderBy(item => item.Id, System.Collections.Generic.Comparer<string>.Create(
                         SQLAuditor.Lib.ChecklistConfigurationStore.CompareIds))
-                    .Select(i => new CustomChecklistCardItem
+                    .Select(item => new CustomChecklistCardItem
                     {
-                        Id = i.Id,
-                        Title = string.IsNullOrWhiteSpace(i.Title) ? i.Text : i.Title,
-                        SubAreaLabel = string.IsNullOrWhiteSpace(i.SubAreaTitle)
-                            ? i.SubAreaId
-                            : $"{i.SubAreaId} · {i.SubAreaTitle}"
+                        Id = item.Id,
+                        Title = string.IsNullOrWhiteSpace(item.Title) ? item.Text : item.Title,
+                        SubAreaLabel = string.IsNullOrWhiteSpace(item.SubAreaTitle)
+                            ? item.SubAreaId
+                            : $"{item.SubAreaId} - {item.SubAreaTitle}"
                     })
                     .ToList();
 
@@ -2436,8 +2422,6 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        // Opens the Add Configure Checklist page, then the Custom Checklist Progress page, and
-        // finally lands on the existing Checklist page with default + custom items available.
         private async void ConfigureChecklistBtn_Click(object sender, RoutedEventArgs e)
         {
             var editor = new ConfigureChecklistWindow { Owner = this };
@@ -2456,7 +2440,7 @@ namespace SQLAuditor.Wpf
                 {
                     Log(outcome.IsAdded
                         ? $"Custom checklist {outcome.AssignedId} added under {outcome.SubAreaId} ({outcome.SubAreaTitle})."
-                        : $"Custom checklist '{outcome.Title}' not added — {outcome.Status}: {outcome.Detail}");
+                        : $"Custom checklist '{outcome.Title}' not added - {outcome.Status}: {outcome.Detail}");
                 }
             }
             else
@@ -2466,7 +2450,6 @@ namespace SQLAuditor.Wpf
 
             RefreshCustomChecklistCard();
 
-            // Land on the Checklist page so both default and custom items can be selected.
             _auditor?.EnsureLlmEvaluators();
             SetTabIndex(1);
             LoadChecklistBtn.IsEnabled = true;
@@ -2656,7 +2639,7 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var promptsDir = System.IO.Path.Combine(basePath, "Modules", "generate_scripts", "prompts");
+                var promptsDir = System.IO.Path.Combine(basePath, "agents", "prompts");
                 if (!System.IO.Directory.Exists(promptsDir))
                 {
                     MessageBox.Show(this, $"Prompts directory not found: {promptsDir}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -2963,7 +2946,7 @@ namespace SQLAuditor.Wpf
                 // the report produced automatically at the end of an assessment.
                 try
                 {
-                    RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
+                    RegenerateReportFromPersisted();
                     Log($"Rendered reports saved to {AuditOutputPaths.CurrentRunDirectory}");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
@@ -3027,7 +3010,7 @@ namespace SQLAuditor.Wpf
 
                 WriteManualChecksCsv(dialog.FileName, manualChecks);
                 var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
-                RegenerateReportFromPersisted(refreshHistoricalManualResults: true);
+                RegenerateReportFromPersisted();
 
                 var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
                 UpdateSummaryView(results);
