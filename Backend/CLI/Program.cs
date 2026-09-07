@@ -63,8 +63,7 @@ namespace SQLAuditor
                 return RunShowReportsCommand(args);
             }
 
-            // Refresh results/historical_last_run.json and render final_report.md + audit_report.xlsx.
-            // Evaluation never does this automatically here: the user is asked first.
+            // Explicitly refresh historical results and regenerate the five-file report suite.
             if (args.Length > 0 && string.Equals(args[0], "generate_report", StringComparison.OrdinalIgnoreCase))
             {
                 return RunGenerateReportCommand(args);
@@ -345,11 +344,11 @@ namespace SQLAuditor
             try
             {
                 // Non-interactive: no user prompts. Manual-only items resolve to NeedsReview.
-                // Reports are NOT generated here; the user is asked for them after the run.
+                // The complete report suite is generated from the persisted result set.
                 results = await auditor.RunChecklistAsync(
                     progress, null, validIds, cts.Token,
                     useHistoricalManualResults.Value,
-                    generateReports: false);
+                    generateReports: true);
             }
             finally
             {
@@ -470,49 +469,9 @@ namespace SQLAuditor
             var jsonDefault = Path.Combine(resultsDir, "checklist_results.json");
             Console.WriteLine();
             Console.WriteLine($"Results JSON : {jsonDefault}");
-
-            // The summary/report is never produced automatically: the user decides, and only
-            // then is results/historical_last_run.json refreshed from the new manual results.
-            if (copilotMode)
-            {
-                Console.WriteLine();
-                Console.WriteLine("=== REPORT GENERATION DECISION REQUIRED ===");
-                Console.WriteLine($"Evaluation completed and {jsonDefault} has been updated.");
-                Console.WriteLine("No report has been generated. After every item is enriched and reviewed, ask the user:");
-                Console.WriteLine("  \"Evaluation completed. Do you want to generate the summary/report?\"");
-                Console.WriteLine("If the user says YES, run: sql-auditor generate_report");
-                Console.WriteLine("  -> refreshes historical_last_run.json in the current run directory with the newly evaluated manual results,");
-                Console.WriteLine($"     then writes {Path.Combine(resultsDir, "final_report.md")} and {Path.Combine(resultsDir, "audit_report.xlsx")}.");
-                Console.WriteLine("If the user says NO, stop here: keep checklist_results.json, do not refresh the historical file,");
-                Console.WriteLine("and do not generate final_report.md or the Excel workbook. Never decide this yourself.");
-                Console.WriteLine("=== END REPORT GENERATION DECISION REQUIRED ===");
-            }
-            else
-            {
-                Console.WriteLine();
-                Console.WriteLine("Evaluation completed. Do you want to generate the summary/report?");
-                var generate = false;
-                if (!Console.IsInputRedirected)
-                {
-                    var ans = Prompt("Generate final_report.md and the Excel report now? (y/n) [y]:").Trim().ToLowerInvariant();
-                    generate = ans.Length == 0 || ans is "y" or "yes";
-                }
-                else
-                {
-                    Console.WriteLine("(Non-interactive session: skipped. Run 'sqlauditor generate_report' when you want the reports.)");
-                }
-
-                if (generate)
-                {
-                    Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports());
-                    Console.WriteLine($"Report       : {Path.Combine(resultsDir, "final_report.md")}");
-                    Console.WriteLine($"Excel        : {Path.Combine(resultsDir, "audit_report.xlsx")}");
-                }
-                else
-                {
-                    Console.WriteLine($"No report generated. {jsonDefault} is up to date; run 'sqlauditor generate_report' later.");
-                }
-            }
+            Console.WriteLine($"Report suite : {resultsDir}");
+            foreach (var fileName in SqlAuditor.Reporting.ReportSuiteGenerator.FileNames)
+                Console.WriteLine($"  {Path.Combine(resultsDir, fileName)}");
 
             var jsonOut = GetOption(opts, "json");
             if (!string.IsNullOrWhiteSpace(jsonOut))
@@ -730,7 +689,7 @@ namespace SQLAuditor
         // ---------------------------------------------------------------------
         // Non-interactive CLI: `resolve_review` subcommand
         // Reuses Auditor.ResolveReview to patch results/checklist_results.json and
-        // regenerate results/final_report.md. Used by the Copilot CLI skill to record
+        // regenerate the report suite. Used by the Copilot CLI skill to record
         // Pass/Fail decisions without re-running the evaluation.
         // ---------------------------------------------------------------------
         static int RunResolveReviewCommand(string[] args)
@@ -1113,9 +1072,8 @@ namespace SQLAuditor
 
         // ---------------------------------------------------------------------
         // Non-interactive CLI: `generate_report` subcommand
-        // Runs only when the user has explicitly asked for the summary/report. Refreshes
-        // results/historical_last_run.json from the newly evaluated manual results, then
-        // renders results/final_report.md and results/audit_report.xlsx.
+        // Refreshes results/historical_last_run.json from the newly evaluated manual results,
+        // then regenerates the five-file report suite in the active run directory.
         // ---------------------------------------------------------------------
         static int RunGenerateReportCommand(string[] args)
         {
@@ -1124,7 +1082,7 @@ namespace SQLAuditor
             {
                 Console.WriteLine("Usage: sqlauditor generate_report [--no-historical-refresh]");
                 Console.WriteLine("  Refreshes historical_last_run.json with the manual results in");
-                Console.WriteLine("  checklist_results.json, then writes final_report.md and audit_report.xlsx");
+                Console.WriteLine("  checklist_results.json, then regenerates the existing reports and five-file report suite");
                 Console.WriteLine("  in the latest timestamp-and-server run directory under results.");
                 return 0;
             }
@@ -1138,8 +1096,9 @@ namespace SQLAuditor
             }
 
             Console.WriteLine(SQLAuditor.Lib.Auditor.GenerateReports(!opts.ContainsKey("no-historical-refresh")));
-            Console.WriteLine($"Report : {Path.Combine(resultsDir, "final_report.md")}");
-            Console.WriteLine($"Excel  : {Path.Combine(resultsDir, "audit_report.xlsx")}");
+            Console.WriteLine($"Report suite : {resultsDir}");
+            foreach (var fileName in SqlAuditor.Reporting.ReportSuiteGenerator.FileNames)
+                Console.WriteLine($"  {Path.Combine(resultsDir, fileName)}");
 
             var tally = SQLAuditor.Lib.Auditor.BuildOutcomeTally();
             if (!string.IsNullOrEmpty(tally))
@@ -1158,7 +1117,7 @@ namespace SQLAuditor
             var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             var path = string.Equals(kind, "json", StringComparison.OrdinalIgnoreCase)
                 ? Path.Combine(resultsDir, "checklist_results.json")
-                : Path.Combine(resultsDir, "final_report.md");
+                : Path.Combine(resultsDir, SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName);
 
             if (!File.Exists(path))
             {

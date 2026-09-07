@@ -13,13 +13,13 @@ results without leaving VS Code. Read-only over files the engine already writes.
 ## Inputs
 | Name   | Required | Description                                                       |
 |--------|----------|-------------------------------------------------------------------|
-| kind   | No       | `summary` (final_report.md) or `json` (checklist_results.json).   |
+| kind   | No       | `summary` (Audit Report.md) or `json` (checklist_results.json).   |
 |        |          | Defaults to `summary`.                                            |
 
 ## Behavior
 1. Locate the `results/` folder (same repo-root resolution the engine uses).
 2. Read the requested artifact:
-   - `summary` -> `results/final_report.md`
+   - `summary` -> the active run's `Audit Report.md`
    - `json`    -> `results/checklist_results.json`
 3. Return its contents (or a rendered summary of pass/fail counts).
 
@@ -30,7 +30,7 @@ results without leaving VS Code. Read-only over files the engine already writes.
 
 ## Reuses
 - Reads existing engine outputs; no new computation.
-- Same report produced by `SqlAuditor.Reporting.SummaryReportGenerator`.
+- Same report produced by `SqlAuditor.Reporting.ReportSuiteGenerator`.
 
 ## Out of scope
 - No re-evaluation, no report regeneration, no DB/LLM access.

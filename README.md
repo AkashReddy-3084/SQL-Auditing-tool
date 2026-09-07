@@ -175,10 +175,9 @@ CLI shows the verification guidance and prompts you to mark each **Pass**, **Fai
 (with optional notes). Results are written to the server-specific run directory described in
 [Output](#output).
 
-The report is **not** generated automatically. The CLI asks *"Evaluation completed. Do you want to
-generate the summary/report?"*; answering yes (or running `generate_report` later) refreshes
-`historical_last_run.json` with the newly evaluated manual results and writes `final_report.md`
-and `audit_report.xlsx` in that same run directory.
+The full report suite is generated automatically at the end of the run. Running `generate_report`
+later refreshes `historical_last_run.json` with the newly evaluated manual results and regenerates
+every artefact in that same run directory.
 
 The command returns an exit code for scripting: `0` success, `1` one or more controls
 failed, `2` usage/validation error, `3` unexpected error.
@@ -244,8 +243,8 @@ the IDE flow.
 | `save_generated_script` / `validate_generated_script` | Fallback for clients without sampling: validate and save a script the model authored from the returned prompt |
 | `enrich_result` | Record Copilot-authored Finding/Evidence/RiskImpact/Recommendation for a script-evaluated item |
 | `resolve_review` | Record a Pass/Fail decision for an item that needs review |
-| `generate_report` | Refresh `historical_last_run.json` and render `final_report.md` + `audit_report.xlsx` (only when the user asks) |
-| `show_reports` | Return the generated `final_report.md` or `checklist_results.json` |
+| `generate_report` | Refresh `historical_last_run.json` and regenerate the five-file report suite |
+| `show_reports` | Return the generated `Audit Report.md` or `checklist_results.json` |
 
 ### Setup
 
@@ -291,8 +290,8 @@ Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mir
    items reused from a previous run come back already decided.
 6. For **Needs Review** items, Copilot presents the verification guidance, helps you decide,
    and records each decision via `resolve_review`.
-7. Copilot asks whether to generate the summary/report. On yes it calls `generate_report`
-   (which refreshes `historical_last_run.json`) and then shows it with `show_reports`.
+7. `evaluate` already wrote the report suite; Copilot shows it with `show_reports`. Call
+   `generate_report` only to force a regeneration or to refresh `historical_last_run.json`.
 
 Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
 `mark 3.1.1 as pass, notes: verified naming standards`,
@@ -311,14 +310,17 @@ The timestamp uses local time. Characters that are unsafe in a directory name ar
 underscores, so `tcp:sql01.example.com,1433` becomes a suffix such as
 `tcp_sql01.example.com_1433`. Follow-up commands such as `generate_report`, `show_reports`,
 `resolve_review`, and `enrich_result` automatically use the latest run containing
-`checklist_results.json`. Existing files directly under `results/` remain readable for backward
-compatibility.
+`checklist_results.json`.
 
 | File | Contents |
 | --- | --- |
 | `checklist_results.json` | Per-item outcome, technique and token usage |
 | `historical_last_run.json` | Completed manual/AI-Manual results keyed by checklist ID, reusable by later runs; refreshed only at report generation |
-| `final_report.md` | Rendered audit report with weighted scores |
+| `Audit Report.md` | Rendered audit report with weighted scores |
+| `Audit Checklist.md` | Per-item checklist rendering |
+| `Risk Register.md` | Risk register derived from the failed items |
+| `OT Server SQL Assessment Readout 3.html` | HTML assessment readout |
+| `audit-report-vrsvpsql1c-mlcot-local.xlsx` | 5-tab workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items |
 | `ui_log.txt` | Diagnostic log; the first place to look when a run fails |
 
 The `results/` folder is git-ignored, as its directory names and logs can contain server details.

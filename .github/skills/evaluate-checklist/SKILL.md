@@ -117,17 +117,12 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 
 ### 4. Report
 
-`evaluate` does **not** generate any report. Once every item is enriched and reviewed, ask the
-user exactly: **"Evaluation completed. Do you want to generate the summary/report?"**
+`evaluate` generates the full report suite automatically in the run directory. Once every item is
+enriched and reviewed, call `show_reports` and report **its** counts — the counts `evaluate` printed
+are provisional, because Not Applicable is decided during enrichment.
 
-- **Yes** → call `generate_report()`. It merges the newly evaluated manual results into
-  `results/historical_last_run.json` (existing entries are preserved), then writes
-  `final_report.md` and `audit_report.xlsx`. Then call `show_reports` and report **its** counts —
-  the counts `evaluate` printed are provisional, because Not Applicable is decided during enrichment.
-- **No** → stop. `results/checklist_results.json` stays as it is, the historical file is not
-  refreshed, and no report or workbook is written.
-
-Never make this decision on the user's behalf.
+Call `generate_report()` only when an explicit regeneration is needed, or to merge the newly
+evaluated manual results into `results/historical_last_run.json` (existing entries are preserved).
 
 ## What gets written
 
@@ -135,8 +130,11 @@ Never make this decision on the user's behalf.
 |------|---------|
 | `results/checklist_results.json` | Per-item outcome, score, severity and your wording |
 | `results/historical_last_run.json` | Manual/AI-Manual results keyed by checklist ID, reusable by later runs (refreshed only by `generate_report`) |
-| `results/final_report.md` | Scored Markdown audit report |
-| `results/audit_report.xlsx` | 5-tab workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items |
+| `Audit Report.md` | Scored Markdown audit report |
+| `Audit Checklist.md` | Per-item checklist rendering |
+| `Risk Register.md` | Risk register derived from the failed items |
+| `OT Server SQL Assessment Readout 3.html` | HTML readout |
+| `audit-report-vrsvpsql1c-mlcot-local.xlsx` | 5-tab workbook: Summary, Area Detail, Checklists, Risk Register, Not Applicable Items |
 
-`enrich_result` and `resolve_review` patch the JSON and regenerate both reports on every call —
+`enrich_result` and `resolve_review` patch the JSON and regenerate every artifact on each call —
 never edit these files by hand.

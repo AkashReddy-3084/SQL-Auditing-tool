@@ -21,7 +21,7 @@
       //   dotnet build "Backend/IDE/SQLAuditor.Mcp.csproj"
       "command": "${workspaceFolder}\\Backend\\IDE\\bin\\Debug\\net8.0\\SQLAuditor.Mcp.exe",
       // Run from the repo folder so the engine can locate the checklist and
-      // write results/ (final_report.md, checklist_results.json).
+      // write results/ (Audit Report.md, checklist_results.json).
       "cwd": "${workspaceFolder}"
     }
   }

@@ -35,7 +35,7 @@ public static class AuditOutputPaths
             {
                 return _activeRunDirectory
                     ?? FindLatestRunDirectory()
-                    ?? RootDirectory;
+                    ?? CreateRunDirectory("unknown-server");
             }
         }
     }
@@ -45,21 +45,8 @@ public static class AuditOutputPaths
         lock (SyncRoot)
         {
             Directory.CreateDirectory(RootDirectory);
-
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
             var serverName = SanitizeServerName(ReadServerName(connectionString));
-            var baseName = $"{timestamp}_{serverName}";
-            var runDirectory = Path.Combine(RootDirectory, baseName);
-            var suffix = 2;
-
-            while (Directory.Exists(runDirectory))
-            {
-                runDirectory = Path.Combine(RootDirectory, $"{baseName}_{suffix++}");
-            }
-
-            Directory.CreateDirectory(runDirectory);
-            _activeRunDirectory = runDirectory;
-            return runDirectory;
+            return CreateRunDirectory(serverName);
         }
     }
 
@@ -82,8 +69,7 @@ public static class AuditOutputPaths
                 if (File.Exists(path)) return path;
             }
 
-            var legacyPath = Path.Combine(RootDirectory, fileName);
-            return File.Exists(legacyPath) ? legacyPath : null;
+            return null;
         }
     }
 
@@ -93,6 +79,25 @@ public static class AuditOutputPaths
         return directories.FirstOrDefault(directory =>
                    File.Exists(Path.Combine(directory, "checklist_results.json")))
             ?? directories.FirstOrDefault();
+    }
+
+    private static string CreateRunDirectory(string serverName)
+    {
+        Directory.CreateDirectory(RootDirectory);
+
+        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        var baseName = $"{timestamp}_{serverName}";
+        var runDirectory = Path.Combine(RootDirectory, baseName);
+        var suffix = 2;
+
+        while (Directory.Exists(runDirectory))
+        {
+            runDirectory = Path.Combine(RootDirectory, $"{baseName}_{suffix++}");
+        }
+
+        Directory.CreateDirectory(runDirectory);
+        _activeRunDirectory = runDirectory;
+        return runDirectory;
     }
 
     private static IEnumerable<string> EnumerateRunDirectories()

@@ -153,15 +153,11 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
      "Not Applicable Items" sheet and reported as **Not Applicable**, never as Pass or Fail, and it
      needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
 8. Do not write a final summary until every review item is resolved and every script item
-   is enriched. **No report has been generated at this point.** Ask the user exactly:
-   "Evaluation completed. Do you want to generate the summary/report?" — and never decide for them.
-   - **Yes** → run **generate_report**. It merges the newly evaluated manual results into
-     `results/historical_last_run.json` (existing entries are preserved), then writes
-     `results/final_report.md` and `results/audit_report.xlsx`. Then run **show_reports** and report
-     **its** counts — the counts `evaluate` printed are provisional, because Not Applicable is
-     decided during enrichment.
-   - **No** → stop. `results/checklist_results.json` stays as it is, the historical file is not
-     refreshed, and no report or workbook is written.
+   is enriched. The full report suite is generated automatically by `evaluate` in the run
+   directory. Then run **show_reports** and report **its** counts — the counts `evaluate` printed
+   are provisional, because Not Applicable is decided during enrichment.
+   - Run **generate_report** only when an explicit regeneration is needed, or to merge the newly
+     evaluated manual results into `results/historical_last_run.json` (existing entries are preserved).
 
 ## Generating scripts (separate from evaluation)
 
