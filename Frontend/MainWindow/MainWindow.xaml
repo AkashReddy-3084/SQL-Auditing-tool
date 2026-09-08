@@ -336,8 +336,38 @@
                                 <!-- Custom Checklist card (right): read-only view of items already added, plus the entry point to the existing Add Configure Checklist modal. -->
                                 <Border Style="{StaticResource CardBorder}" Background="#FFF9FBFD" Padding="28" VerticalAlignment="Top" Width="420" Margin="24,0,0,0">
                                     <StackPanel>
-                                        <TextBlock Text="Custom Checklist" FontSize="24" FontWeight="Bold" />
-                                        <TextBlock Text="View and manage custom checklist items." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,18" TextWrapping="Wrap" />
+                                        <DockPanel LastChildFill="False">
+                                            <TextBlock DockPanel.Dock="Left" Text="Custom Checklist" FontSize="24" FontWeight="Bold" VerticalAlignment="Center" />
+                                            <Border DockPanel.Dock="Right"
+                                                    Background="#FFE8F0F9"
+                                                    BorderBrush="#FFD3E2F2"
+                                                    BorderThickness="1"
+                                                    CornerRadius="999"
+                                                    Padding="12,4"
+                                                    VerticalAlignment="Center"
+                                                    ToolTip="Number of custom checklist items currently configured">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding ItemsSource.Count, ElementName=CustomChecklistItems}" Value="0">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ItemsSource, ElementName=CustomChecklistItems}" Value="{x:Null}">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <TextBlock Text="{Binding ItemsSource.Count, ElementName=CustomChecklistItems, StringFormat={}{0} added}"
+                                                           FontSize="12"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{StaticResource PrimaryBrush}" />
+                                            </Border>
+                                        </DockPanel>
+                                        <TextBlock Text="Add your own governance checks. They are merged into the audit checklist and evaluated alongside the standard items."
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   Margin="0,4,0,18"
+                                                   TextWrapping="Wrap" />
 
                                         <Border Background="{StaticResource SurfaceBrush}"
                                                 BorderBrush="{StaticResource BorderBrushSoft}"
@@ -346,25 +376,64 @@
                                                 Padding="12"
                                                 MinHeight="220">
                                             <Grid>
-                                                <TextBlock x:Name="CustomChecklistEmptyText"
-                                                           Text="No custom checklist items have been added yet."
-                                                           Foreground="{StaticResource MutedBrush}"
-                                                           TextWrapping="Wrap"
-                                                           HorizontalAlignment="Center"
-                                                           VerticalAlignment="Center"
-                                                           TextAlignment="Center"
-                                                           Visibility="Collapsed" />
+                                                <StackPanel x:Name="CustomChecklistEmptyText"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Visibility="Collapsed">
+                                                    <Border Width="44"
+                                                            Height="44"
+                                                            CornerRadius="999"
+                                                            Background="#FFEEF4FB"
+                                                            BorderBrush="#FFD3E2F2"
+                                                            BorderThickness="1"
+                                                            HorizontalAlignment="Center">
+                                                        <TextBlock Text="+"
+                                                                   FontSize="22"
+                                                                   FontWeight="Bold"
+                                                                   Foreground="{StaticResource PrimaryBrush}"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center" />
+                                                    </Border>
+                                                    <TextBlock Text="No custom checklist items yet"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource TextBrush}"
+                                                               TextAlignment="Center"
+                                                               Margin="0,12,0,0" />
+                                                    <TextBlock Text="Use the button below to describe a check in plain English. An audit script is generated for your approval before anything is saved."
+                                                               Foreground="{StaticResource MutedBrush}"
+                                                               FontSize="12"
+                                                               TextWrapping="Wrap"
+                                                               TextAlignment="Center"
+                                                               MaxWidth="280"
+                                                               Margin="0,6,0,0" />
+                                                </StackPanel>
                                                 <ScrollViewer x:Name="CustomChecklistScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
                                                     <ItemsControl x:Name="CustomChecklistItems">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate>
-                                                                <Border BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1" Padding="2,8">
+                                                                <Border Background="#FFFBFCFE"
+                                                                        BorderBrush="#FFE4EAF2"
+                                                                        BorderThickness="1"
+                                                                        CornerRadius="10"
+                                                                        Padding="10,8"
+                                                                        Margin="0,0,0,8"
+                                                                        ToolTip="{Binding Title}">
                                                                     <StackPanel>
                                                                         <StackPanel Orientation="Horizontal">
-                                                                            <TextBlock Text="{Binding Id}" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" />
-                                                                            <TextBlock Text="{Binding SubAreaLabel}" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="8,1,0,0" TextTrimming="CharacterEllipsis" />
+                                                                            <Border Background="#FFE8F0F9"
+                                                                                    CornerRadius="6"
+                                                                                    Padding="7,2"
+                                                                                    VerticalAlignment="Center">
+                                                                                <TextBlock Text="{Binding Id}" FontSize="11.5" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" />
+                                                                            </Border>
+                                                                            <TextBlock Text="{Binding SubAreaLabel}"
+                                                                                       Foreground="{StaticResource MutedBrush}"
+                                                                                       FontSize="11.5"
+                                                                                       Margin="8,0,0,0"
+                                                                                       VerticalAlignment="Center"
+                                                                                       TextTrimming="CharacterEllipsis" />
                                                                         </StackPanel>
-                                                                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                                                                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" FontSize="13" Margin="0,6,0,0" />
                                                                     </StackPanel>
                                                                 </Border>
                                                             </DataTemplate>
@@ -374,14 +443,32 @@
                                             </Grid>
                                         </Border>
 
-                                        <TextBlock x:Name="CustomChecklistStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="CustomChecklistStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" />
                                         <Button x:Name="AddCustomChecklistItemBtn"
                                                 Content="Add New Custom Checklist Item"
                                                 Style="{StaticResource ModernButton}"
-                                                Margin="0,18,0,0"
-                                                HorizontalAlignment="Left"
+                                                Margin="0,14,0,0"
+                                                HorizontalAlignment="Stretch"
                                                 IsEnabled="False"
+                                                ToolTip="Describe a new check, review the generated audit script, then add it to the checklist"
                                                 Click="ConfigureChecklistBtn_Click" />
+                                        <TextBlock Text="Verify LLM access and SQL Server access first to enable this."
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   FontSize="11.5"
+                                                   TextWrapping="Wrap"
+                                                   TextAlignment="Center"
+                                                   Margin="0,8,0,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsEnabled, ElementName=AddCustomChecklistItemBtn}" Value="False">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
