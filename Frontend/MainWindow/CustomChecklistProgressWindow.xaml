@@ -1,0 +1,284 @@
+<Window x:Class="SQLAuditor.Wpf.CustomChecklistProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Custom Checklist Progress"
+        Height="740"
+        Width="1000"
+        MinHeight="580"
+        MinWidth="820"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Background="#FFF4F7FB"
+        FontFamily="Segoe UI Variable Text, Segoe UI"
+        Closing="Window_Closing">
+
+    <Window.Resources>
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFFFF" />
+        <SolidColorBrush x:Key="BorderBrushSoft" Color="#FFD9E1EC" />
+        <SolidColorBrush x:Key="PrimaryBrush" Color="#FF0F4C81" />
+        <SolidColorBrush x:Key="PrimaryHoverBrush" Color="#FF1268B3" />
+        <SolidColorBrush x:Key="TextBrush" Color="#FF1F2937" />
+        <SolidColorBrush x:Key="MutedBrush" Color="#FF6B7280" />
+
+        <Style x:Key="ModernButtonBase" TargetType="Button">
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Background" Value="{StaticResource PrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="16,9" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.92" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.8" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource ModernButtonBase}" />
+
+        <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource ModernButtonBase}">
+            <Setter Property="Background" Value="#FFB42318" />
+            <Setter Property="BorderBrush" Value="#FFB42318" />
+        </Style>
+
+        <Style x:Key="QuietButton" TargetType="Button" BasedOn="{StaticResource ModernButtonBase}">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Background" Value="#FFF2F5FA" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="FontWeight" Value="Normal" />
+        </Style>
+
+        <Style x:Key="PanelCard" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="14" />
+            <Setter Property="Padding" Value="14,12" />
+        </Style>
+
+        <Style x:Key="PanelTitle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        </Style>
+
+        <Style x:Key="PanelSubtitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="0,2,0,10" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="24,20,24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   x:Name="HeaderText"
+                   Text="Custom Checklist Progress"
+                   FontSize="22"
+                   FontWeight="Bold"
+                   Foreground="{StaticResource TextBrush}" />
+
+        <StackPanel Grid.Row="1" Margin="0,8,0,12">
+            <TextBlock Text="Current step"
+                       FontSize="11.5"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource MutedBrush}" />
+            <TextBlock x:Name="StageText"
+                       Text="Guardrails - Semantic Match Router - Area/Sub-area Classification - Script Generation - Approval - Merge"
+                       FontSize="13"
+                       Foreground="{StaticResource TextBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,2,0,0" />
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="0,0,0,16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <ProgressBar Grid.Row="0"
+                         x:Name="Progress"
+                         Height="10"
+                         Minimum="0"
+                         Maximum="100"
+                         Value="0"
+                         Foreground="{StaticResource PrimaryBrush}"
+                         Background="#FFE9EEF5"
+                         BorderThickness="0" />
+
+            <TextBlock Grid.Row="1"
+                       FontSize="11.5"
+                       Foreground="{StaticResource MutedBrush}"
+                       HorizontalAlignment="Right"
+                       Margin="0,5,0,0">
+                <Run Text="{Binding Value, ElementName=Progress, Mode=OneWay, StringFormat={}{0:0}}" />
+                <Run Text="of" />
+                <Run Text="{Binding Maximum, ElementName=Progress, Mode=OneWay, StringFormat={}{0:0}}" />
+                <Run Text="item(s) processed" />
+            </TextBlock>
+        </Grid>
+
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="16" />
+                <ColumnDefinition Width="1.2*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Style="{StaticResource PanelCard}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Processing log" Style="{StaticResource PanelTitle}" />
+                    <TextBlock DockPanel.Dock="Top"
+                               Style="{StaticResource PanelSubtitle}"
+                               Text="Live trace of every stage each item goes through." />
+                    <Border Background="#FFF8FAFD"
+                            BorderBrush="#FFEDF1F7"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="10,8">
+                        <TextBox x:Name="LogBox"
+                                 IsReadOnly="True"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 FontSize="12"
+                                 TextWrapping="Wrap"
+                                 AcceptsReturn="True"
+                                 VerticalScrollBarVisibility="Auto" />
+                    </Border>
+                </DockPanel>
+            </Border>
+
+            <Border Grid.Column="2" Style="{StaticResource PanelCard}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" x:Name="ReviewHeader" Text="Generated script" Style="{StaticResource PanelTitle}" />
+                    <TextBlock DockPanel.Dock="Top"
+                               Style="{StaticResource PanelSubtitle}"
+                               Text="Review what will be added. Nothing is written to the checklist until you approve it." />
+                    <Border DockPanel.Dock="Top"
+                            Background="#FFF8FBFF"
+                            BorderBrush="#FFD3E2F2"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="12,9"
+                            Margin="0,0,0,10">
+                        <TextBlock x:Name="ReviewSummary"
+                                   Text="No item is waiting for review."
+                                   FontSize="12.5"
+                                   Foreground="{StaticResource TextBrush}"
+                                   TextWrapping="Wrap"
+                                   LineHeight="19" />
+                    </Border>
+                    <Border Background="#FFF8FAFD"
+                            BorderBrush="#FFEDF1F7"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="10,8">
+                        <TextBox x:Name="ScriptBox"
+                                 IsReadOnly="True"
+                                 FontFamily="Cascadia Mono, Consolas"
+                                 FontSize="12"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 TextWrapping="NoWrap"
+                                 AcceptsReturn="True"
+                                 VerticalScrollBarVisibility="Auto"
+                                 HorizontalScrollBarVisibility="Auto" />
+                    </Border>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <DockPanel Grid.Row="4" LastChildFill="False" Margin="0,16,0,0">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Approve adds the item to the checklist. Reject discards it - nothing else is affected."
+                       FontSize="11.5"
+                       Foreground="{StaticResource MutedBrush}"
+                       TextWrapping="Wrap"
+                       MaxWidth="420"
+                       VerticalAlignment="Center" />
+            <Button DockPanel.Dock="Right"
+                    x:Name="ApproveBtn"
+                    Content="Approve and Add"
+                    Style="{StaticResource PrimaryButton}"
+                    MinWidth="170"
+                    IsEnabled="False"
+                    ToolTip="Add this item and its script to the custom checklist"
+                    Click="ApproveBtn_Click" />
+            <Button DockPanel.Dock="Right"
+                    x:Name="RejectBtn"
+                    Content="Reject"
+                    Style="{StaticResource DangerButton}"
+                    MinWidth="130"
+                    IsEnabled="False"
+                    Margin="0,0,10,0"
+                    ToolTip="Discard this item - it will not be added to the checklist"
+                    Click="RejectBtn_Click" />
+        </DockPanel>
+
+        <DockPanel Grid.Row="5" LastChildFill="False" Margin="0,14,0,0">
+            <Border DockPanel.Dock="Left"
+                    Background="#FFF2F5FA"
+                    BorderBrush="{StaticResource BorderBrushSoft}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Padding="12,7"
+                    VerticalAlignment="Center">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Text, ElementName=SummaryText}" Value="">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock x:Name="SummaryText"
+                           Text=""
+                           FontSize="12.5"
+                           Foreground="{StaticResource TextBrush}"
+                           TextWrapping="Wrap" />
+            </Border>
+            <Button DockPanel.Dock="Right"
+                    x:Name="ActionButton"
+                    Content="Cancel"
+                    Style="{StaticResource QuietButton}"
+                    MinWidth="170"
+                    Click="ActionButton_Click" />
+        </DockPanel>
+    </Grid>
+</Window>

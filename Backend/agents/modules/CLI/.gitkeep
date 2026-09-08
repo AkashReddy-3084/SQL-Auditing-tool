@@ -1,3 +1,0 @@
-# Placeholder so the CLI/ folder is tracked.
-# The CLI entry point remains at Backend/core/Program.cs (the `evaluate` subcommand).
-# Only new *shared* CLI helper code should be added under this folder.

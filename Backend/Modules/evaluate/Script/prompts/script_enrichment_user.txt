@@ -1,0 +1,17 @@
+﻿Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
+
+Evaluation already decided by the SQL audit script (do not change these):
+Outcome: {{OUTCOME}}
+Score: {{SCORE}} (0 = Not Implemented, 1 = Partially Implemented, 2 = Implemented, 3 = Best Practice)
+
+Databases the script queried: {{DATABASES_VERIFIED}}
+Finding value returned by the script: {{SCRIPT_FINDING}}
+
+Full result set returned by the script (column=value per row):
+{{SCRIPT_RESULT}}
+
+Write the audit wording for this item from the result above.
+
+Return strict JSON only with keys: finding, evidence, riskImpact, recommendation, severity.
