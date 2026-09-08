@@ -21,6 +21,8 @@ namespace SQLAuditor.Wpf
             private string _title = "";
             private string _description = "";
             private int _ordinal;
+            private bool _isRemovable;
+            private bool _isCurrent;
 
             public int Ordinal
             {
@@ -28,11 +30,28 @@ namespace SQLAuditor.Wpf
                 set { _ordinal = value; Raise(); }
             }
 
+            /// <summary>True for the entry still being typed; it lives in the "New item" section.</summary>
+            public bool IsCurrent
+            {
+                get => _isCurrent;
+                set { _isCurrent = value; Raise(); }
+            }
+
+            /// <summary>Only entries that have moved into the "Added items" section can be removed.</summary>
+            public bool IsRemovable
+            {
+                get => _isRemovable;
+                set { _isRemovable = value; Raise(); }
+            }
+
             public string Title
             {
                 get => _title;
-                set { _title = value; Raise(); }
+                set { _title = value; Raise(); Raise(nameof(DisplayTitle)); }
             }
+
+            public string DisplayTitle =>
+                string.IsNullOrWhiteSpace(_title) ? "(no title yet)" : _title.Trim();
 
             public string Description
             {
@@ -54,6 +73,7 @@ namespace SQLAuditor.Wpf
         public ConfigureChecklistWindow()
         {
             InitializeComponent();
+            AddedEntriesList.ItemsSource = _entries;
             EntriesList.ItemsSource = _entries;
             AddEntry();
         }
@@ -66,13 +86,28 @@ namespace SQLAuditor.Wpf
 
         private void Renumber()
         {
-            for (var i = 0; i < _entries.Count; i++) _entries[i].Ordinal = i + 1;
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                _entries[i].Ordinal = i + 1;
+                _entries[i].IsCurrent = i == _entries.Count - 1;
+                _entries[i].IsRemovable = !_entries[i].IsCurrent;
+            }
         }
 
         private void NewEntryBtn_Click(object sender, RoutedEventArgs e)
         {
+            var current = _entries.LastOrDefault();
+            if (current != null &&
+                (string.IsNullOrWhiteSpace(current.Title) || string.IsNullOrWhiteSpace(current.Description)))
+            {
+                StatusText.Text = $"Complete the title and description for custom checklist item {current.Ordinal} before adding another one.";
+                return;
+            }
+
             StatusText.Text = "";
             AddEntry();
+            Dispatcher.BeginInvoke(new System.Action(() => PageScroll.ScrollToEnd()),
+                System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         private void RemoveEntry_Click(object sender, RoutedEventArgs e)

@@ -161,194 +161,326 @@
 
     <Grid Margin="24,20,24,20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0">
-            <TextBlock Text="Add Custom Checklist Items"
-                       FontSize="22"
-                       FontWeight="Bold"
-                       Foreground="{StaticResource TextBrush}" />
-            <TextBlock Text="Add your own governance checks to the SQL Server audit checklist. Give each check a short title and a clear description of what should be verified - everything else is worked out for you."
-                       FontSize="13"
-                       Foreground="{StaticResource MutedBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,6,0,0" />
-        </StackPanel>
-
-        <Border Grid.Row="1"
-                Background="#FFF8FBFF"
-                BorderBrush="#FFD3E2F2"
-                BorderThickness="1"
-                CornerRadius="12"
-                Padding="16,12"
-                Margin="0,14,0,0">
+        <ScrollViewer Grid.Row="0"
+                      x:Name="PageScroll"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="0,0,6,0">
             <StackPanel>
-                <TextBlock Text="What happens after you continue"
-                           FontWeight="SemiBold"
+                <TextBlock Text="Add Custom Checklist Items"
+                           FontSize="22"
+                           FontWeight="Bold"
+                           Foreground="{StaticResource TextBrush}" />
+                <TextBlock Text="Add your own governance checks to the SQL Server audit checklist. Give each check a short title and a clear description of what should be verified - everything else is worked out for you."
                            FontSize="13"
-                           Foreground="{StaticResource PrimaryBrush}"
-                           Margin="0,0,0,8" />
-                <WrapPanel>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="1. Guardrail screening" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="2. Duplicate check against the existing checklist" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="3. Automatic Area / Sub-area classification" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="4. Audit script generation" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="5. Your approval" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                    <Border Style="{StaticResource StepPill}">
-                        <TextBlock Text="6. Merge into the checklist" FontSize="12" Foreground="{StaticResource TextBrush}" />
-                    </Border>
-                </WrapPanel>
-                <TextBlock Text="You do not choose the Area or Sub-area - they are derived from your title and description. Nothing is saved until you approve the generated script on the next screen."
-                           FontSize="11.5"
                            Foreground="{StaticResource MutedBrush}"
                            TextWrapping="Wrap"
-                           Margin="0,4,0,0" />
-            </StackPanel>
-        </Border>
+                           Margin="0,6,0,0" />
 
-        <Expander Grid.Row="2"
-                  Header="Show me a good example"
-                  Foreground="{StaticResource PrimaryBrush}"
-                  FontSize="12.5"
-                  FontWeight="SemiBold"
-                  Margin="0,12,0,0">
-            <Border Background="White"
-                    BorderBrush="{StaticResource BorderBrushSoft}"
-                    BorderThickness="1"
-                    CornerRadius="10"
-                    Padding="14,10"
-                    Margin="0,8,0,0">
-                <StackPanel>
-                    <TextBlock FontSize="12" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap">
-                        <Run Text="Title:" FontWeight="SemiBold" />
-                        <Run Text="TLS 1.2 enforced for all client connections" FontWeight="Normal" />
-                    </TextBlock>
-                    <TextBlock FontSize="12" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" Margin="0,6,0,0">
-                        <Run Text="Description:" FontWeight="SemiBold" />
-                        <Run FontWeight="Normal" Text="Verify that the SQL Server instance forces encrypted connections and that only TLS 1.2 or higher is enabled. The check should fail if ForceEncryption is off, or if TLS 1.0 / 1.1 are still enabled on the host." />
-                    </TextBlock>
-                    <TextBlock FontSize="11.5"
-                               Foreground="{StaticResource MutedBrush}"
-                               TextWrapping="Wrap"
-                               Margin="0,8,0,0"
-                               Text="Tip: state what to inspect and what counts as a pass or a fail. Avoid vague wording such as 'check security settings'." />
-                </StackPanel>
-            </Border>
-        </Expander>
+                <Border Background="#FFF8FBFF"
+                        BorderBrush="#FFD3E2F2"
+                        BorderThickness="1"
+                        CornerRadius="12"
+                        Padding="16,12"
+                        Margin="0,14,0,0">
+                    <StackPanel>
+                        <TextBlock Text="What happens after you continue"
+                                   FontWeight="SemiBold"
+                                   FontSize="13"
+                                   Foreground="{StaticResource PrimaryBrush}"
+                                   Margin="0,0,0,8" />
+                        <WrapPanel>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="1. Guardrail screening" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="2. Duplicate check against the existing checklist" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="3. Automatic Area / Sub-area classification" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="4. Audit script generation" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="5. Your approval" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                            <Border Style="{StaticResource StepPill}">
+                                <TextBlock Text="6. Merge into the checklist" FontSize="12" Foreground="{StaticResource TextBrush}" />
+                            </Border>
+                        </WrapPanel>
+                        <TextBlock Text="You do not choose the Area or Sub-area - they are derived from your title and description. Nothing is saved until you approve the generated script on the next screen."
+                                   FontSize="11.5"
+                                   Foreground="{StaticResource MutedBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,4,0,0" />
+                    </StackPanel>
+                </Border>
 
-        <Border Grid.Row="3"
-                Background="{StaticResource SurfaceBrush}"
-                BorderBrush="{StaticResource BorderBrushSoft}"
-                BorderThickness="1"
-                CornerRadius="14"
-                Padding="14,12"
-                Margin="0,14,0,0">
-            <DockPanel>
-                <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="4,0,4,10">
-                    <TextBlock DockPanel.Dock="Left"
-                               Text="Your custom checks"
-                               FontWeight="SemiBold"
-                               FontSize="14"
-                               Foreground="{StaticResource TextBrush}"
-                               VerticalAlignment="Center" />
-                    <TextBlock DockPanel.Dock="Right"
-                               Text="{Binding ItemsSource.Count, ElementName=EntriesList, StringFormat={}{0} item(s)}"
-                               FontSize="12"
-                               Foreground="{StaticResource MutedBrush}"
-                               VerticalAlignment="Center" />
-                </DockPanel>
+                <Expander Header="Show me a good example"
+                          Foreground="{StaticResource PrimaryBrush}"
+                          FontSize="12.5"
+                          FontWeight="SemiBold"
+                          Margin="0,12,0,0">
+                    <Border Background="White"
+                            BorderBrush="{StaticResource BorderBrushSoft}"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="14,10"
+                            Margin="0,8,0,0">
+                        <StackPanel>
+                            <TextBlock FontSize="12" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap">
+                                <Run Text="Title:" FontWeight="SemiBold" />
+                                <Run Text="TLS 1.2 enforced for all client connections" FontWeight="Normal" />
+                            </TextBlock>
+                            <TextBlock FontSize="12" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" Margin="0,6,0,0">
+                                <Run Text="Description:" FontWeight="SemiBold" />
+                                <Run FontWeight="Normal" Text="Verify that the SQL Server instance forces encrypted connections and that only TLS 1.2 or higher is enabled. The check should fail if ForceEncryption is off, or if TLS 1.0 / 1.1 are still enabled on the host." />
+                            </TextBlock>
+                            <TextBlock FontSize="11.5"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,8,0,0"
+                                       Text="Tip: state what to inspect and what counts as a pass or a fail. Avoid vague wording such as 'check security settings'." />
+                        </StackPanel>
+                    </Border>
+                </Expander>
 
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
-                    <ItemsControl x:Name="EntriesList">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Border Background="#FFFBFCFE"
-                                        BorderBrush="#FFE4EAF2"
-                                        BorderThickness="1"
-                                        CornerRadius="12"
-                                        Padding="14,12,14,14"
-                                        Margin="0,0,0,10">
-                                    <StackPanel>
-                                        <DockPanel LastChildFill="False">
-                                            <Border DockPanel.Dock="Left"
-                                                    Background="{StaticResource PrimaryBrush}"
-                                                    CornerRadius="999"
-                                                    Width="24"
-                                                    Height="24"
-                                                    VerticalAlignment="Center"
-                                                    Margin="0,0,10,0">
-                                                <TextBlock Text="{Binding Ordinal}"
-                                                           Foreground="White"
-                                                           FontSize="12"
+                <!-- Items already captured. The container for the entry still being typed is collapsed here. -->
+                <Border Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource BorderBrushSoft}"
+                        BorderThickness="1"
+                        CornerRadius="14"
+                        Padding="14,12"
+                        Margin="0,14,0,0">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding ItemsSource.Count, ElementName=AddedEntriesList}" Value="1">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding ItemsSource, ElementName=AddedEntriesList}" Value="{x:Null}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <StackPanel>
+                        <TextBlock Text="Added items"
+                                   FontWeight="SemiBold"
+                                   FontSize="14"
+                                   Foreground="{StaticResource TextBrush}"
+                                   Margin="4,0,4,2" />
+                        <TextBlock Text="These are ready to go. Expand one to change its wording, or remove it from the batch."
+                                   FontSize="11.5"
+                                   Foreground="{StaticResource MutedBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="4,0,4,10" />
+
+                        <ItemsControl x:Name="AddedEntriesList">
+                            <ItemsControl.ItemContainerStyle>
+                                <Style TargetType="ContentPresenter">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ItemsControl.ItemContainerStyle>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#FFF8FAFD"
+                                            BorderBrush="#FFE4EAF2"
+                                            BorderThickness="1"
+                                            CornerRadius="12"
+                                            Padding="14,10,14,12"
+                                            Margin="0,0,0,10">
+                                        <StackPanel>
+                                            <DockPanel LastChildFill="False">
+                                                <Border DockPanel.Dock="Left"
+                                                        Background="{StaticResource PrimaryBrush}"
+                                                        CornerRadius="999"
+                                                        Width="24"
+                                                        Height="24"
+                                                        VerticalAlignment="Center"
+                                                        Margin="0,0,10,0">
+                                                    <TextBlock Text="{Binding Ordinal}"
+                                                               Foreground="White"
+                                                               FontSize="12"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center" />
+                                                </Border>
+                                                <Button DockPanel.Dock="Right"
+                                                        Content="Remove"
+                                                        Style="{StaticResource RemoveButton}"
+                                                        VerticalAlignment="Center"
+                                                        ToolTip="Remove this custom checklist item from the batch"
+                                                        Tag="{Binding}"
+                                                        Click="RemoveEntry_Click" />
+                                                <TextBlock DockPanel.Dock="Left"
+                                                           Text="{Binding DisplayTitle}"
                                                            FontWeight="SemiBold"
-                                                           HorizontalAlignment="Center"
+                                                           FontSize="13.5"
+                                                           Foreground="{StaticResource TextBrush}"
+                                                           TextTrimming="CharacterEllipsis"
                                                            VerticalAlignment="Center" />
-                                            </Border>
-                                            <TextBlock DockPanel.Dock="Left"
-                                                       Text="Custom checklist item"
-                                                       FontWeight="SemiBold"
-                                                       FontSize="13.5"
-                                                       Foreground="{StaticResource TextBrush}"
-                                                       VerticalAlignment="Center" />
-                                            <Button DockPanel.Dock="Right"
-                                                    Content="Remove"
-                                                    Style="{StaticResource RemoveButton}"
-                                                    VerticalAlignment="Center"
-                                                    ToolTip="Remove this custom checklist item from the list"
-                                                    Tag="{Binding}"
-                                                    Click="RemoveEntry_Click" />
-                                        </DockPanel>
+                                            </DockPanel>
 
-                                        <TextBlock Text="Title" Style="{StaticResource FieldLabel}" Margin="0,12,0,2" />
-                                        <TextBlock Style="{StaticResource FieldHelp}"
-                                                   Text="A short, specific name for the check. This is what appears in the audit report." />
-                                        <TextBox Style="{StaticResource HintedTextBox}"
-                                                 Tag="e.g. SQL Server Agent service is not running under a sysadmin account"
-                                                 ToolTip="A short, specific name for the check"
-                                                 Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" />
+                                            <TextBlock Text="{Binding Description}"
+                                                       FontSize="12"
+                                                       Foreground="{StaticResource MutedBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Margin="34,4,0,0" />
 
-                                        <TextBlock Text="Description" Style="{StaticResource FieldLabel}" Margin="0,12,0,2" />
-                                        <TextBlock Style="{StaticResource FieldHelp}"
-                                                   Text="Explain what to inspect on the SQL Server instance and what counts as a pass or a fail. The clearer this is, the better the generated audit script." />
-                                        <TextBox Style="{StaticResource HintedTextBox}"
-                                                 Tag="e.g. Confirm the account running the SQL Server Agent service is not a member of the sysadmin fixed server role. Fail if it is."
-                                                 ToolTip="What to inspect, and what counts as a pass or a fail"
-                                                 Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
-                                                 MinHeight="84"
-                                                 AcceptsReturn="True"
-                                                 TextWrapping="Wrap"
-                                                 VerticalScrollBarVisibility="Auto" />
-                                        <TextBlock Text="{Binding Description.Length, StringFormat={}{0} characters}"
-                                                   FontSize="11"
-                                                   Foreground="{StaticResource HintBrush}"
-                                                   HorizontalAlignment="Right"
-                                                   Margin="0,4,2,0" />
-                                    </StackPanel>
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
-            </DockPanel>
-        </Border>
+                                            <Expander Header="Edit this item"
+                                                      FontSize="12"
+                                                      FontWeight="SemiBold"
+                                                      Foreground="{StaticResource PrimaryBrush}"
+                                                      Margin="34,8,0,0">
+                                                <StackPanel Margin="0,6,0,0">
+                                                    <TextBlock Text="Title" Style="{StaticResource FieldLabel}" Margin="0,0,0,4" />
+                                                    <TextBox Style="{StaticResource HintedTextBox}"
+                                                             Tag="e.g. SQL Server Agent service is not running under a sysadmin account"
+                                                             Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" />
 
-        <Border Grid.Row="4"
+                                                    <TextBlock Text="Description" Style="{StaticResource FieldLabel}" Margin="0,12,0,4" />
+                                                    <TextBox Style="{StaticResource HintedTextBox}"
+                                                             Tag="e.g. Confirm the account running the SQL Server Agent service is not a member of the sysadmin fixed server role. Fail if it is."
+                                                             Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
+                                                             MinHeight="72"
+                                                             AcceptsReturn="True"
+                                                             TextWrapping="Wrap"
+                                                             VerticalScrollBarVisibility="Auto" />
+                                                </StackPanel>
+                                            </Expander>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- The entry currently being typed. Every other container is collapsed here. -->
+                <Border Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource BorderBrushSoft}"
+                        BorderThickness="1"
+                        CornerRadius="14"
+                        Padding="14,12"
+                        Margin="0,14,0,0">
+                    <StackPanel>
+                        <DockPanel LastChildFill="False" Margin="4,0,4,10">
+                            <TextBlock DockPanel.Dock="Left"
+                                       Text="New custom checklist item"
+                                       FontWeight="SemiBold"
+                                       FontSize="14"
+                                       Foreground="{StaticResource TextBrush}"
+                                       VerticalAlignment="Center" />
+                            <TextBlock DockPanel.Dock="Right"
+                                       Text="{Binding ItemsSource.Count, ElementName=EntriesList, StringFormat={}{0} item(s) in this batch}"
+                                       FontSize="12"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       VerticalAlignment="Center" />
+                        </DockPanel>
+
+                        <ItemsControl x:Name="EntriesList">
+                            <ItemsControl.ItemContainerStyle>
+                                <Style TargetType="ContentPresenter">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsCurrent}" Value="False">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ItemsControl.ItemContainerStyle>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#FFFBFCFE"
+                                            BorderBrush="#FFE4EAF2"
+                                            BorderThickness="1"
+                                            CornerRadius="12"
+                                            Padding="14,12,14,14">
+                                        <StackPanel>
+                                            <DockPanel LastChildFill="False">
+                                                <Border DockPanel.Dock="Left"
+                                                        Background="{StaticResource PrimaryBrush}"
+                                                        CornerRadius="999"
+                                                        Width="24"
+                                                        Height="24"
+                                                        VerticalAlignment="Center"
+                                                        Margin="0,0,10,0">
+                                                    <TextBlock Text="{Binding Ordinal}"
+                                                               Foreground="White"
+                                                               FontSize="12"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center" />
+                                                </Border>
+                                                <TextBlock DockPanel.Dock="Left"
+                                                           Text="Custom checklist item"
+                                                           FontWeight="SemiBold"
+                                                           FontSize="13.5"
+                                                           Foreground="{StaticResource TextBrush}"
+                                                           VerticalAlignment="Center" />
+                                                <Button DockPanel.Dock="Right"
+                                                        Content="Remove"
+                                                        VerticalAlignment="Center"
+                                                        ToolTip="Remove this custom checklist item from the batch"
+                                                        Tag="{Binding}"
+                                                        Click="RemoveEntry_Click">
+                                                    <Button.Style>
+                                                        <Style TargetType="Button" BasedOn="{StaticResource RemoveButton}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsRemovable}" Value="False">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Button.Style>
+                                                </Button>
+                                            </DockPanel>
+
+                                            <TextBlock Text="Title" Style="{StaticResource FieldLabel}" Margin="0,12,0,2" />
+                                            <TextBlock Style="{StaticResource FieldHelp}"
+                                                       Text="A short, specific name for the check. This is what appears in the audit report." />
+                                            <TextBox Style="{StaticResource HintedTextBox}"
+                                                     Tag="e.g. SQL Server Agent service is not running under a sysadmin account"
+                                                     ToolTip="A short, specific name for the check"
+                                                     Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" />
+
+                                            <TextBlock Text="Description" Style="{StaticResource FieldLabel}" Margin="0,12,0,2" />
+                                            <TextBlock Style="{StaticResource FieldHelp}"
+                                                       Text="Explain what to inspect on the SQL Server instance and what counts as a pass or a fail. The clearer this is, the better the generated audit script." />
+                                            <TextBox Style="{StaticResource HintedTextBox}"
+                                                     Tag="e.g. Confirm the account running the SQL Server Agent service is not a member of the sysadmin fixed server role. Fail if it is."
+                                                     ToolTip="What to inspect, and what counts as a pass or a fail"
+                                                     Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
+                                                     MinHeight="84"
+                                                     AcceptsReturn="True"
+                                                     TextWrapping="Wrap"
+                                                     VerticalScrollBarVisibility="Auto" />
+                                            <TextBlock Text="{Binding Description.Length, StringFormat={}{0} characters}"
+                                                       FontSize="11"
+                                                       Foreground="{StaticResource HintBrush}"
+                                                       HorizontalAlignment="Right"
+                                                       Margin="0,4,2,0" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="1"
                 Background="#FFFDF3F2"
                 BorderBrush="#FFF3C6C1"
                 BorderThickness="1"
@@ -379,10 +511,10 @@
             </StackPanel>
         </Border>
 
-        <DockPanel Grid.Row="5" LastChildFill="False" Margin="0,16,0,0">
+        <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,16,0,0">
             <Button DockPanel.Dock="Left"
                     x:Name="NewEntryBtn"
-                    Content="+  Add another item"
+                    Content="Add another item"
                     Style="{StaticResource QuietButton}"
                     MinWidth="160"
                     ToolTip="Add one more custom checklist item to this batch"

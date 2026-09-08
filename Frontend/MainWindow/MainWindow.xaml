@@ -380,25 +380,10 @@
                                                             HorizontalAlignment="Center"
                                                             VerticalAlignment="Center"
                                                             Visibility="Collapsed">
-                                                    <Border Width="44"
-                                                            Height="44"
-                                                            CornerRadius="999"
-                                                            Background="#FFEEF4FB"
-                                                            BorderBrush="#FFD3E2F2"
-                                                            BorderThickness="1"
-                                                            HorizontalAlignment="Center">
-                                                        <TextBlock Text="+"
-                                                                   FontSize="22"
-                                                                   FontWeight="Bold"
-                                                                   Foreground="{StaticResource PrimaryBrush}"
-                                                                   HorizontalAlignment="Center"
-                                                                   VerticalAlignment="Center" />
-                                                    </Border>
                                                     <TextBlock Text="No custom checklist items yet"
                                                                FontWeight="SemiBold"
                                                                Foreground="{StaticResource TextBrush}"
-                                                               TextAlignment="Center"
-                                                               Margin="0,12,0,0" />
+                                                               TextAlignment="Center" />
                                                     <TextBlock Text="Use the button below to describe a check in plain English. An audit script is generated for your approval before anything is saved."
                                                                Foreground="{StaticResource MutedBrush}"
                                                                FontSize="12"
