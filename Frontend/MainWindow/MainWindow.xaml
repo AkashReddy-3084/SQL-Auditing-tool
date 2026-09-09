@@ -330,6 +330,63 @@
                                             </Grid>
                                         </StackPanel>
                                         <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
+
+                                        <!-- Shown only when the verified server already has a stored evaluation. -->
+                                        <Border x:Name="PreviousEvaluationPanel"
+                                                Visibility="Collapsed"
+                                                Margin="0,18,0,0"
+                                                Background="#FFF3F8FF"
+                                                BorderBrush="#FFCFE0F5"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                Padding="14">
+                                            <StackPanel>
+                                                <TextBlock Text="Previous Evaluation Found" FontWeight="Bold" FontSize="15" />
+                                                <TextBlock x:Name="PreviousEvaluationServerText"
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,2,0,10"
+                                                           TextTrimming="CharacterEllipsis" />
+
+                                                <Grid Margin="0,0,0,4">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Evaluated" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
+                                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="PreviousEvaluationDateText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Checklist" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
+                                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PreviousEvaluationItemsText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Status" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
+                                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="PreviousEvaluationStatusText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Result" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
+                                                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="PreviousEvaluationScoreText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Duration" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,0" />
+                                                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="PreviousEvaluationDurationText" FontSize="12" FontWeight="SemiBold" />
+                                                </Grid>
+
+                                                <RadioButton x:Name="RunNewEvaluationRadio"
+                                                             GroupName="EvaluationSource"
+                                                             Content="Run New Evaluation"
+                                                             IsChecked="True"
+                                                             Margin="0,12,0,0"
+                                                             Checked="EvaluationSource_Changed"
+                                                             ToolTip="Execute the full audit against this server again." />
+                                                <RadioButton x:Name="UsePreviousEvaluationRadio"
+                                                             GroupName="EvaluationSource"
+                                                             Content="Use Previous Evaluation"
+                                                             Margin="0,8,0,0"
+                                                             Checked="EvaluationSource_Changed"
+                                                             ToolTip="Open the stored results from the run above without executing the audit again." />
+                                            </StackPanel>
+                                        </Border>
                                     </StackPanel>
                                 </Border>
 

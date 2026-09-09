@@ -50,6 +50,63 @@ public static class AuditOutputPaths
         }
     }
 
+    /// <summary>
+    /// Makes an existing run directory the active one, so every later read and report
+    /// generation targets that run instead of creating a new one.
+    /// </summary>
+    public static void ResumeRun(string runDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(runDirectory))
+            throw new ArgumentException("A run directory is required.", nameof(runDirectory));
+
+        var fullPath = Path.GetFullPath(runDirectory);
+        if (!Directory.Exists(fullPath))
+            throw new DirectoryNotFoundException($"Run directory not found: {fullPath}");
+
+        lock (SyncRoot)
+        {
+            _activeRunDirectory = fullPath;
+        }
+    }
+
+    /// <summary>The sanitized server token used in run directory names for this connection.</summary>
+    public static string ResolveServerName(string? connectionString) =>
+        SanitizeServerName(ReadServerName(connectionString));
+
+    /// <summary>Existing run directories, newest first.</summary>
+    public static IReadOnlyList<string> GetRunDirectories()
+    {
+        lock (SyncRoot)
+        {
+            return EnumerateRunDirectories().ToArray();
+        }
+    }
+
+    /// <summary>Splits a <c>yyyyMMdd_HHmmss_fff_server</c> directory name into its parts.</summary>
+    public static bool TryParseRunDirectoryName(string directoryName, out DateTime startedAt, out string serverName)
+    {
+        startedAt = default;
+        serverName = string.Empty;
+        if (string.IsNullOrWhiteSpace(directoryName)) return false;
+
+        var name = Path.GetFileName(directoryName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (!RunDirectoryPattern.IsMatch(name)) return false;
+
+        var parts = name.Split('_');
+        if (parts.Length < 4) return false;
+
+        if (!DateTime.TryParseExact(
+                $"{parts[0]}_{parts[1]}_{parts[2]}",
+                "yyyyMMdd_HHmmss_fff",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out startedAt))
+            return false;
+
+        serverName = string.Join('_', parts.Skip(3));
+        return true;
+    }
+
     public static string GetCurrentFilePath(string fileName) =>
         Path.Combine(CurrentRunDirectory, fileName);
 

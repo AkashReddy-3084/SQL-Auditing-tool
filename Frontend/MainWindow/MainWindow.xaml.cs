@@ -119,6 +119,10 @@ namespace SQLAuditor.Wpf
         private bool _suppressDatabaseSelectionSync = false;
         private int _sqlConnectionInputsVersion = 0;
         private bool _isVerifyingSql = false;
+        // Latest stored evaluation for the currently verified server, offered as a reusable result.
+        private SQLAuditor.Lib.PreviousEvaluation? _previousEvaluation;
+        // True while the Summary page is showing a reused run rather than one evaluated in this session.
+        private bool _viewingPreviousEvaluation = false;
 
         public MainWindow()
         {
@@ -1991,7 +1995,8 @@ namespace SQLAuditor.Wpf
                 ResetChecklistSessionStateForExit();
             }
 
-            var destination = MainTabs.SelectedIndex == 1 ? 0 : 1;
+            var destination = MainTabs.SelectedIndex == 1 || _viewingPreviousEvaluation ? 0 : 1;
+            _viewingPreviousEvaluation = false;
             SetTabIndex(destination);
             UpdateStageIndicators();
         }
@@ -2094,6 +2099,7 @@ namespace SQLAuditor.Wpf
             _isVerified = false;
             _auditor = null;
             ResetDatabaseSelection();
+            RefreshPreviousEvaluationOffer();
             if (hadConnectionState)
                 AccessStatus.Text = "Connection details changed. Verify access again.";
             UpdateStageIndicators();
@@ -2287,6 +2293,7 @@ namespace SQLAuditor.Wpf
             {
                 _isVerifyingSql = false;
                 VerifyBtn.IsEnabled = true;
+                RefreshPreviousEvaluationOffer();
                 UpdateStartEvaluationEnabled();
                 UpdateStageIndicators();
             }
@@ -2343,8 +2350,16 @@ namespace SQLAuditor.Wpf
         // The ONLY control that navigates from Login to the Checklist page.
         private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
         {
+            if (ReusePreviousEvaluation)
+            {
+                OpenPreviousEvaluation();
+                return;
+            }
+
             var targetDatabases = GetSelectedDatabaseNames();
             if (!_isVerified || targetDatabases.Length == 0) return;
+
+            _viewingPreviousEvaluation = false;
 
             // Make sure the LLM evaluators reflect the verified runtime configuration.
             _auditor?.EnsureLlmEvaluators();
@@ -2370,12 +2385,111 @@ namespace SQLAuditor.Wpf
 
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = ready;
+                StartEvaluationBtn.IsEnabled = ready || ReusePreviousEvaluation;
+                StartEvaluationBtn.Content = ReusePreviousEvaluation
+                    ? "Open Previous Results"
+                    : "Continue to Checklist";
             }
 
             if (AddCustomChecklistItemBtn != null)
             {
                 AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified;
+            }
+        }
+
+        private bool ReusePreviousEvaluation =>
+            _previousEvaluation != null && UsePreviousEvaluationRadio?.IsChecked == true;
+
+        // Looks for the latest stored evaluation of the just-verified server and offers it as an
+        // alternative to running the full audit again.
+        private void RefreshPreviousEvaluationOffer()
+        {
+            _previousEvaluation = null;
+
+            if (_isVerified && _auditor != null)
+            {
+                try
+                {
+                    _previousEvaluation = SQLAuditor.Lib.PreviousEvaluationStore.FindLatestForServer(_auditor.ConnectionString);
+                }
+                catch (Exception ex)
+                {
+                    Log("Could not read previous evaluations: " + ex.Message);
+                }
+            }
+
+            if (PreviousEvaluationPanel == null) return;
+
+            if (_previousEvaluation == null)
+            {
+                PreviousEvaluationPanel.Visibility = Visibility.Collapsed;
+                if (RunNewEvaluationRadio != null) RunNewEvaluationRadio.IsChecked = true;
+                UpdateStartEvaluationEnabled();
+                return;
+            }
+
+            var metadata = _previousEvaluation.Metadata;
+            PreviousEvaluationServerText.Text = $"Server: {metadata.ServerName}";
+            PreviousEvaluationDateText.Text = _previousEvaluation.EvaluatedDisplay;
+            PreviousEvaluationItemsText.Text = $"{metadata.ItemCount} items";
+            PreviousEvaluationStatusText.Text = metadata.Status;
+            PreviousEvaluationScoreText.Text = _previousEvaluation.ScoreDisplay;
+            PreviousEvaluationDurationText.Text = _previousEvaluation.DurationDisplay;
+            PreviousEvaluationPanel.Visibility = Visibility.Visible;
+            RunNewEvaluationRadio.IsChecked = true;
+
+            Log($"Previous evaluation found for {metadata.ServerName} ({_previousEvaluation.EvaluatedDisplay}, {metadata.ItemCount} items, {metadata.Status}).");
+            UpdateStartEvaluationEnabled();
+        }
+
+        private void EvaluationSource_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_previousEvaluation == null) return;
+            Log(ReusePreviousEvaluation
+                ? $"Using the previous evaluation stored in {_previousEvaluation.RunDirectory}."
+                : "Running a new evaluation for this server.");
+            UpdateStartEvaluationEnabled();
+        }
+
+        // Reopens a stored run: the run directory becomes active and its persisted results are
+        // shown on the Summary page. No checklist item is executed again.
+        private bool OpenPreviousEvaluation()
+        {
+            var previous = _previousEvaluation;
+            if (previous == null) return false;
+
+            if (!System.IO.File.Exists(previous.ResultsPath))
+            {
+                MessageBox.Show(
+                    "The stored results for this server are no longer available:\n\n" + previous.ResultsPath,
+                    "Previous evaluation unavailable",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                RefreshPreviousEvaluationOffer();
+                return false;
+            }
+
+            try
+            {
+                AuditOutputPaths.ResumeRun(previous.RunDirectory);
+                var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
+                UpdateSummaryView(results);
+                RefreshHistoricalManualAvailability();
+                _viewingPreviousEvaluation = true;
+                SetTabIndex(3);
+                UpdateStageIndicators();
+                Log($"Reusing previous evaluation from {previous.RunDirectory} ({results.Count} item(s)); no checks were re-executed.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to open the previous evaluation: " + ex.Message);
+                MessageBox.Show(
+                    "The previous evaluation could not be opened:\n\n" + ex.Message,
+                    "Previous evaluation failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return false;
             }
         }
 

@@ -126,6 +126,9 @@ namespace SQLAuditor.Lib
         private ScriptResultAiEnricher? _scriptEnricher;
         private ManualResultAiEnricher? _manualResultEnricher;
 
+        /// <summary>The normalized connection string this auditor runs against.</summary>
+        public string ConnectionString => _connectionString;
+
         public Auditor(string connectionString)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
@@ -832,6 +835,7 @@ WHERE d.name = DB_NAME();";
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
+            var runStartedAt = DateTime.Now;
             var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
@@ -1538,6 +1542,10 @@ WHERE d.name = DB_NAME();";
             }
             catch { }
 
+            // Makes this run discoverable as the server's previous evaluation.
+            try { PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now); }
+            catch { }
+
             // Automatically produce the final Markdown summary report and the Excel workbook from
             // the freshly written checklist_results.json. The historical manual results are NOT
             // refreshed here: that happens only when the user explicitly asks for the report.
@@ -1617,6 +1625,10 @@ WHERE d.name = DB_NAME();";
             {
                 messages.Add(message);
             }
+
+            // Keeps the reusable run summary aligned with manual decisions made after the engine finished.
+            try { PreviousEvaluationStore.Refresh(resultsDir); }
+            catch { }
 
             return string.Join(Environment.NewLine, messages);
         }
