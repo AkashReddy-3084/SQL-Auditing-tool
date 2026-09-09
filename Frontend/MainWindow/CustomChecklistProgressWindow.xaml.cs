@@ -4,6 +4,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Documents;
+using System.Windows.Media;
 using SQLAuditor.Lib;
 
 namespace SQLAuditor.Wpf
@@ -27,6 +29,7 @@ namespace SQLAuditor.Wpf
         public CustomChecklistProgressWindow(IReadOnlyList<CustomChecklistRequest> requests)
         {
             InitializeComponent();
+            LogBox.Document.Blocks.Clear();
             _requests = requests;
             Progress.Maximum = Math.Max(1, requests.Count);
             HeaderText.Text = $"Custom Checklist Progress - {requests.Count} item(s)";
@@ -113,9 +116,40 @@ namespace SQLAuditor.Wpf
             Progress.Value = Math.Min(_completedItems, Progress.Maximum);
         }
 
+        private static readonly string[] FailureMarkers =
+        {
+            "ERROR", "FAILED", "REJECTED", "NOT FEASIBLE", "NOT CLASSIFIED",
+            "DUPLICATE", "validation failed", "Cancelled"
+        };
+
+        private static readonly string[] SuccessMarkers =
+        {
+            "Guardrails passed", "No existing checklist item covers this", "Added to",
+            "Applied the corrected script", "Approved"
+        };
+
+        private static readonly SolidColorBrush FailureBrush = new(Color.FromRgb(0xB4, 0x23, 0x18));
+        private static readonly SolidColorBrush SuccessBrush = new(Color.FromRgb(0x0B, 0x7A, 0x3E));
+        private static readonly SolidColorBrush NeutralBrush = new(Color.FromRgb(0x1F, 0x29, 0x37));
+
+        private static Brush BrushForMessage(string message)
+        {
+            if (FailureMarkers.Any(m => message.Contains(m, StringComparison.OrdinalIgnoreCase)))
+            {
+                return FailureBrush;
+            }
+
+            if (SuccessMarkers.Any(m => message.Contains(m, StringComparison.OrdinalIgnoreCase)))
+            {
+                return SuccessBrush;
+            }
+
+            return NeutralBrush;
+        }
+
         private void Append(string message)
         {
-            LogBox.AppendText(message + Environment.NewLine);
+            LogBox.Document.Blocks.Add(new Paragraph(new Run(message) { Foreground = BrushForMessage(message) }));
             LogBox.ScrollToEnd();
             StageText.Text = message.Length > 160 ? message[..157] + "..." : message;
         }

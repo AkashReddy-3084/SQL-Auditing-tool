@@ -171,14 +171,22 @@
                             BorderThickness="1"
                             CornerRadius="10"
                             Padding="10,8">
-                        <TextBox x:Name="LogBox"
-                                 IsReadOnly="True"
-                                 BorderThickness="0"
-                                 Background="Transparent"
-                                 FontSize="12"
-                                 TextWrapping="Wrap"
-                                 AcceptsReturn="True"
-                                 VerticalScrollBarVisibility="Auto" />
+                        <RichTextBox x:Name="LogBox"
+                                     IsReadOnly="True"
+                                     IsDocumentEnabled="False"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     Foreground="{StaticResource TextBrush}"
+                                     FontSize="12"
+                                     Padding="0"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Disabled">
+                            <RichTextBox.Resources>
+                                <Style TargetType="Paragraph">
+                                    <Setter Property="Margin" Value="0,0,0,2" />
+                                </Style>
+                            </RichTextBox.Resources>
+                        </RichTextBox>
                     </Border>
                 </DockPanel>
             </Border>

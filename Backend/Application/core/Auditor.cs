@@ -214,8 +214,9 @@ namespace SQLAuditor.Lib
                 ? "SELECT [name] FROM sys.databases " +
                   "WHERE [name] <> N'master' AND state = 0 AND source_database_id IS NULL " +
                   "ORDER BY [name];"
+                  // tempdb is excluded because it is recreated on every restart and is not auditable.
                 : "SELECT [name] FROM sys.databases " +
-                  "WHERE database_id > 4 AND state = 0 AND source_database_id IS NULL " +
+                  "WHERE database_id <> 2 AND state = 0 AND source_database_id IS NULL " +
                   "AND HAS_DBACCESS([name]) = 1 " +
                   "ORDER BY [name];";
 
