@@ -119,10 +119,15 @@ namespace SQLAuditor.Wpf
         private bool _suppressDatabaseSelectionSync = false;
         private int _sqlConnectionInputsVersion = 0;
         private bool _isVerifyingSql = false;
-        // Up to five most recent stored evaluations for the currently verified server, offered as reusable results.
-        private System.Collections.Generic.List<SQLAuditor.Lib.PreviousEvaluation> _previousEvaluations = new();
         // True while the Summary page is showing a reused run rather than one evaluated in this session.
         private bool _viewingPreviousEvaluation = false;
+        // Set when rerunning or editing a run from the Evaluations History window: reports are
+        // regenerated into this existing run directory instead of a fresh one.
+        private string? _resumeRunDirectory;
+        private bool _resumeIsEdit;
+        private string? _resumeFqdn;
+        private System.Collections.Generic.List<string>? _resumeDatabases;
+        private System.Collections.Generic.List<string>? _resumeSelectedItemIds;
 
         public MainWindow()
         {
@@ -568,6 +573,24 @@ namespace SQLAuditor.Wpf
                 return;
             }
 
+            // Rerun/edit from history: reuse the original run folder. Whether prior manual decisions
+            // are reused is controlled by the existing "Copy Manual Results (Last Runs)" checkbox.
+            var reuseFolder = false;
+            if (_resumeRunDirectory != null)
+            {
+                try
+                {
+                    AuditOutputPaths.ResumeRun(_resumeRunDirectory);
+                    reuseFolder = true;
+                    RefreshHistoricalManualAvailability();
+                    Log($"Rerun target: {System.IO.Path.GetFileName(_resumeRunDirectory)} (reports overwrite this folder).");
+                }
+                catch (Exception ex)
+                {
+                    Log("Could not reuse the previous run folder; a new one will be created: " + ex.Message);
+                }
+            }
+
             // move to evaluation page and build EvalTree
             SetTabIndex(2);
             UpdateStageIndicators();
@@ -711,6 +734,7 @@ namespace SQLAuditor.Wpf
                 var token = _evaluationCts.Token;
                 var idsForRun = selected.Count == 0 ? null : selected;
                 var useHistorical = UseHistoricalManualResults;
+                _auditor!.LastRunInputs = BuildRunInputs();
                 if (useHistorical)
                 {
                     Log($"Reusing manual results from last runs for {_copiedManualIds.Count} selected item(s); manual review is skipped for them.");
@@ -721,7 +745,7 @@ namespace SQLAuditor.Wpf
                 // then left the shared connection broken and every remaining script item came
                 // back as a SQL error, which the outcome mapper scores as Fail.
                 var results = await Task.Run(
-                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases),
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases, reuseActiveRunDirectory: reuseFolder),
                     token);
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
@@ -2006,6 +2030,153 @@ namespace SQLAuditor.Wpf
             HandleExitNavigation();
         }
 
+        // Opens the Evaluations History window (available on any tab, before any details are filled).
+        private void EvaluationHistoryBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (_isEvaluating)
+            {
+                MessageBox.Show(this, "An evaluation is currently running. Wait for it to finish before opening the history.", "Evaluation in progress", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var window = new EvaluationsHistoryWindow { Owner = this };
+            var result = window.ShowDialog();
+            if (result != true || window.SelectedRun == null || window.Action == HistoryAction.None) return;
+
+            BeginResumeFromHistory(window.SelectedRun, window.Action == HistoryAction.Edit);
+        }
+
+        // Prefills the Login page from a stored run and prepares to rerun or edit it in-place. The
+        // SQL password and LLM API key are never stored, so the user re-enters them here.
+        private void BeginResumeFromHistory(SQLAuditor.Lib.PreviousEvaluation run, bool editMode)
+        {
+            var meta = run.Metadata;
+            _resumeRunDirectory = run.RunDirectory;
+            _resumeIsEdit = editMode;
+            _resumeFqdn = meta.Fqdn;
+            _resumeDatabases = meta.Databases?.ToList();
+            _resumeSelectedItemIds = meta.SelectedItemIds?.ToList();
+
+            var isSqlAuth = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(meta.AuthMethod, "SQL", StringComparison.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(meta.Fqdn)) FqdnText.Text = meta.Fqdn;
+            SelectAuthMethod(isSqlAuth);
+            SqlUserBox.Text = isSqlAuth ? (meta.SqlUser ?? string.Empty) : string.Empty;
+            SqlPassBox.Password = string.Empty;
+            if (!string.IsNullOrWhiteSpace(meta.LlmBaseUrl)) LlmBaseUrlText.Text = meta.LlmBaseUrl;
+            if (!string.IsNullOrWhiteSpace(meta.LlmModel)) LlmModelText.Text = meta.LlmModel;
+            LlmApiKeyBox.Password = string.Empty;
+
+            InvalidateSqlVerification();
+            SetTabIndex(0);
+            UpdateStageIndicators();
+
+            var mode = editMode ? "Edit" : "Rerun";
+            Log($"{mode} mode: reusing run {System.IO.Path.GetFileName(run.RunDirectory)} for {meta.ServerName}. Reports will overwrite the original folder.");
+            MessageBox.Show(this,
+                $"{mode} prepared for server '{meta.ServerName}'.\n\n"
+                + "1. Re-enter the SQL password (if using SQL Login) and click Verify Access.\n"
+                + (editMode
+                    ? "2. Adjust the database, LLM details, or manual CSV as needed.\n"
+                    : "2. The stored databases and checklist items are preselected.\n")
+                + "3. Continue to the checklist and start the evaluation.\n\n"
+                + "The reports will be regenerated in the original run folder.",
+                mode + " evaluation",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
+        private void SelectAuthMethod(bool sqlLogin) => AuthMethodCombo.SelectedIndex = sqlLogin ? 1 : 0;
+
+        // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
+        private SQLAuditor.Lib.RunInputs BuildRunInputs()
+        {
+            var isSqlAuth = string.Equals(
+                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
+                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            return new SQLAuditor.Lib.RunInputs
+            {
+                Fqdn = string.IsNullOrWhiteSpace(FqdnText.Text) ? null : FqdnText.Text.Trim(),
+                AuthMethod = isSqlAuth ? "SQL Login" : "Windows Authentication",
+                SqlUser = isSqlAuth && !string.IsNullOrWhiteSpace(SqlUserBox.Text) ? SqlUserBox.Text.Trim() : null,
+                LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrlText.Text) ? null : LlmBaseUrlText.Text.Trim(),
+                LlmModel = string.IsNullOrWhiteSpace(LlmModelText.Text) ? null : LlmModelText.Text.Trim(),
+            };
+        }
+
+        private void ApplyResumeDatabaseSelection()
+        {
+            if (_resumeDatabases == null || _resumeDatabases.Count == 0) return;
+            var wanted = new System.Collections.Generic.HashSet<string>(_resumeDatabases, StringComparer.OrdinalIgnoreCase);
+            var matched = 0;
+            foreach (var option in _databaseOptionCheckBoxes)
+            {
+                if (option.Tag is string name && wanted.Contains(name))
+                {
+                    option.IsChecked = true;
+                    matched++;
+                }
+            }
+            if (matched > 0) Log($"Preselected {matched} database(s) from the previous run.");
+
+            // Rerun and Edit both reuse the databases from the previous run, so the selection is locked.
+            if (matched > 0 && _resumeRunDirectory != null)
+            {
+                DatabaseSelectorToggle.IsChecked = false;
+                DatabaseSelectorToggle.IsEnabled = false;
+                Log("Database selection is locked to the previous run's databases.");
+            }
+        }
+
+        // On rerun the checklist is fixed to the previous run's items; Edit still allows changes.
+        private void ApplyChecklistLockForResume()
+        {
+            if (_resumeRunDirectory == null || _resumeIsEdit) return;
+
+            foreach (var areaObj in ChecklistTree.Items)
+            {
+                if (areaObj is System.Windows.Controls.TreeViewItem areaNode
+                    && areaNode.Header is System.Windows.Controls.StackPanel sp)
+                {
+                    foreach (var child in sp.Children)
+                        if (child is System.Windows.Controls.CheckBox areaCb) areaCb.IsEnabled = false;
+                }
+            }
+            foreach (var cb in EnumerateChecklistItemCheckBoxes())
+                cb.IsEnabled = false;
+            if (SelectAllChecklistCb != null) SelectAllChecklistCb.IsEnabled = false;
+
+            Log("Checklist is locked for this rerun (using the previous run's items). Use Edit to change the selection.");
+        }
+
+        private void ApplyResumeChecklistSelection()
+        {
+            if (_resumeSelectedItemIds == null || _resumeSelectedItemIds.Count == 0) return;
+            var wanted = new System.Collections.Generic.HashSet<string>(_resumeSelectedItemIds, StringComparer.OrdinalIgnoreCase);
+            var matched = 0;
+            foreach (var cb in EnumerateChecklistItemCheckBoxes())
+            {
+                if (cb.Tag is SQLAuditor.Lib.ChecklistItem item)
+                {
+                    var shouldCheck = wanted.Contains(item.Id);
+                    cb.IsChecked = shouldCheck;
+                    if (shouldCheck) matched++;
+                }
+            }
+            SyncSelectAllState();
+            if (matched > 0) Log($"Preselected {matched} checklist item(s) from the previous run. Adjust the selection if needed.");
+        }
+
+        private void ClearResumeState()
+        {
+            _resumeRunDirectory = null;
+            _resumeIsEdit = false;
+            _resumeFqdn = null;
+            _resumeDatabases = null;
+            _resumeSelectedItemIds = null;
+        }
+
         private void ExitSummaryBtn_Click(object sender, RoutedEventArgs e)
         {
             HandleExitNavigation();
@@ -2099,7 +2270,13 @@ namespace SQLAuditor.Wpf
             _isVerified = false;
             _auditor = null;
             ResetDatabaseSelection();
-            RefreshPreviousEvaluationOffer();
+            // Pointing at a different server ends any rerun/edit resume so a fresh run folder is used.
+            if (_resumeRunDirectory != null && _resumeFqdn != null
+                && !string.Equals(FqdnText.Text?.Trim(), _resumeFqdn, StringComparison.OrdinalIgnoreCase))
+            {
+                ClearResumeState();
+                Log("Server changed \u2014 rerun/edit link cleared; a new run folder will be created.");
+            }
             if (hadConnectionState)
                 AccessStatus.Text = "Connection details changed. Verify access again.";
             UpdateStageIndicators();
@@ -2271,6 +2448,7 @@ namespace SQLAuditor.Wpf
                     _auditor = candidateAuditor;
                     _isVerified = true;
                     PopulateDatabaseSelection(databases);
+                    ApplyResumeDatabaseSelection();
                     AccessStatus.Text = databases.Length == 0
                         ? $"Verified: {fqdn}. No accessible user databases found."
                         : $"Verified: {fqdn}. {databases.Length} database(s) available.";
@@ -2293,7 +2471,6 @@ namespace SQLAuditor.Wpf
             {
                 _isVerifyingSql = false;
                 VerifyBtn.IsEnabled = true;
-                RefreshPreviousEvaluationOffer();
                 UpdateStartEvaluationEnabled();
                 UpdateStageIndicators();
             }
@@ -2350,12 +2527,6 @@ namespace SQLAuditor.Wpf
         // The ONLY control that navigates from Login to the Checklist page.
         private async void StartEvaluationBtn_Click(object sender, RoutedEventArgs e)
         {
-            if (ReusePreviousEvaluation)
-            {
-                OpenPreviousEvaluation();
-                return;
-            }
-
             var targetDatabases = GetSelectedDatabaseNames();
             if (!_isVerified || targetDatabases.Length == 0) return;
 
@@ -2370,6 +2541,8 @@ namespace SQLAuditor.Wpf
             try
             {
                 await PopulateChecklistStructureAsync();
+                ApplyResumeChecklistSelection();
+                ApplyChecklistLockForResume();
                 Log("Checklist auto-loaded.");
             }
             catch (Exception ex)
@@ -2385,142 +2558,15 @@ namespace SQLAuditor.Wpf
 
             if (StartEvaluationBtn != null)
             {
-                StartEvaluationBtn.IsEnabled = ready || ReusePreviousEvaluation;
-                StartEvaluationBtn.Content = ReusePreviousEvaluation
-                    ? "Open Previous Results"
-                    : "Continue to Checklist";
+                StartEvaluationBtn.IsEnabled = ready;
+                StartEvaluationBtn.Content = "Continue to Checklist";
             }
 
             if (AddCustomChecklistItemBtn != null)
             {
-                AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified;
-            }
-        }
-
-        private bool ReusePreviousEvaluation =>
-            _previousEvaluations.Count > 0
-            && UsePreviousEvaluationRadio?.IsChecked == true
-            && SelectedPreviousEvaluation != null;
-
-        private SQLAuditor.Lib.PreviousEvaluation? SelectedPreviousEvaluation =>
-            PreviousEvaluationList?.SelectedItem as SQLAuditor.Lib.PreviousEvaluation;
-
-        // Looks for the most recent stored evaluations of the just-verified server and offers them
-        // as an alternative to running the full audit again.
-        private void RefreshPreviousEvaluationOffer()
-        {
-            _previousEvaluations = new();
-
-            if (_isVerified && _auditor != null)
-            {
-                try
-                {
-                    _previousEvaluations = SQLAuditor.Lib.PreviousEvaluationStore
-                        .FindRecentForServer(_auditor.ConnectionString, 5)
-                        .ToList();
-                }
-                catch (Exception ex)
-                {
-                    Log("Could not read previous evaluations: " + ex.Message);
-                }
-            }
-
-            if (PreviousEvaluationPanel == null) return;
-
-            if (_previousEvaluations.Count == 0)
-            {
-                if (PreviousEvaluationList != null) PreviousEvaluationList.ItemsSource = null;
-                PreviousEvaluationPanel.Visibility = Visibility.Collapsed;
-                if (RunNewEvaluationRadio != null) RunNewEvaluationRadio.IsChecked = true;
-                UpdateStartEvaluationEnabled();
-                return;
-            }
-
-            var serverName = _previousEvaluations[0].Metadata.ServerName;
-            PreviousEvaluationServerText.Text = $"Server: {serverName}";
-            PreviousEvaluationList.ItemsSource = _previousEvaluations;
-            PreviousEvaluationList.SelectedIndex = 0;
-            PreviousEvaluationPanel.Visibility = Visibility.Visible;
-            RunNewEvaluationRadio.IsChecked = true;
-            UpdatePreviousEvaluationListState();
-
-            Log($"{_previousEvaluations.Count} previous evaluation(s) found for {serverName}.");
-            UpdateStartEvaluationEnabled();
-        }
-
-        // The run list is only actionable while "Use Previous Evaluation" is selected.
-        private void UpdatePreviousEvaluationListState()
-        {
-            if (PreviousEvaluationList == null) return;
-            PreviousEvaluationList.IsEnabled = UsePreviousEvaluationRadio?.IsChecked == true;
-        }
-
-        private void EvaluationSource_Changed(object sender, RoutedEventArgs e)
-        {
-            if (_previousEvaluations.Count == 0) return;
-
-            UpdatePreviousEvaluationListState();
-
-            if (UsePreviousEvaluationRadio?.IsChecked == true
-                && PreviousEvaluationList != null
-                && PreviousEvaluationList.SelectedItem == null)
-            {
-                PreviousEvaluationList.SelectedIndex = 0;
-            }
-
-            Log(ReusePreviousEvaluation
-                ? $"Using the previous evaluation stored in {SelectedPreviousEvaluation!.RunDirectory}."
-                : "Running a new evaluation for this server.");
-            UpdateStartEvaluationEnabled();
-        }
-
-        private void PreviousEvaluationList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-        {
-            var selected = SelectedPreviousEvaluation;
-            if (selected != null && UsePreviousEvaluationRadio?.IsChecked == true)
-                Log($"Selected previous evaluation from {selected.EvaluatedDisplay}.");
-            UpdateStartEvaluationEnabled();
-        }
-
-        // Reopens a stored run: the run directory becomes active and its persisted results are
-        // shown on the Summary page. No checklist item is executed again.
-        private bool OpenPreviousEvaluation()
-        {
-            var previous = SelectedPreviousEvaluation;
-            if (previous == null) return false;
-
-            if (!System.IO.File.Exists(previous.ResultsPath))
-            {
-                MessageBox.Show(
-                    "The stored results for this server are no longer available:\n\n" + previous.ResultsPath,
-                    "Previous evaluation unavailable",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
-                RefreshPreviousEvaluationOffer();
-                return false;
-            }
-
-            try
-            {
-                AuditOutputPaths.ResumeRun(previous.RunDirectory);
-                var results = LoadPersistedResults() ?? Array.Empty<ChecklistResult>();
-                UpdateSummaryView(results);
-                RefreshHistoricalManualAvailability();
-                _viewingPreviousEvaluation = true;
-                SetTabIndex(3);
-                UpdateStageIndicators();
-                Log($"Reusing previous evaluation from {previous.RunDirectory} ({results.Count} item(s)); no checks were re-executed.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log("Failed to open the previous evaluation: " + ex.Message);
-                MessageBox.Show(
-                    "The previous evaluation could not be opened:\n\n" + ex.Message,
-                    "Previous evaluation failed",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
-                return false;
+                // Rerun forbids adding checklist items; Edit still allows custom items.
+                var rerunLock = _resumeRunDirectory != null && !_resumeIsEdit;
+                AddCustomChecklistItemBtn.IsEnabled = ready && _isLlmVerified && !rerunLock;
             }
         }
 
@@ -3211,6 +3257,17 @@ namespace SQLAuditor.Wpf
             try
             {
                 var importFile = ReadManualChecksCsv(dialog.FileName);
+                try
+                {
+                    var runDir = AuditOutputPaths.CurrentRunDirectory;
+                    var target = System.IO.Path.Combine(runDir, "manual-checklist.csv");
+                    System.IO.File.Copy(dialog.FileName, target, overwrite: true);
+                    SQLAuditor.Lib.PreviousEvaluationStore.RecordManualCsv(runDir, "manual-checklist.csv");
+                }
+                catch (Exception copyEx)
+                {
+                    Log("Could not store the imported manual CSV in the run folder: " + copyEx.Message);
+                }
                 var (applied, ignored) = await ApplyImportedManualChecksAsync(importFile.Rows);
 
                 var issuePreview = string.Join("\n", importFile.Issues.Take(8));

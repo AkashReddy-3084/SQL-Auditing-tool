@@ -20,9 +20,36 @@ public sealed record EvaluationRunMetadata
     public string Status { get; init; } = string.Empty;
     public double? ScorePercent { get; init; }
 
+    // Inputs captured so a later session can rerun or edit this evaluation.
+    // The SQL password and the LLM API key are never persisted.
+    public string? Fqdn { get; init; }
+    public string? AuthMethod { get; init; }
+    public string? SqlUser { get; init; }
+    public IReadOnlyList<string>? Databases { get; init; }
+    public IReadOnlyList<string>? SelectedItemIds { get; init; }
+    public string? LlmBaseUrl { get; init; }
+    public string? LlmModel { get; init; }
+    public string? ManualCsvFileName { get; init; }
+
     [JsonIgnore]
     public TimeSpan? Duration =>
         DurationSeconds is null ? null : TimeSpan.FromSeconds(DurationSeconds.Value);
+}
+
+/// <summary>
+/// UI-supplied inputs captured with a run so it can be rerun or edited later. Never carries the
+/// SQL password or the LLM API key.
+/// </summary>
+public sealed record RunInputs
+{
+    public string? Fqdn { get; init; }
+    public string? AuthMethod { get; init; }
+    public string? SqlUser { get; init; }
+    public IReadOnlyList<string>? Databases { get; init; }
+    public IReadOnlyList<string>? SelectedItemIds { get; init; }
+    public string? LlmBaseUrl { get; init; }
+    public string? LlmModel { get; init; }
+    public string? ManualCsvFileName { get; init; }
 }
 
 /// <summary>A previous run offered back to the user, together with the directory that holds it.</summary>
@@ -75,11 +102,12 @@ public static class PreviousEvaluationStore
     };
 
     /// <summary>Writes the metadata for a run that has just finished executing.</summary>
-    public static void Record(string runDirectory, string? connectionString, DateTime startedAt, DateTime completedAt)
+    public static void Record(string runDirectory, string? connectionString, DateTime startedAt, DateTime completedAt, RunInputs? inputs = null)
     {
         if (string.IsNullOrWhiteSpace(runDirectory) || !Directory.Exists(runDirectory)) return;
 
         var (itemCount, status, score) = Summarize(Path.Combine(runDirectory, "checklist_results.json"));
+        var existing = Read(runDirectory);
         var metadata = new EvaluationRunMetadata
         {
             ServerName = AuditOutputPaths.ResolveServerName(connectionString),
@@ -89,9 +117,26 @@ public static class PreviousEvaluationStore
             ItemCount = itemCount,
             Status = status,
             ScorePercent = score,
+            Fqdn = inputs?.Fqdn ?? existing?.Fqdn,
+            AuthMethod = inputs?.AuthMethod ?? existing?.AuthMethod,
+            SqlUser = inputs?.SqlUser ?? existing?.SqlUser,
+            Databases = inputs?.Databases ?? existing?.Databases,
+            SelectedItemIds = inputs?.SelectedItemIds ?? existing?.SelectedItemIds,
+            LlmBaseUrl = inputs?.LlmBaseUrl ?? existing?.LlmBaseUrl,
+            LlmModel = inputs?.LlmModel ?? existing?.LlmModel,
+            ManualCsvFileName = inputs?.ManualCsvFileName ?? existing?.ManualCsvFileName,
         };
 
         Write(runDirectory, metadata);
+    }
+
+    /// <summary>Records the manual-checklist CSV copied into a run directory, preserving other metadata.</summary>
+    public static void RecordManualCsv(string runDirectory, string manualCsvFileName)
+    {
+        if (string.IsNullOrWhiteSpace(runDirectory) || !Directory.Exists(runDirectory)) return;
+        var existing = Read(runDirectory);
+        if (existing is null) return;
+        Write(runDirectory, existing with { ManualCsvFileName = manualCsvFileName });
     }
 
     /// <summary>
@@ -142,6 +187,31 @@ public static class PreviousEvaluationStore
             if (!File.Exists(Path.Combine(directory, "checklist_results.json"))) continue;
 
             var metadata = Read(directory) ?? Reconstruct(directory, serverName, startedAt);
+            if (metadata.ItemCount == 0) continue;
+
+            results.Add(new PreviousEvaluation { RunDirectory = directory, Metadata = metadata });
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Up to <paramref name="maxCount"/> most recent evaluations across every audited server on this
+    /// machine, newest first. Used by the Evaluations History window.
+    /// </summary>
+    public static IReadOnlyList<PreviousEvaluation> FindRecentAcrossServers(int maxCount = 5)
+    {
+        var results = new List<PreviousEvaluation>();
+        if (maxCount <= 0) return results;
+
+        foreach (var directory in AuditOutputPaths.GetRunDirectories())
+        {
+            if (results.Count >= maxCount) break;
+            if (!AuditOutputPaths.TryParseRunDirectoryName(directory, out var startedAt, out var directoryServer))
+                continue;
+            if (!File.Exists(Path.Combine(directory, "checklist_results.json"))) continue;
+
+            var metadata = Read(directory) ?? Reconstruct(directory, directoryServer, startedAt);
             if (metadata.ItemCount == 0) continue;
 
             results.Add(new PreviousEvaluation { RunDirectory = directory, Metadata = metadata });
