@@ -341,36 +341,101 @@
                                                 CornerRadius="10"
                                                 Padding="14">
                                             <StackPanel>
-                                                <TextBlock Text="Previous Evaluation Found" FontWeight="Bold" FontSize="15" />
+                                                <TextBlock Text="Previous Evaluations Found" FontWeight="Bold" FontSize="15" />
                                                 <TextBlock x:Name="PreviousEvaluationServerText"
                                                            Foreground="{StaticResource MutedBrush}"
                                                            FontSize="12"
                                                            Margin="0,2,0,10"
                                                            TextTrimming="CharacterEllipsis" />
 
-                                                <Grid Margin="0,0,0,4">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                    </Grid.RowDefinitions>
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Evaluated" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="PreviousEvaluationDateText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
-                                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Checklist" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
-                                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PreviousEvaluationItemsText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Status" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="PreviousEvaluationStatusText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Result" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,4" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="PreviousEvaluationScoreText" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
-                                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Duration" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,12,0" />
-                                                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="PreviousEvaluationDurationText" FontSize="12" FontWeight="SemiBold" />
-                                                </Grid>
+                                                <TextBlock Text="Showing the 5 most recent runs for this server."
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           FontSize="11"
+                                                           Margin="0,0,0,8" />
+
+                                                <ListBox x:Name="PreviousEvaluationList"
+                                                         MaxHeight="230"
+                                                         IsEnabled="False"
+                                                         Background="Transparent"
+                                                         BorderThickness="0"
+                                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                         SelectionChanged="PreviousEvaluationList_SelectionChanged">
+                                                    <ListBox.ItemContainerStyle>
+                                                        <Style TargetType="ListBoxItem">
+                                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                            <Setter Property="Padding" Value="0" />
+                                                            <Setter Property="Margin" Value="0,0,0,6" />
+                                                            <Setter Property="Template">
+                                                                <Setter.Value>
+                                                                    <ControlTemplate TargetType="ListBoxItem">
+                                                                        <Border x:Name="ItemBorder"
+                                                                                Background="White"
+                                                                                BorderBrush="#FFDCE6F2"
+                                                                                BorderThickness="1"
+                                                                                CornerRadius="8"
+                                                                                Padding="12,10">
+                                                                            <ContentPresenter />
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsSelected" Value="True">
+                                                                                <Setter TargetName="ItemBorder" Property="Background" Value="#FFEAF3FF" />
+                                                                                <Setter TargetName="ItemBorder" Property="BorderBrush" Value="#FF3B82F6" />
+                                                                                <Setter TargetName="ItemBorder" Property="BorderThickness" Value="2" />
+                                                                            </Trigger>
+                                                                            <MultiTrigger>
+                                                                                <MultiTrigger.Conditions>
+                                                                                    <Condition Property="IsMouseOver" Value="True" />
+                                                                                    <Condition Property="IsSelected" Value="False" />
+                                                                                </MultiTrigger.Conditions>
+                                                                                <Setter TargetName="ItemBorder" Property="Background" Value="#FFF5F9FF" />
+                                                                            </MultiTrigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Setter.Value>
+                                                            </Setter>
+                                                        </Style>
+                                                    </ListBox.ItemContainerStyle>
+                                                    <ListBox.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Grid>
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*" />
+                                                                    <ColumnDefinition Width="Auto" />
+                                                                </Grid.ColumnDefinitions>
+                                                                <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto" />
+                                                                    <RowDefinition Height="Auto" />
+                                                                </Grid.RowDefinitions>
+
+                                                                <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                           Text="{Binding EvaluatedDisplay}"
+                                                                           FontSize="13" FontWeight="SemiBold"
+                                                                           TextTrimming="CharacterEllipsis" />
+                                                                <Border Grid.Row="0" Grid.Column="1"
+                                                                        Background="#FFE8F0F9"
+                                                                        CornerRadius="10"
+                                                                        Padding="8,2"
+                                                                        VerticalAlignment="Center">
+                                                                    <TextBlock Text="{Binding ScoreDisplay}"
+                                                                               FontSize="12" FontWeight="Bold"
+                                                                               Foreground="#FF1D4ED8" />
+                                                                </Border>
+
+                                                                <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                                                                            Orientation="Horizontal" Margin="0,4,0,0">
+                                                                    <TextBlock Text="{Binding Metadata.ItemCount, StringFormat={}{0} items}"
+                                                                               Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                                                    <TextBlock Text="  •  " Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                                                    <TextBlock Text="{Binding Metadata.Status}"
+                                                                               Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                                                    <TextBlock Text="  •  " Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                                                    <TextBlock Text="{Binding DurationDisplay}"
+                                                                               Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                                                </StackPanel>
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ListBox.ItemTemplate>
+                                                </ListBox>
 
                                                 <RadioButton x:Name="RunNewEvaluationRadio"
                                                              GroupName="EvaluationSource"
@@ -381,10 +446,10 @@
                                                              ToolTip="Execute the full audit against this server again." />
                                                 <RadioButton x:Name="UsePreviousEvaluationRadio"
                                                              GroupName="EvaluationSource"
-                                                             Content="Use Previous Evaluation"
+                                                             Content="Use Selected Previous Evaluation"
                                                              Margin="0,8,0,0"
                                                              Checked="EvaluationSource_Changed"
-                                                             ToolTip="Open the stored results from the run above without executing the audit again." />
+                                                             ToolTip="Open the stored results from the run selected above without executing the audit again." />
                                             </StackPanel>
                                         </Border>
                                     </StackPanel>

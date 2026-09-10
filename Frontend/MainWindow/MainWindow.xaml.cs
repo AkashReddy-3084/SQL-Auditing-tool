@@ -119,8 +119,8 @@ namespace SQLAuditor.Wpf
         private bool _suppressDatabaseSelectionSync = false;
         private int _sqlConnectionInputsVersion = 0;
         private bool _isVerifyingSql = false;
-        // Latest stored evaluation for the currently verified server, offered as a reusable result.
-        private SQLAuditor.Lib.PreviousEvaluation? _previousEvaluation;
+        // Up to five most recent stored evaluations for the currently verified server, offered as reusable results.
+        private System.Collections.Generic.List<SQLAuditor.Lib.PreviousEvaluation> _previousEvaluations = new();
         // True while the Summary page is showing a reused run rather than one evaluated in this session.
         private bool _viewingPreviousEvaluation = false;
 
@@ -2398,19 +2398,26 @@ namespace SQLAuditor.Wpf
         }
 
         private bool ReusePreviousEvaluation =>
-            _previousEvaluation != null && UsePreviousEvaluationRadio?.IsChecked == true;
+            _previousEvaluations.Count > 0
+            && UsePreviousEvaluationRadio?.IsChecked == true
+            && SelectedPreviousEvaluation != null;
 
-        // Looks for the latest stored evaluation of the just-verified server and offers it as an
-        // alternative to running the full audit again.
+        private SQLAuditor.Lib.PreviousEvaluation? SelectedPreviousEvaluation =>
+            PreviousEvaluationList?.SelectedItem as SQLAuditor.Lib.PreviousEvaluation;
+
+        // Looks for the most recent stored evaluations of the just-verified server and offers them
+        // as an alternative to running the full audit again.
         private void RefreshPreviousEvaluationOffer()
         {
-            _previousEvaluation = null;
+            _previousEvaluations = new();
 
             if (_isVerified && _auditor != null)
             {
                 try
                 {
-                    _previousEvaluation = SQLAuditor.Lib.PreviousEvaluationStore.FindLatestForServer(_auditor.ConnectionString);
+                    _previousEvaluations = SQLAuditor.Lib.PreviousEvaluationStore
+                        .FindRecentForServer(_auditor.ConnectionString, 5)
+                        .ToList();
                 }
                 catch (Exception ex)
                 {
@@ -2420,34 +2427,58 @@ namespace SQLAuditor.Wpf
 
             if (PreviousEvaluationPanel == null) return;
 
-            if (_previousEvaluation == null)
+            if (_previousEvaluations.Count == 0)
             {
+                if (PreviousEvaluationList != null) PreviousEvaluationList.ItemsSource = null;
                 PreviousEvaluationPanel.Visibility = Visibility.Collapsed;
                 if (RunNewEvaluationRadio != null) RunNewEvaluationRadio.IsChecked = true;
                 UpdateStartEvaluationEnabled();
                 return;
             }
 
-            var metadata = _previousEvaluation.Metadata;
-            PreviousEvaluationServerText.Text = $"Server: {metadata.ServerName}";
-            PreviousEvaluationDateText.Text = _previousEvaluation.EvaluatedDisplay;
-            PreviousEvaluationItemsText.Text = $"{metadata.ItemCount} items";
-            PreviousEvaluationStatusText.Text = metadata.Status;
-            PreviousEvaluationScoreText.Text = _previousEvaluation.ScoreDisplay;
-            PreviousEvaluationDurationText.Text = _previousEvaluation.DurationDisplay;
+            var serverName = _previousEvaluations[0].Metadata.ServerName;
+            PreviousEvaluationServerText.Text = $"Server: {serverName}";
+            PreviousEvaluationList.ItemsSource = _previousEvaluations;
+            PreviousEvaluationList.SelectedIndex = 0;
             PreviousEvaluationPanel.Visibility = Visibility.Visible;
             RunNewEvaluationRadio.IsChecked = true;
+            UpdatePreviousEvaluationListState();
 
-            Log($"Previous evaluation found for {metadata.ServerName} ({_previousEvaluation.EvaluatedDisplay}, {metadata.ItemCount} items, {metadata.Status}).");
+            Log($"{_previousEvaluations.Count} previous evaluation(s) found for {serverName}.");
             UpdateStartEvaluationEnabled();
+        }
+
+        // The run list is only actionable while "Use Previous Evaluation" is selected.
+        private void UpdatePreviousEvaluationListState()
+        {
+            if (PreviousEvaluationList == null) return;
+            PreviousEvaluationList.IsEnabled = UsePreviousEvaluationRadio?.IsChecked == true;
         }
 
         private void EvaluationSource_Changed(object sender, RoutedEventArgs e)
         {
-            if (_previousEvaluation == null) return;
+            if (_previousEvaluations.Count == 0) return;
+
+            UpdatePreviousEvaluationListState();
+
+            if (UsePreviousEvaluationRadio?.IsChecked == true
+                && PreviousEvaluationList != null
+                && PreviousEvaluationList.SelectedItem == null)
+            {
+                PreviousEvaluationList.SelectedIndex = 0;
+            }
+
             Log(ReusePreviousEvaluation
-                ? $"Using the previous evaluation stored in {_previousEvaluation.RunDirectory}."
+                ? $"Using the previous evaluation stored in {SelectedPreviousEvaluation!.RunDirectory}."
                 : "Running a new evaluation for this server.");
+            UpdateStartEvaluationEnabled();
+        }
+
+        private void PreviousEvaluationList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            var selected = SelectedPreviousEvaluation;
+            if (selected != null && UsePreviousEvaluationRadio?.IsChecked == true)
+                Log($"Selected previous evaluation from {selected.EvaluatedDisplay}.");
             UpdateStartEvaluationEnabled();
         }
 
@@ -2455,7 +2486,7 @@ namespace SQLAuditor.Wpf
         // shown on the Summary page. No checklist item is executed again.
         private bool OpenPreviousEvaluation()
         {
-            var previous = _previousEvaluation;
+            var previous = SelectedPreviousEvaluation;
             if (previous == null) return false;
 
             if (!System.IO.File.Exists(previous.ResultsPath))

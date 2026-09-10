@@ -117,13 +117,25 @@ public static class PreviousEvaluationStore
     /// The most recent evaluation recorded for the server behind <paramref name="connectionString"/>,
     /// or null when that server has never been audited on this machine.
     /// </summary>
-    public static PreviousEvaluation? FindLatestForServer(string? connectionString)
+    public static PreviousEvaluation? FindLatestForServer(string? connectionString) =>
+        FindRecentForServer(connectionString, 1).FirstOrDefault();
+
+    /// <summary>
+    /// Up to <paramref name="maxCount"/> most recent evaluations recorded for the server behind
+    /// <paramref name="connectionString"/>, newest first. Empty when that server has never been
+    /// audited on this machine.
+    /// </summary>
+    public static IReadOnlyList<PreviousEvaluation> FindRecentForServer(string? connectionString, int maxCount = 5)
     {
+        var results = new List<PreviousEvaluation>();
+        if (maxCount <= 0) return results;
+
         var serverName = AuditOutputPaths.ResolveServerName(connectionString);
-        if (string.IsNullOrWhiteSpace(serverName)) return null;
+        if (string.IsNullOrWhiteSpace(serverName)) return results;
 
         foreach (var directory in AuditOutputPaths.GetRunDirectories())
         {
+            if (results.Count >= maxCount) break;
             if (!AuditOutputPaths.TryParseRunDirectoryName(directory, out var startedAt, out var directoryServer))
                 continue;
             if (!MatchesServer(directoryServer, serverName)) continue;
@@ -132,10 +144,10 @@ public static class PreviousEvaluationStore
             var metadata = Read(directory) ?? Reconstruct(directory, serverName, startedAt);
             if (metadata.ItemCount == 0) continue;
 
-            return new PreviousEvaluation { RunDirectory = directory, Metadata = metadata };
+            results.Add(new PreviousEvaluation { RunDirectory = directory, Metadata = metadata });
         }
 
-        return null;
+        return results;
     }
 
     private static bool MatchesServer(string directoryServer, string serverName) =>
