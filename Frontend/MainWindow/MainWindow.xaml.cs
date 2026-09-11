@@ -725,6 +725,7 @@ namespace SQLAuditor.Wpf
                 await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
                 UpdateEvaluationProgressDisplay();
+                LogPlatformSummary();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
                 UpdateSummaryView(LoadPersistedResults() ?? results);
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -744,6 +745,19 @@ namespace SQLAuditor.Wpf
             {
                 _isEvaluating = false;
             }
+        }
+
+        // Mirrors the banner the CLI and MCP hosts print, so a platform-excluded item is
+        // visibly accounted for here instead of silently appearing as Not Applicable.
+        private void LogPlatformSummary()
+        {
+            if (_auditor?.LastDetectedPlatform is not { } platform
+                || platform.Platform == SQLAuditor.Lib.PlatformApplicability.PlatformUnknown)
+                return;
+
+            Log($"Detected platform: {platform.Display} (EngineEdition {platform.EngineEdition}).");
+            if (_auditor.LastPlatformExclusionCount > 0)
+                Log($"{_auditor.LastPlatformExclusionCount} item(s) recorded as Not Applicable to this platform - no script ran and no model was called for them.");
         }
 
         private async void RunAllBtn_Click(object sender, RoutedEventArgs e)
@@ -791,6 +805,7 @@ namespace SQLAuditor.Wpf
                 }
                 var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
                 UpdateEvaluationProgressDisplay();
+                LogPlatformSummary();
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
                 UpdateSummaryView(results);
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1373,6 +1388,9 @@ namespace SQLAuditor.Wpf
             if (string.Equals(outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return "Evaluating";
             if (string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Passed", StringComparison.OrdinalIgnoreCase)) return "Passed";
             if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase) && string.Equals(outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) return "Pending Manual Evaluation";
+            // Any other NeedsReview means the tool could not assess the item. Falling through to
+            // "Failed" reported that as a control gap and disagreed with checklist_results.json.
+            if (string.Equals(outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) return "Needs Review";
             if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(outcome)) return SQLAuditor.Lib.SkippedEvaluation.Outcome;
             if (SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(outcome)) return "Not Applicable";
             if (string.Equals(outcome, "Not Started", StringComparison.OrdinalIgnoreCase)) return "Not Started";
@@ -1385,6 +1403,7 @@ namespace SQLAuditor.Wpf
             if (string.Equals(status, "Evaluating", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DarkOrange;
             if (string.Equals(status, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DodgerBlue;
             if (string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.Goldenrod;
+            if (string.Equals(status, "Needs Review", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.Goldenrod;
             if (SQLAuditor.Lib.SkippedEvaluation.IsSkippedOutcome(status)) return System.Windows.Media.Brushes.SlateGray;
             if (string.Equals(status, "Not Started", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.DimGray;
             if (string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)) return System.Windows.Media.Brushes.SlateGray;
@@ -1412,6 +1431,7 @@ namespace SQLAuditor.Wpf
                 || string.Equals(status, "Skipped", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Needs Review", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Complete", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(status, "Error", StringComparison.OrdinalIgnoreCase);

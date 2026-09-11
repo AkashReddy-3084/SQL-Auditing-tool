@@ -166,11 +166,13 @@ SET @Coverage = CASE
 
 IF @DbCount = 0 OR @TotalTables = 0
 BEGIN
-    SET @Score  = 0;
-    SET @Result = N'NeedsReview';
+    -- No user tables exist to carry business rules, so the control has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score  = NULL;
+    SET @Result = N'Not Applicable';
     SET @Finding = N'No accessible user database containing user tables was found (databases inspected: '
                    + @DatabaseQueried
-                   + N'). Business rule validation coverage could not be measured from schema metadata and requires manual review.';
+                   + N'), so business rule validation coverage does not apply.';
 END
 ELSE
 BEGIN

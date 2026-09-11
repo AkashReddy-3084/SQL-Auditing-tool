@@ -4,7 +4,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
 DECLARE @Finding NVARCHAR(MAX) = 'Schema distribution in the current database could not be inspected';

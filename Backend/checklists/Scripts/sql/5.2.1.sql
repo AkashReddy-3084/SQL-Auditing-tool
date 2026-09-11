@@ -61,21 +61,21 @@ FROM {P}sys.tables t
 INNER JOIN {P}sys.schemas s ON s.schema_id = t.schema_id
 INNER JOIN {P}sys.columns c ON c.object_id = t.object_id AND c.is_computed = 0
 INNER JOIN {P}sys.types ty ON ty.user_type_id = c.user_type_id
-LEFT JOIN #LooseType lt1 ON lt1.RuleId = 1 AND lt1.TypeName = ty.name
-LEFT JOIN #LooseType lt3 ON lt3.RuleId = 3 AND lt3.TypeName = ty.name
+LEFT JOIN #LooseType lt1 ON lt1.RuleId = 1 AND lt1.TypeName = ty.name COLLATE DATABASE_DEFAULT
+LEFT JOIN #LooseType lt3 ON lt3.RuleId = 3 AND lt3.TypeName = ty.name COLLATE DATABASE_DEFAULT
 CROSS APPLY (SELECT (SELECT COUNT(*) FROM {P}sys.check_constraints cc WHERE cc.parent_object_id = t.object_id)
                   + (SELECT COUNT(*) FROM {P}sys.key_constraints kc WHERE kc.parent_object_id = t.object_id)
                   + (SELECT COUNT(*) FROM {P}sys.foreign_keys fk WHERE fk.parent_object_id = t.object_id) AS ConstraintCount) x
 WHERE t.is_ms_shipped = 0
-  AND EXISTS (SELECT 1 FROM #Pat p WHERE p.Kind = 1 AND (t.name LIKE p.Pattern OR s.name LIKE p.Pattern))
+  AND EXISTS (SELECT 1 FROM #Pat p WHERE p.Kind = 1 AND (t.name COLLATE DATABASE_DEFAULT LIKE p.Pattern OR s.name COLLATE DATABASE_DEFAULT LIKE p.Pattern))
 GROUP BY s.name, t.name;
 
 INSERT INTO #Val (DatabaseName, ValidationObjects)
 SELECT @dbn, COUNT(*)
 FROM {P}sys.objects o
 WHERE o.is_ms_shipped = 0
-  AND EXISTS (SELECT 1 FROM #ModType m WHERE m.TypeCode = o.type)
-  AND EXISTS (SELECT 1 FROM #Pat p WHERE p.Kind = 2 AND o.name LIKE p.Pattern);
+  AND EXISTS (SELECT 1 FROM #ModType m WHERE m.TypeCode = o.type COLLATE DATABASE_DEFAULT)
+  AND EXISTS (SELECT 1 FROM #Pat p WHERE p.Kind = 2 AND o.name COLLATE DATABASE_DEFAULT LIKE p.Pattern);
 ';
 
 WHILE EXISTS (SELECT 1 FROM #Db WHERE Processed = 0)
@@ -124,9 +124,25 @@ SET @Pct = CASE WHEN @Inbound = 0 THEN 0 ELSE (@Enforced * 100) / @Inbound END;
 IF @DbCount = 0
 BEGIN
     SET @DatabaseQueried = N'None';
-    SET @Finding = N'No database found to be queried';
-    SET @Score = 0;
-    SET @Result = 'Fail';
+    IF @SkipCount > 0
+    BEGIN
+        -- Databases were found but every probe failed, so the control is unverified. Report it
+        -- as a failure and carry the error text so the cause is visible in the evidence.
+        SET @Finding = N'All ' + CONVERT(nvarchar(10), @SkipCount)
+            + N' candidate database(s) failed to be probed, so inbound schema validation could not be '
+            + N'verified. First error: '
+            + ISNULL((SELECT TOP (1) k.ErrorText FROM #Skipped k ORDER BY k.DatabaseName), N'unknown');
+        SET @Score = 0;
+        SET @Result = 'Fail';
+    END
+    ELSE
+    BEGIN
+        -- No user database exists on this instance, so the control has nothing to apply to.
+        -- NULL score marks this Not Applicable rather than failed.
+        SET @Finding = N'No user database exists on this instance, so inbound schema validation does not apply.';
+        SET @Score = NULL;
+        SET @Result = 'Not Applicable';
+    END
 END
 ELSE
 BEGIN
@@ -156,7 +172,7 @@ BEGIN
                     ELSE 1
                  END;
 
-    SET @Result = CASE WHEN @Score = 3 THEN 'Pass' WHEN @Score = 2 THEN 'NeedsReview' ELSE 'Fail' END;
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
     SET @Finding = CASE
                       WHEN @Inbound = 0 AND @ValObjs = 0

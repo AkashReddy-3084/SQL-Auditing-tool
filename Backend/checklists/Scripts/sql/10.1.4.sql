@@ -1,6 +1,6 @@
-SET NOCOUNT ON;
+﻿SET NOCOUNT ON;
 
-DECLARE @Result varchar(10);
+DECLARE @Result varchar(20);
 DECLARE @Score int;
 DECLARE @DatabaseQueried nvarchar(128);
 DECLARE @Finding nvarchar(max);
@@ -128,4 +128,20 @@ END;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

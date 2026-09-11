@@ -1,4 +1,4 @@
-/*
+﻿/*
     Checklist Item : 5.3.5 - Cross-layer reconciliation (mart vs integration vs source counts)
     Scope          : DATABASE (all accessible online user databases)
     Type           : Read-only metadata inspection (catalog views only)
@@ -187,9 +187,13 @@ SET @Score = ISNULL(@Score, 2);
 SET @Result = CASE
                 WHEN @Score = 3 THEN N'Pass'
                 WHEN @Score = 1 THEN N'Fail'
-                WHEN @LayeredDbs = 0 AND (@FullReconDbs + @PartialReconDbs) = 0 THEN N'Manual Review'
+                WHEN @LayeredDbs = 0 AND (@FullReconDbs + @PartialReconDbs) = 0 THEN N'Not Applicable'
                 ELSE N'Partial'
               END;
+
+-- No multi-layer model exists here, so the control has nothing to apply to.
+-- NULL score marks this Not Applicable rather than failed.
+IF @Result = N'Not Applicable' SET @Score = NULL;
 
 SELECT @DatabaseQueried = ISNULL(STUFF((SELECT N', ' + s.DatabaseName
                                         FROM #Summary AS s
@@ -245,8 +249,8 @@ SET @Finding =
             THEN N'. Every inspected database that holds data compares counts across layers and retains the reconciliation output.'
         WHEN @Score = 1
             THEN N'. At least one multi-layer database compares no counts between its mart, integration and source layers, so silent load loss would go undetected.'
-        WHEN @Result = N'Manual Review'
-            THEN N'. No multi-layer (mart / integration / source) model and no reconciliation artifacts were detected, so cross-layer reconciliation may not apply here; confirm the platform design manually.'
+        WHEN @Result = N'Not Applicable'
+            THEN N'. No multi-layer (mart / integration / source) model and no reconciliation artifacts were detected, so cross-layer reconciliation does not apply to this platform.'
         ELSE N'. Reconciliation artifacts were found but coverage is incomplete or no reconciliation results are retained, so successful cross-layer count matching cannot be evidenced.'
       END;
 

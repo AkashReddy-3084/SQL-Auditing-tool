@@ -1,6 +1,6 @@
 SET NOCOUNT ON;
 
-DECLARE @Result varchar(10);
+DECLARE @Result varchar(20);
 DECLARE @Score int = 0;
 DECLARE @DatabaseQueried nvarchar(max) = N'None';
 DECLARE @Finding nvarchar(max) = N'No database found to be queried';
@@ -129,9 +129,10 @@ BEGIN
 END
 ELSE IF @FactCount = 0
 BEGIN
-    SET @Score = 3;
+    -- NULL score marks this Not Applicable rather than passed.
+    SET @Score = NULL;
     SET @DatabaseQueried = @DbList;
-    SET @Finding = N'No candidate fact tables (name pattern fact*/%fact%) found in queried user database(s); no duplicate-grain risk detected by naming convention.';
+    SET @Finding = N'No candidate fact tables (name pattern fact*/%fact%) found in queried user database(s); duplicate-grain checking does not apply.';
 END
 ELSE IF @Missing = 0
 BEGIN
@@ -161,6 +162,6 @@ BEGIN
         + CONVERT(varchar(12), @Pct) + N'% enforced). Examples: ' + @Sample + N'.';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN N'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

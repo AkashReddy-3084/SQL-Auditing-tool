@@ -1,6 +1,6 @@
 SET NOCOUNT ON;
 
-DECLARE @Result varchar(10);
+DECLARE @Result varchar(20);
 DECLARE @Score int;
 DECLARE @DatabaseQueried nvarchar(128);
 DECLARE @Finding nvarchar(max);

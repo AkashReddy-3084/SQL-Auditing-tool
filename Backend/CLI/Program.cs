@@ -356,6 +356,14 @@ namespace SQLAuditor
                 Console.CancelKeyPress -= onCancel;
             }
 
+            if (auditor.LastDetectedPlatform is { } detectedPlatform
+                && detectedPlatform.Platform != SQLAuditor.Lib.PlatformApplicability.PlatformUnknown)
+            {
+                Console.WriteLine($"Detected platform: {detectedPlatform.Display} (EngineEdition {detectedPlatform.EngineEdition}).");
+                if (auditor.LastPlatformExclusionCount > 0)
+                    Console.WriteLine($"{auditor.LastPlatformExclusionCount} item(s) recorded as Not Applicable to this platform - no script ran and no model was called for them.");
+            }
+
             // Always surface the manual verification guidance in the terminal for any
             // item that needs manual review, regardless of interactive/non-interactive
             // mode. The same guidance is persisted to the results files, but printing it
@@ -807,12 +815,9 @@ namespace SQLAuditor
             var recommendation = ReadValueOption(opts, "recommendation");
 
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
-            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation, out var markedNotApplicable))
+            if (auditor.ApplyEnrichment(id, finding, evidence, risk, recommendation))
             {
-                if (markedNotApplicable)
-                    Console.WriteLine($"Enriched [{id}] -> Outcome {SQLAuditor.Lib.NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail.");
-                else
-                    Console.WriteLine($"Enriched [{id}].");
+                Console.WriteLine($"Enriched [{id}].");
                 Console.WriteLine($"Outputs regenerated in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
                 return 0;
             }

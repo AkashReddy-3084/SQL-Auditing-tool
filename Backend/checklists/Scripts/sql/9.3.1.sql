@@ -1,4 +1,4 @@
-/* Checklist 9.3.1 - Consistency checks (DBCC CHECKDB) scheduled and monitored (SQL Server / Azure SQL MI)
+﻿/* Checklist 9.3.1 - Consistency checks (DBCC CHECKDB) scheduled and monitored (SQL Server / Azure SQL MI)
    Scope: SERVER. Strictly read-only.
    Evidence: an enabled SQL Agent job that runs DBCC CHECK* (or Ola Hallengren DatabaseIntegrityCheck),
    bound to an enabled schedule, with a recent successful outcome and failure notification configured. */
@@ -104,4 +104,20 @@ SET @Result = CASE WHEN @Score = 3 THEN N'Pass' WHEN @Score = 2 THEN N'Partial' 
 SET @DatabaseQueried = ISNULL(@DatabaseQueried, N'No database found to be queried');
 SET @Finding = ISNULL(@Finding, N'No evidence collected.');
 
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

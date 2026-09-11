@@ -121,9 +121,9 @@ WHERE ColumnKind = N'Descriptive';
 
 IF @FactTableCount = 0
 BEGIN
-    SET @DatabaseQueried = N'None';
-    SET @Finding = N'No database found to be queried';
-    SET @Score = 0;
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Finding = N'No fact tables were found in the queried database(s), so fact-table composition does not apply.';
+    SET @Score = NULL;
 END
 ELSE
 BEGIN
@@ -185,6 +185,7 @@ BEGIN
 END
 
 SET @Result = CASE
+                  WHEN @Score IS NULL THEN N'Not Applicable'
                   WHEN @Score = 3 THEN N'Pass'
                   WHEN @Score = 0 THEN N'Fail'
                   ELSE N'Partial'

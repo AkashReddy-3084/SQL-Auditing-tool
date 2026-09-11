@@ -1,10 +1,10 @@
--- Checklist: Bulk load patterns used (BULK INSERT / bcp / minimal logging) for large loads
+﻿-- Checklist: Bulk load patterns used (BULK INSERT / bcp / minimal logging) for large loads
 -- Scope: SERVER
 -- Scoring: 3 = bulk-load command syntax found in Agent job steps and at least one online user database allows minimal logging; 2 = bulk-load syntax found but every user database is in FULL recovery, or Azure SQL Database where load orchestration is external; 1 = only SSIS package steps found; 0 = no bulk-load evidence at all
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'Bulk-load evidence could not be collected';
@@ -77,4 +77,20 @@ FROM (
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

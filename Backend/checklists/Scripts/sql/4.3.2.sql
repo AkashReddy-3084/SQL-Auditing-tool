@@ -4,7 +4,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
 DECLARE @Finding NVARCHAR(MAX) = 'Table and index metadata could not be inspected in the current database';
@@ -64,7 +64,8 @@ BEGIN
 END
 ELSE IF @LargeCount = 0
 BEGIN
-    SET @Score = 3;
+    -- NULL score marks this Not Applicable rather than passed.
+    SET @Score = NULL;
     SET @Finding = 'None of the ' + CONVERT(NVARCHAR(20), @TotalTables) + ' user table(s) in ' + @DatabaseQueried
                  + ' exceeds ' + CONVERT(NVARCHAR(30), @RowThreshold)
                  + ' rows or carries a fact-style name, so no analytical table warrants a columnstore index.';
@@ -86,5 +87,5 @@ BEGIN
                  + ' rows or a name containing "fact". Largest uncovered: ' + @Examples + '.';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN 'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

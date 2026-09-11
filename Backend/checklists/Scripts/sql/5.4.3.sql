@@ -143,7 +143,7 @@ SELECT
     @MixedCollOut = SUM(CASE WHEN c.collation_name IS NOT NULL AND c.collation_name <> @DbCollIn THEN 1 ELSE 0 END),
     @DistinctCollOut = COUNT(DISTINCT c.collation_name),
     @UnboundedOut = SUM(CASE WHEN c.max_length = -1 THEN 1 ELSE 0 END),
-    @AnsiOut = d.is_ansi_warnings_on
+    @AnsiOut = MAX(CONVERT(int, d.is_ansi_warnings_on))
 FROM ' + QUOTENAME(@DbName) + N'.sys.columns AS c
 INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.types AS t ON c.user_type_id = t.user_type_id
 INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.tables AS tb ON c.object_id = tb.object_id

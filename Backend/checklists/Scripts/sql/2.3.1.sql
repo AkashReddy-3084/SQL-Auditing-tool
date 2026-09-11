@@ -190,8 +190,9 @@ ELSE IF @JobsWithFailureAction > 0 OR @JobsWithNotifyFail > 0
 
 IF @HasEtlSurface = 0
 BEGIN
-    SET @Score = 0;
-    SET @Finding = N'No database found to be queried for ETL error-handling artifacts (no SSIS packages, ETL-like modules, or enabled Agent jobs). ' + @EvidenceParts;
+    -- ETL may run entirely outside this engine, so absence here is not evidence of a gap.
+    SET @Score = 1;
+    SET @Finding = N'No ETL surface (SSIS package, ETL-like module or enabled Agent job) exists in this engine, so ETL error handling could not be assessed here; any orchestration outside SQL Server is not visible to this check. ' + @EvidenceParts;
     SET @DatabaseQueried = N'None.';
 END
 ELSE IF (@StrongSsis = 1 OR @StrongTsql = 1)
@@ -214,7 +215,15 @@ BEGIN
     SET @DatabaseQueried = CASE WHEN @SsisDbExists = 1 THEN N'SSISDB; user databases; msdb' ELSE N'user databases; msdb' END;
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE
+                  WHEN @HasEtlSurface = 0 THEN 'Not Applicable'
+                  WHEN @Score >= 2 THEN 'Pass'
+                  ELSE 'Fail'
+              END;
+
+-- No ETL surface exists in this engine, so the control has nothing to apply to.
+-- NULL score marks this Not Applicable rather than failed.
+IF @Result = 'Not Applicable' SET @Score = NULL;
 
 SELECT
     @Result AS Result,

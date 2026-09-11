@@ -1,10 +1,10 @@
--- Checklist: Backup failures alerted and monitored
+﻿-- Checklist: Backup failures alerted and monitored
 -- Scope: SERVER
 -- Scoring: 3 = enabled alerts on backup error numbers 3041/18204/18210 are wired to an operator AND backup jobs notify on failure; 2 = alerts wired to an operator, or notifying backup jobs plus an enabled operator, or Azure SQL Database platform monitoring; 1 = only one isolated signal (alert, notifying job or operator); 0 = no backup failure alerting evidence
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'Backup failure alerting evidence could not be collected from this instance';
@@ -27,10 +27,12 @@ END
 ELSE
 BEGIN
     BEGIN TRY
-        SET @Sql = N'SELECT @a = COUNT(*),
-       @n = ISNULL(SUM(CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysnotifications AS sn WHERE sn.alert_id = a.id) THEN 1 ELSE 0 END), 0)
-FROM msdb.dbo.sysalerts AS a
-WHERE a.enabled = 1 AND a.message_id IN (3041, 18204, 18210);';
+        SET @Sql = N'SELECT @a = COUNT(*), @n = ISNULL(SUM(z.notified), 0)
+FROM (
+    SELECT CASE WHEN EXISTS (SELECT 1 FROM msdb.dbo.sysnotifications AS sn WHERE sn.alert_id = a.id) THEN 1 ELSE 0 END AS notified
+    FROM msdb.dbo.sysalerts AS a
+    WHERE a.enabled = 1 AND a.message_id IN (3041, 18204, 18210)
+) AS z;';
         EXEC sp_executesql @Sql, N'@a INT OUTPUT, @n INT OUTPUT',
              @a = @Alerts OUTPUT, @n = @AlertsNotifying OUTPUT;
     END TRY
@@ -90,4 +92,20 @@ WHERE o.enabled = 1 AND (o.email_address IS NOT NULL OR o.netsend_address IS NOT
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

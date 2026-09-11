@@ -139,14 +139,16 @@ SELECT @DbCount = COUNT(*), @Score = MIN(s.DbScore) FROM #Scores AS s;
 
 IF ISNULL(@DbCount, 0) = 0
 BEGIN
-    SET @Score = 1;
-    SET @Result = 'NeedsReview';
+    -- No user database exists, so the control has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score = NULL;
+    SET @Result = 'Not Applicable';
     SET @DatabaseQueried = ISNULL(CONVERT(nvarchar(256), SERVERPROPERTY('ServerName')), N'Unknown');
-    SET @Finding = N'No accessible user database was found on this instance, so index and constraint management during large loads could not be assessed. Grant read access to the target databases and re-run this check.';
+    SET @Finding = N'No accessible user database was found on this instance, so index and constraint management during large loads does not apply.';
 END
 ELSE
 BEGIN
-    SET @Result = CASE WHEN @Score = 3 THEN 'Pass' WHEN @Score = 2 THEN 'NeedsReview' ELSE 'Fail' END;
+    SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
     SELECT @DatabaseQueried = STUFF((
         SELECT N', ' + s.DbName
