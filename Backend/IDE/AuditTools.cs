@@ -165,6 +165,14 @@ public static class AuditTools
         if (unknown.Length > 0)
             sb.AppendLine("Skipped unknown IDs: " + string.Join(", ", unknown));
 
+        if (auditor.LastDetectedPlatform is { } detectedPlatform
+            && detectedPlatform.Platform != PlatformApplicability.PlatformUnknown)
+        {
+            sb.AppendLine($"Detected platform: {detectedPlatform.Display} (EngineEdition {detectedPlatform.EngineEdition}).");
+            if (auditor.LastPlatformExclusionCount > 0)
+                sb.AppendLine($"{auditor.LastPlatformExclusionCount} item(s) recorded as Not Applicable to this platform \u2014 no script ran and no model was called for them.");
+        }
+
         if (useHistoricalManualResults.Value)
         {
             var historicalIds = HistoricalManualResultsStore.AvailableIds();
@@ -835,13 +843,9 @@ public static class AuditTools
             return Task.FromResult("Error: 'id' is required.");
 
         var auditor = new Auditor(string.Empty);
-        if (auditor.ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out var markedNotApplicable))
+        if (auditor.ApplyEnrichment(id, finding, evidence, riskImpact, recommendation))
             return Task.FromResult(
-                $"Enriched [{id}]"
-                + (markedNotApplicable
-                    ? $" -> Outcome {NotApplicableEvidence.Outcome}: the evidence declares the control not applicable, so the item is excluded from every score and listed on the 'Not Applicable Items' sheet. Report it as Not Applicable, not as Pass or Fail."
-                    : ".")
-                + $" Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}.");
+                $"Enriched [{id}]. Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}.");
 
         return Task.FromResult(
             $"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");

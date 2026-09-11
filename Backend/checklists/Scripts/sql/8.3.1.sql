@@ -142,9 +142,11 @@ DECLARE @Result  nvarchar(20),
 
 IF @DwDbCount = 0 OR @DatabaseQueried IS NULL
 BEGIN
-    SET @Score           = 0;
+    -- No DW/mart database exists, so the control has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score           = NULL;
     SET @DatabaseQueried = N'None';
-    SET @Finding         = N'No database found to be queried';
+    SET @Finding         = N'No data-warehouse or mart database could be identified or probed on this instance, so data-dictionary coverage was never assessed. Confirm manually which databases serve as marts.';
 END
 ELSE IF (@TablePct >= 90.0 AND @ColPct >= 80.0) OR @DwWithDict = @DwDbCount
 BEGIN
@@ -186,7 +188,11 @@ BEGIN
                  + N' columns carry MS_Description extended properties, and no dedicated data dictionary/catalog table or view exists.';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE
+                  WHEN @DatabaseQueried = N'None' THEN 'Not Applicable'
+                  WHEN @Score >= 2 THEN 'Pass'
+                  ELSE 'Fail'
+              END;
 
 SELECT
     @Result          AS Result,

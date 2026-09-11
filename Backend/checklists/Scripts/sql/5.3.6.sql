@@ -63,18 +63,20 @@ DECLARE @MonitorObjectCount int;
 BEGIN TRY
     IF DB_ID(N'msdb') IS NOT NULL AND @IsAzure = 0
     BEGIN
-        SELECT @JobMonitorCount = COUNT(*)
+        -- msdb is reached through dynamic SQL so the batch still binds where msdb does not exist.
+        SET @Sql = N'SELECT @c = COUNT(*)
         FROM msdb.dbo.sysjobs j
         INNER JOIN msdb.dbo.sysjobsteps js
             ON js.job_id = j.job_id
         WHERE j.enabled = 1
           AND (
-                js.command LIKE N'%unknown%member%'
-             OR js.command LIKE N'%default member%'
-             OR js.command LIKE N'%unknown dimension%'
-             OR js.command LIKE N'%late arriving%'
-             OR js.command LIKE N'%late-arriving%'
-          );
+                js.command LIKE N''%unknown%member%''
+             OR js.command LIKE N''%default member%''
+             OR js.command LIKE N''%unknown dimension%''
+             OR js.command LIKE N''%late arriving%''
+             OR js.command LIKE N''%late-arriving%''
+          );';
+        EXEC sys.sp_executesql @Sql, N'@c int OUTPUT', @c = @JobMonitorCount OUTPUT;
     END
 END TRY
 BEGIN CATCH
@@ -388,9 +390,10 @@ BEGIN
 END
 ELSE IF @totalDims = 0
 BEGIN
-    SET @Score = 0;
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score = NULL;
     SET @Finding = N'Queried ' + CONVERT(nvarchar(10), @dbCount)
-        + N' database(s); no dimension-like tables (dim*/%dimension%) were found, so unknown/default member usage monitoring could not be assessed';
+        + N' database(s); no dimension-like tables (dim*/%dimension%) were found, so unknown/default member monitoring does not apply';
 END
 ELSE IF @totalMonitors > 0
 BEGIN
@@ -436,6 +439,6 @@ BEGIN
         + N'). Monitoring coverage appears incomplete';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN 'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

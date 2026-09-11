@@ -1,10 +1,10 @@
--- Checklist: Failures trigger notifications (email/alert/monitoring)
+﻿-- Checklist: Failures trigger notifications (email/alert/monitoring)
 -- Scope: SERVER
 -- Scoring: 3 = every enabled Agent job notifies on failure and a deliverable operator or mail profile exists; 2 = 75% or more of enabled jobs notify, or no jobs but notified alerts/operators exist, or Azure SQL Database; 1 = partial notification coverage or notification infrastructure only; 0 = no job notifies and no operator, mail profile or notified alert exists
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'SQL Agent notification metadata could not be read';
@@ -85,4 +85,20 @@ SELECT @o = (SELECT COUNT(*) FROM msdb.dbo.sysoperators WHERE enabled = 1 AND em
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

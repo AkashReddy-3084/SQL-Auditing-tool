@@ -210,8 +210,9 @@ BEGIN
 END
 ELSE IF @TotalPartitionedTables = 0
 BEGIN
-    SET @Score = 3;
-    SET @Finding = N'No partitioned user tables found in accessible databases; partition alignment / sliding-window SWITCH pattern is not applicable (N/A pass). Databases checked: ' + CAST(@DatabasesQueried AS NVARCHAR(20)) + N'.';
+    -- NULL score marks this Not Applicable rather than passed.
+    SET @Score = NULL;
+    SET @Finding = N'No partitioned user tables found in accessible databases; partition alignment / sliding-window SWITCH pattern does not apply. Databases checked: ' + CAST(@DatabasesQueried AS NVARCHAR(20)) + N'.';
     SET @DatabaseQueried = CASE WHEN @DatabasesQueried = 0 THEN N'none' ELSE N'all_accessible' END;
 END
 ELSE IF @TotalMisaligned = 0 AND @TotalSliding = @TotalPartitionedTables AND @TotalFullyAligned = @TotalPartitionedTables
@@ -239,7 +240,7 @@ BEGIN
     SET @DatabaseQueried = N'all_accessible';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN N'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 IF EXISTS (SELECT 1 FROM #Results WHERE PartitionedTableCount > 0 AND Detail IS NOT NULL)
 BEGIN

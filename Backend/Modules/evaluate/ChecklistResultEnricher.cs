@@ -59,9 +59,11 @@ public static class ChecklistResultEnricher
         if (result == null) return result!;
 
         var isSkipped = SkippedEvaluation.IsSkippedOutcome(result.Outcome);
+        // Not Applicable is settled deterministically upstream. AI-authored evidence wording
+        // is deliberately not consulted here - inferring it from an absence of values is what
+        // made the outcome vary between hosts and between runs.
         var isNotApplicable = result.NotApplicable == true
-            || NotApplicableEvidence.IsNotApplicableOutcome(result.Outcome)
-            || NotApplicableEvidence.IsMarked(result.Evidence);
+            || NotApplicableEvidence.IsNotApplicableOutcome(result.Outcome);
 
         if (isSkipped)
         {
@@ -156,12 +158,14 @@ public static class ChecklistResultEnricher
     }
 
     // Rubric section 1: the 0-3 score an outcome maps to when the engine did not supply one.
+    // An unrecognised outcome is unverified, so it scores as a partial - never as a
+    // control that is in place.
     public static int DeriveScore(string? outcome) => outcome?.Trim().ToLowerInvariant() switch
     {
         "pass" => 3,
         "fail" => 0,
         "needsreview" or "needs review" => 1,
-        _ => 2,
+        _ => 1,
     };
 
     public static string DefaultRiskImpact(int? score) => score switch

@@ -1,6 +1,6 @@
 SET NOCOUNT ON;
 
-DECLARE @Result varchar(10) = 'Fail';
+DECLARE @Result varchar(20) = 'Fail';
 DECLARE @Score int = 0;
 DECLARE @DatabaseQueried nvarchar(max) = N'None';
 DECLARE @Finding nvarchar(max) = N'No database found to be queried';
@@ -104,27 +104,28 @@ BEGIN
                 OR o.name LIKE N''%rollup%''
                 OR o.name LIKE N''%total%''
              )
-             AND EXISTS (
-                SELECT 1
-                FROM ' + QUOTENAME(@DbName) + N'.sys.objects d
-                WHERE d.type IN (''U'', ''V'')
-                  AND d.is_ms_shipped = 0
-                  AND (
-                        d.name LIKE N''%detail%''
-                     OR d.name LIKE N''%fact%''
-                     OR d.name LIKE N''%txn%''
-                     OR d.name LIKE N''%line%''
-                  )
-                  AND (
-                        REPLACE(REPLACE(LOWER(o.name), ''aggregate'', ''''), ''agg'', '''') LIKE N''%'' + REPLACE(REPLACE(LOWER(d.name), ''detail'', ''''), ''fact'', '''') + N''%''
-                     OR REPLACE(REPLACE(LOWER(d.name), ''detail'', ''''), ''fact'', '''') LIKE N''%'' + REPLACE(REPLACE(LOWER(o.name), ''aggregate'', ''''), ''agg'', '''') + N''%''
-                     OR LEFT(LOWER(o.name), 6) = LEFT(LOWER(d.name), 6)
-                  )
-             )
+             AND px.HasPair = 1
             THEN o.object_id END)
     FROM ' + QUOTENAME(@DbName) + N'.sys.objects o
     INNER JOIN ' + QUOTENAME(@DbName) + N'.sys.schemas s ON s.schema_id = o.schema_id
     LEFT JOIN ' + QUOTENAME(@DbName) + N'.sys.sql_modules m ON m.object_id = o.object_id
+    OUTER APPLY (
+        SELECT TOP (1) 1 AS HasPair
+        FROM ' + QUOTENAME(@DbName) + N'.sys.objects d
+        WHERE d.type IN (''U'', ''V'')
+          AND d.is_ms_shipped = 0
+          AND (
+                d.name LIKE N''%detail%''
+             OR d.name LIKE N''%fact%''
+             OR d.name LIKE N''%txn%''
+             OR d.name LIKE N''%line%''
+          )
+          AND (
+                REPLACE(REPLACE(LOWER(o.name), ''aggregate'', ''''), ''agg'', '''') LIKE N''%'' + REPLACE(REPLACE(LOWER(d.name), ''detail'', ''''), ''fact'', '''') + N''%''
+             OR REPLACE(REPLACE(LOWER(d.name), ''detail'', ''''), ''fact'', '''') LIKE N''%'' + REPLACE(REPLACE(LOWER(o.name), ''aggregate'', ''''), ''agg'', '''') + N''%''
+             OR LEFT(LOWER(o.name), 6) = LEFT(LOWER(d.name), 6)
+          )
+    ) px
     WHERE o.is_ms_shipped = 0;
     ';
 
@@ -239,11 +240,17 @@ BEGIN
 END
 ELSE
 BEGIN
-    SET @Score = 0;
+    -- No user database exists, so the control has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score = NULL;
     SET @DatabaseQueried = N'None';
-    SET @Finding = N'No database found to be queried';
+    SET @Finding = N'No user database exists on this instance, so detail-to-aggregate consistency does not apply.';
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE
+                  WHEN @DatabaseQueried = N'None' THEN 'Not Applicable'
+                  WHEN @Score >= 2 THEN 'Pass'
+                  ELSE 'Fail'
+              END;
 
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

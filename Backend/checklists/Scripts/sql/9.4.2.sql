@@ -4,7 +4,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'Load job scheduling and run-duration evidence was unavailable';

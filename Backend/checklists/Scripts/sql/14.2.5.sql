@@ -56,7 +56,8 @@ BEGIN
 
     IF @ColumnstoreIndexCount = 0
     BEGIN
-        SET @Score = 3;
+        -- NULL score marks this Not Applicable rather than passed.
+        SET @Score = NULL;
         SET @Finding = N'Columnstore indexes are not used in this database; the rowgroup-health control is not applicable.';
     END
     ELSE
@@ -81,6 +82,7 @@ BEGIN
     END;
 
     SET @Result = CASE
+        WHEN @Score IS NULL THEN N'Not Applicable'
         WHEN @Score = 3 THEN N'Pass'
         WHEN @Score = 0 THEN N'Fail'
         ELSE N'Partial'

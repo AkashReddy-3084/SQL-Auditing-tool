@@ -15,6 +15,10 @@ internal static class SqlScriptResultParser
     // The generator contract derives Result as CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail'.
     private const int PassScore = 2;
 
+    /// <summary>Verdict for a control nobody could settle: written by the engine when a database
+    /// could not be evaluated, and by scripts that deliberately defer to a reviewer.</summary>
+    public const string Unassessed = "NeedsReview";
+
     private static readonly string[] ResultAliases = { "Result", "Outcome", "Status", "PassFail" };
     private static readonly string[] ScoreAliases = { "Score", "DbScore", "ItemScore" };
     private static readonly string[] DatabaseAliases = { "DatabaseQueried", "DatabasesQueried", "DatabasesVerified", "DbName", "DatabaseName", "Database" };
@@ -47,7 +51,21 @@ internal static class SqlScriptResultParser
 
         string? result = null;
         if (results.Count > 0)
-            result = results.Contains("Fail") ? "Fail" : "Pass";
+        {
+            // Every row declaring itself not applicable means the control does not exist to be
+            // assessed. A mix is judged on the rows that do apply. A row the engine could not
+            // evaluate yields no verdict, so it can only be settled by a reviewer - but a real
+            // Fail from a database that did evaluate is still a genuine finding and wins.
+            result = results.All(v => string.Equals(v, NotApplicableEvidence.Outcome, StringComparison.OrdinalIgnoreCase))
+                ? NotApplicableEvidence.Outcome
+                : results.Contains("Fail") ? "Fail"
+                : results.Contains(Unassessed) ? Unassessed
+                : "Pass";
+        }
+
+        if (string.Equals(result, NotApplicableEvidence.Outcome, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(result, Unassessed, StringComparison.Ordinal))
+            score = null;
 
         var databases = rows
             .Select(r => r.Get(DatabaseAliases))
@@ -76,9 +94,9 @@ internal static class SqlScriptResultParser
     private static int? TryGetScore(SqlScriptRow row)
         => int.TryParse(row.Get(ScoreAliases), out var n) ? n : null;
 
-    // A script-evaluated row must settle on Pass or Fail. Only 'Pass' and 'Fail' are
-    // honoured from the Result column; any other wording a script emits ('Review',
-    // 'Warning', 'Unknown') is resolved from that row's Score instead, so a
+    // A script-evaluated row settles on Pass, Fail or Not Applicable. Only those three are
+    // honoured from the Result column; any other wording a script emits ('Warning',
+    // 'Unknown') is resolved from that row's Score instead, so a
     // non-conforming script can never leave the item without a verdict. A row that
     // carries neither returns null and does not contribute to the aggregate.
     private static string? ResolveRowOutcome(SqlScriptRow row)
@@ -86,13 +104,28 @@ internal static class SqlScriptResultParser
         var raw = row.Get(ResultAliases)?.Trim();
         if (raw != null)
         {
+            // Written by the engine when a database could not be evaluated, and by scripts that
+            // defer to a reviewer. Checked before Score so it is never reinterpreted as a verdict.
+            if (IsDeferredToReviewer(raw)) return Unassessed;
             if (raw.StartsWith("pass", StringComparison.OrdinalIgnoreCase)) return "Pass";
             if (raw.StartsWith("fail", StringComparison.OrdinalIgnoreCase)) return "Fail";
+            if (NotApplicableEvidence.IsNotApplicableOutcome(raw)) return NotApplicableEvidence.Outcome;
         }
 
         var score = TryGetScore(row);
         if (score.HasValue) return score.Value >= PassScore ? "Pass" : "Fail";
 
         return raw == null ? null : "Fail";
+    }
+
+    // A script asking for a human is not a verdict, so the wording variants scripts actually
+    // use are matched here rather than falling through to Score and becoming a Pass or Fail.
+    private static bool IsDeferredToReviewer(string raw)
+    {
+        var collapsed = raw.Replace(" ", string.Empty).Replace("-", string.Empty).Replace("_", string.Empty);
+        return collapsed.Equals("NeedsReview", StringComparison.OrdinalIgnoreCase)
+            || collapsed.Equals("ManualReview", StringComparison.OrdinalIgnoreCase)
+            || collapsed.Equals("Review", StringComparison.OrdinalIgnoreCase)
+            || collapsed.Equals("Unassessed", StringComparison.OrdinalIgnoreCase);
     }
 }

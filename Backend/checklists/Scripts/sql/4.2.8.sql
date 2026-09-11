@@ -1,6 +1,6 @@
 SET NOCOUNT ON;
 
-DECLARE @Result varchar(10) = 'Fail';
+DECLARE @Result varchar(20) = 'Fail';
 DECLARE @Score int = 0;
 DECLARE @DatabaseQueried nvarchar(max) = N'None';
 DECLARE @Finding nvarchar(max) = N'No database found to be queried';

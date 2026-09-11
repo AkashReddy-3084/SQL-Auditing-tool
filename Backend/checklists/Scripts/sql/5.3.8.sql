@@ -4,7 +4,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
 DECLARE @Finding NVARCHAR(MAX) = 'Mart freshness evidence could not be collected in the current database';
@@ -80,14 +80,14 @@ DECLARE @CovPct DECIMAL(9,2) = ISNULL(100.0 * @WithTsCol / NULLIF(@MartTables, 0
 IF @Probe = 1
 BEGIN
     SET @Score = CASE
-        WHEN @MartTables = 0 THEN 0
+        WHEN @MartTables = 0 THEN NULL
         WHEN @CovPct >= 80 AND (@Artifacts > 0 OR @Recent = 1) THEN 3
         WHEN @CovPct >= 50 OR @Artifacts > 0 THEN 2
         WHEN @CovPct > 0 OR @Recent = 1 THEN 1
         ELSE 0 END;
 
     IF @MartTables = 0
-        SET @Finding = 'No mart/dimension/fact tables found in ' + @DatabaseQueried + '; no freshness SLA to verify';
+        SET @Finding = 'No mart/dimension/fact tables found in ' + @DatabaseQueried + '; freshness SLA validation does not apply';
     ELSE
         SET @Finding = CONCAT(@DatabaseQueried, ': ', @WithTsCol, ' of ', @MartTables, ' mart table(s) (',
             CONVERT(NVARCHAR(10), @CovPct), '%) expose a load/refresh timestamp column; last recorded write ',
@@ -98,5 +98,5 @@ BEGIN
             CASE WHEN LEN(@GapList) > 0 THEN '; untracked: ' + @GapList ELSE '' END);
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN N'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

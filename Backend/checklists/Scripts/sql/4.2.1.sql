@@ -5,7 +5,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = N'Fail';
+DECLARE @Result NVARCHAR(20) = N'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(128) = DB_NAME();
 DECLARE @Finding NVARCHAR(MAX) = N'Schema evidence unavailable';

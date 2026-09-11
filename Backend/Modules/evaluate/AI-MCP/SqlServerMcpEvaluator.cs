@@ -251,10 +251,8 @@ internal sealed class SqlServerMcpEvaluator
             return null;
         }
 
-        // The snapshot held no supporting artefact for this item, so the control does not exist
-        // to be assessed rather than being implemented ineffectively. The item is reported as
-        // Not Applicable and carries no weight in any score, exactly as a script-evaluated item
-        // whose enrichment declares it not applicable.
+        // ResolveOutcome never yields Not Applicable, so this is false today; it is kept so the
+        // shape stays correct if applicability is ever settled before this point.
         var notApplicable = NotApplicableEvidence.IsNotApplicableOutcome(outcome);
 
         return new ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-MCP")
@@ -280,19 +278,20 @@ internal sealed class SqlServerMcpEvaluator
     }
 
     /// <summary>
-    /// The verdict for a feasible MCP evaluation. 'Not Applicable' wins over everything else:
-    /// the snapshot held nothing to assess, so there is no Pass or Fail to give. 'Pass' and
-    /// 'Fail' are otherwise honoured as given; a hedged 'NeedsReview' is resolved from the score
-    /// the same response already carries, because no workflow can resolve a NeedsReview on an
-    /// AI-MCP item. Returns null when there is no score to fall back on, which hands the item to
-    /// the manual pipeline where a human can actually decide it.
+    /// The verdict for a feasible MCP evaluation. A model cannot establish that a control is
+    /// inapplicable - an empty snapshot far more often means it could not see the evidence - so
+    /// a claimed 'Not Applicable' is handed to a reviewer instead. 'Pass' and 'Fail' are
+    /// otherwise honoured as given; a hedged 'NeedsReview' is resolved from the score the same
+    /// response already carries, because no workflow can resolve a NeedsReview on an AI-MCP
+    /// item. Returns null when there is no score to fall back on, which hands the item to the
+    /// manual pipeline where a human can actually decide it.
     /// </summary>
     private static string? ResolveOutcome(ParsedMcpResponse parsed, string evidence)
     {
         if (NotApplicableEvidence.IsNotApplicableOutcome(parsed.Outcome)
             || NotApplicableEvidence.IsMarked(evidence))
         {
-            return NotApplicableEvidence.Outcome;
+            return "NeedsReview";
         }
         if (parsed.Outcome is "Pass" or "Fail") return parsed.Outcome;
         if (parsed.Score.HasValue) return parsed.Score.Value >= PassScore ? "Pass" : "Fail";

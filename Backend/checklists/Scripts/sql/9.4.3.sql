@@ -1,9 +1,9 @@
--- Checklist: SLA breach triggers alerts
+﻿-- Checklist: SLA breach triggers alerts
 -- Scope: SERVER
 -- Scoring: 3 = an SLA-relevant alert condition exists, is routed to an enabled operator with a delivery address, Database Mail is configured and scheduled jobs raise failure notifications; 2 = alerts reach an enabled operator but no SLA-specific condition or job hook is defined, or platform-managed on Azure SQL Database; 1 = alerts or job notifications exist but the delivery chain is broken; 0 = nothing would raise a notification
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'SLA breach alerting evidence was unavailable';
@@ -29,7 +29,7 @@ ELSE
 BEGIN
     SET @Sql = N'
 SELECT ''Alerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1
-UNION ALL SELECT ''PerfAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1 AND (performance_condition IS NOT NULL OR wmi_query IS NOT NULL)
+UNION ALL SELECT ''PerfAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1 AND performance_condition IS NOT NULL
 UNION ALL SELECT ''SevAlerts'', COUNT(*) FROM msdb.dbo.sysalerts WHERE enabled = 1 AND severity >= 16
 UNION ALL SELECT ''AlertsToOperator'', COUNT(DISTINCT a.id) FROM msdb.dbo.sysalerts AS a INNER JOIN msdb.dbo.sysnotifications AS n ON n.alert_id = a.id INNER JOIN msdb.dbo.sysoperators AS o ON o.id = n.operator_id WHERE a.enabled = 1 AND o.enabled = 1
 UNION ALL SELECT ''Operators'', COUNT(*) FROM msdb.dbo.sysoperators WHERE enabled = 1 AND ((email_address IS NOT NULL AND LTRIM(RTRIM(email_address)) <> '''') OR (pager_address IS NOT NULL AND LTRIM(RTRIM(pager_address)) <> ''''))
@@ -64,7 +64,7 @@ UNION ALL SELECT ''NotifyJobs'', COUNT(DISTINCT j.job_id) FROM msdb.dbo.sysjobs 
 
     SET @Finding = CONCAT(
         'Enabled alerts = ', @Alerts, ', of which ', @PerfAlerts,
-        ' use a performance or WMI condition and ', @SevAlerts, ' cover severity 16 or above',
+        ' use a performance condition and ', @SevAlerts, ' cover severity 16 or above',
         '; alerts wired to an enabled operator = ', @AlertsToOperator,
         '; enabled operators with an email or pager address = ', @Operators,
         '; Database Mail profiles = ', @MailProfiles, ' with Database Mail XPs = ', @MailXps,
@@ -74,4 +74,20 @@ UNION ALL SELECT ''NotifyJobs'', COUNT(DISTINCT j.job_id) FROM msdb.dbo.sysjobs 
 END
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

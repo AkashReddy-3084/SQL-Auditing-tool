@@ -1,6 +1,6 @@
 SET NOCOUNT ON;
 
-DECLARE @Result varchar(10) = 'Fail';
+DECLARE @Result varchar(20) = 'Fail';
 DECLARE @Score int = 1;
 DECLARE @DatabaseQueried nvarchar(128) = N'msdb';
 DECLARE @Finding nvarchar(max) = N'';
@@ -49,18 +49,18 @@ BEGIN TRY
         @EnabledAlertCount = SUM(CASE WHEN a.enabled = 1 THEN 1 ELSE 0 END),
         @EnabledSeverityAlertCount = SUM(CASE WHEN a.enabled = 1 AND a.severity >= 1 AND a.message_id = 0 THEN 1 ELSE 0 END),
         @EnabledErrorAlertCount = SUM(CASE WHEN a.enabled = 1 AND a.message_id > 0 THEN 1 ELSE 0 END),
-        @EnabledWithNotify = SUM(CASE
-            WHEN a.enabled = 1
-             AND EXISTS (
-                    SELECT 1
-                    FROM msdb.dbo.sysnotifications n
-                    WHERE n.alert_id = a.id
-                      AND (n.notification_method & 1 = 1
-                           OR n.notification_method & 2 = 2
-                           OR n.notification_method & 4 = 4)
-                )
-            THEN 1 ELSE 0 END)
-    FROM msdb.dbo.sysalerts a;
+        @EnabledWithNotify = SUM(CASE WHEN a.enabled = 1 AND nz.notified = 1 THEN 1 ELSE 0 END)
+    FROM msdb.dbo.sysalerts a
+    OUTER APPLY (
+        SELECT CASE WHEN EXISTS (
+                   SELECT 1
+                   FROM msdb.dbo.sysnotifications n
+                   WHERE n.alert_id = a.id
+                     AND (n.notification_method & 1 = 1
+                          OR n.notification_method & 2 = 2
+                          OR n.notification_method & 4 = 4)
+               ) THEN 1 ELSE 0 END AS notified
+    ) AS nz;
 
     ;WITH CriticalSev AS (
         SELECT v.severity
@@ -69,21 +69,21 @@ BEGIN TRY
     Covered AS (
         SELECT c.severity,
                MAX(CASE WHEN a.enabled = 1 THEN 1 ELSE 0 END) AS is_enabled,
-               MAX(CASE
-                       WHEN a.enabled = 1
-                        AND EXISTS (
-                               SELECT 1
-                               FROM msdb.dbo.sysnotifications n
-                               WHERE n.alert_id = a.id
-                                 AND (n.notification_method & 1 = 1
-                                      OR n.notification_method & 2 = 2
-                                      OR n.notification_method & 4 = 4)
-                           )
-                       THEN 1 ELSE 0 END) AS has_notify
+               MAX(CASE WHEN a.enabled = 1 AND nz.notified = 1 THEN 1 ELSE 0 END) AS has_notify
         FROM CriticalSev c
         LEFT JOIN msdb.dbo.sysalerts a
             ON a.severity = c.severity
            AND a.message_id = 0
+        OUTER APPLY (
+            SELECT CASE WHEN EXISTS (
+                       SELECT 1
+                       FROM msdb.dbo.sysnotifications n
+                       WHERE n.alert_id = a.id
+                         AND (n.notification_method & 1 = 1
+                              OR n.notification_method & 2 = 2
+                              OR n.notification_method & 4 = 4)
+                   ) THEN 1 ELSE 0 END AS notified
+        ) AS nz
         GROUP BY c.severity
     )
     SELECT
@@ -172,4 +172,20 @@ BEGIN CATCH
 END CATCH;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score  = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine.'
+        + N' Confirm how it is handled by whatever monitoring runs outside SQL Server'
+        + N' (Azure Monitor, SCOM, Windows Task Scheduler, third-party agents).'
+        + N' Engine-side evidence: ' + ISNULL(@Finding, N'none');
+END
+
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

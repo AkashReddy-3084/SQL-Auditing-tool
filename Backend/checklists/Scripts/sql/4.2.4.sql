@@ -157,10 +157,12 @@ SET @BadFacts = ISNULL(@BadFacts, N'none');
 
 IF @ObjTotal = 0
 BEGIN
-    SET @Result = N'NeedsReview';
-    SET @Score  = 0;
+    -- No dimension or fact tables exist, so surrogate-key usage has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = N'Not Applicable';
+    SET @Score  = NULL;
     SET @Finding = N'No tables matching dimension (Dim%/%_Dim/%Dimension%) or fact (Fact%/%_Fact/%_Facts) naming conventions were found in database [' + @DatabaseQueried
-                 + N']. Surrogate-key usage could not be assessed automatically; manually review the data model to confirm dimensions use IDENTITY or sequence surrogate keys and facts reference them instead of business keys.';
+                 + N'], so this database does not present a dimensional model and surrogate-key usage does not apply.';
 END
 ELSE
 BEGIN

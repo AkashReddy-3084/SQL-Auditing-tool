@@ -4,7 +4,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'No backup history evidence could be read';
@@ -33,7 +33,7 @@ SELECT @t = COUNT(*),
        @nf = MAX(b.LastFull),
        @nl = MAX(b.LastLog),
        @m = ISNULL(LEFT(STRING_AGG(CASE WHEN b.LastFull IS NULL
-                                        THEN CONVERT(NVARCHAR(MAX), d.name + '' ['' + d.recovery_model_desc + '']'')
+                                        THEN CONVERT(NVARCHAR(MAX), d.name COLLATE DATABASE_DEFAULT + '' ['' + d.recovery_model_desc COLLATE DATABASE_DEFAULT + '']'')
                                    END, '', ''), 400), '''')
 FROM sys.databases AS d
 OUTER APPLY (
@@ -61,10 +61,14 @@ BEGIN
     SET @Score = 3;
     SET @Finding = 'Azure SQL Database: platform-automated backups are in force - weekly full, differential and 5-10 minute transaction log backups are taken and retained by the service for point-in-time restore, so an explicit full/differential/log schedule is not required on this platform';
 END
+ELSE IF @Err = 1 AND @Total = 0
+BEGIN
+    SET @Score = 1;
+    SET @Finding = 'The backup-history probe failed, so no user database could be enumerated and backup coverage was never assessed on this instance. Verify the backup strategy manually.';
+END
 ELSE
 BEGIN
     SET @Score = CASE
-        WHEN @Err = 1 AND @Total = 0 THEN 0
         WHEN @Total = 0 THEN 2
         WHEN @WithFull = @Total AND @WithLog = @LogEligible THEN 3
         WHEN CONVERT(DECIMAL(9, 4), @WithFull) / NULLIF(@Total, 0) >= 0.80 THEN 2
@@ -84,5 +88,7 @@ BEGIN
         END;
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE
+    WHEN @Score >= 2 THEN 'Pass'
+    ELSE 'Fail' END;
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

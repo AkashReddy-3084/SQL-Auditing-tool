@@ -191,10 +191,11 @@ BEGIN
 
     IF @Total = 0
     BEGIN
-        SET @Score = 0;
+        -- NULL score marks this Not Applicable rather than failed.
+        SET @Score = NULL;
         SET @Finding = 'No dimension tables could be identified by naming convention (Dim*, D_*, *_Dim, *Dimension*, or dim/dimension schemas) across '
-                     + CAST(@DbCount AS VARCHAR(10)) + ' scanned database(s), so no per-dimension SCD strategy is evidenced in the catalog. '
-                     + 'Confirm the dimensional model and its documented Type 1/2/3 design.';
+                     + CAST(@DbCount AS VARCHAR(10)) + ' scanned database(s), so a per-dimension SCD strategy does not apply. '
+                     + 'Confirm the dimensional model if one is expected here.';
     END
     ELSE
     BEGIN
@@ -218,7 +219,7 @@ BEGIN
     END
 END
 
-SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+SET @Result = CASE WHEN @Score IS NULL THEN 'Not Applicable' WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
 
 SELECT
     @Result          AS Result,

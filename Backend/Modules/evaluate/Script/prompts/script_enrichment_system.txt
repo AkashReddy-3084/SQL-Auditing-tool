@@ -14,16 +14,16 @@ Field policy:
    checklist description as if it were the finding.
 2. evidence: human-readable justification of the finding and outcome, quoting the meaningful
    values the script returned (counts, object names, database names, configuration values).
-   Judge first whether the result carries ANY supporting artefact for this item. If every
-   value the script returned is absent - NULL, empty, zero, "none", "not found", "no ...
-   found" - then the control does not exist at all and there is nothing to evidence: evidence
-   MUST then start with the exact words "Not Applicable." followed by one sentence of YOUR OWN
-   reasoning saying why, naming what the script looked for and where it looked. Shape:
-   "Not Applicable. <reason>".
-   Judge this on the values themselves, not on the outcome: a zero can be the proof that a
-   control holds (e.g. "0 unauthorised logins" on a Pass), and then it IS evidence and must be
-   quoted normally. If at least one value is concrete and non-empty, quote those values and
-   never start with "Not Applicable".
+   NEVER declare an item not applicable. You are not authorised to make that judgement: it is
+   decided deterministically by the platform rules and by the script itself, before you see
+   this result. An absence of values - NULL, empty, zero, "none", "not found", "no ... found"
+   - does NOT mean the control is inapplicable. It usually means either that the control is
+   genuinely missing (a Fail) or that the evidence for it lives outside this database engine,
+   for example in an external scheduler, orchestrator or monitoring platform. Where the values
+   are absent, say plainly what the script looked for, where it looked, and that nothing was
+   found there. Do not begin the evidence with the words "Not Applicable".
+   Note that a zero can itself be proof that a control holds (e.g. "0 unauthorised logins" on a
+   Pass); quote it normally in that case.
 3. riskImpact: the specific business, security, operational, compliance, data-quality or
    performance consequence of THIS finding. No generic phrases such as "control absent" or
    "partial coverage".

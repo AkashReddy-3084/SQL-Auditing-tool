@@ -817,6 +817,63 @@ WHERE d.name = DB_NAME();";
         public Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
             => RunChecklistAsync(progress, requestUserInput, selectedIds, cancellationToken, useHistoricalManualResults, generateReports, null);
 
+        /// <summary>Platform identified at the start of the most recent run, for host banners.</summary>
+        public PlatformProfile? LastDetectedPlatform { get; private set; }
+
+        /// <summary>Items the most recent run skipped as not applicable to the detected platform.</summary>
+        public int LastPlatformExclusionCount { get; private set; }
+
+        // An item excluded on platform grounds never reaches a script or a model, so every
+        // field is fixed here rather than inferred later. This is what keeps the outcome
+        // identical across the WPF, IDE and CLI hosts.
+        private static ChecklistResult BuildPlatformExclusionResult(ChecklistItem item, string justification) =>
+            new(item.Id,
+                item.Description,
+                item.Verification,
+                NotApplicableEvidence.Outcome,
+                justification,
+                string.Empty,
+                "PlatformExclusion")
+            {
+                Score = null,
+                Severity = "Informational",
+                Finding = justification,
+                Recommendation = null,
+                RiskImpact = null,
+                Effort = null,
+                NotApplicable = true,
+                NotApplicableJustification = justification,
+                DatabasesVerified = null
+            };
+
+        // A script that could not produce a trustworthy verdict yields a diagnostic result
+        // rather than a scored one, so a tooling failure is never reported as a control gap.
+        private static ChecklistResult BuildScriptDiagnosticResult(
+            ChecklistItem item,
+            string[] files,
+            string outcome,
+            string note,
+            SqlScriptOutcome? scriptOutcome) =>
+            new(item.Id,
+                item.Description,
+                item.Verification,
+                outcome,
+                note,
+                string.Join(';', files),
+                "Script")
+            {
+                // Scored as a failure, not left unscored: a null score marks an item Not Applicable
+                // and drops it from the compliance denominator, hiding the unverified control.
+                Score = 0,
+                Severity = "High",
+                Finding = note,
+                Recommendation = null,
+                RiskImpact = null,
+                Effort = null,
+                DatabasesVerified = scriptOutcome?.DatabasesVerified,
+                ScriptOutcome = scriptOutcome
+            };
+
         /// <param name="targetDatabases">
         /// User databases on which DATABASE-scope SQL scripts run. Null means all currently
         /// accessible online user databases; an explicit empty selection is rejected.
@@ -977,6 +1034,34 @@ WHERE d.name = DB_NAME();";
                 }
             }
 
+            // Applicability is a property of the target platform and is settled before any
+            // evaluation begins. Excluded items are recorded as Not Applicable without
+            // executing a script or calling a language model.
+            var platformProfile = await PlatformApplicability.DetectAsync(_connectionString, cancellationToken);
+            LastDetectedPlatform = platformProfile;
+            LastPlatformExclusionCount = 0;
+
+            var applicability = PlatformApplicability.Load(repoRoot);
+            if (applicability.RuleCount > 0 && platformProfile.Platform != PlatformApplicability.PlatformUnknown)
+            {
+                var applicableItems = new System.Collections.Generic.List<ChecklistItem>(selectedItems.Count);
+                foreach (var item in selectedItems)
+                {
+                    if (applicability.IsApplicable(item.Id, platformProfile, out var justification))
+                    {
+                        applicableItems.Add(item);
+                        continue;
+                    }
+
+                    var exclusion = BuildPlatformExclusionResult(item, justification!);
+                    results.Add(exclusion);
+                    progress?.Report(exclusion);
+                    LastPlatformExclusionCount++;
+                }
+
+                selectedItems = applicableItems;
+            }
+
             bool IsDocumentationCheck(ChecklistItem item)
             {
                 return documentationItems.Contains(item.Id);
@@ -1125,9 +1210,77 @@ WHERE d.name = DB_NAME();";
                 // Either way the verdict is Pass or Fail - a script item is never deferred to
                 // a reviewer; only the Not Applicable check below can move it off that verdict.
                 var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
-                var outcome = scriptOutcome.Result
-                    ?? EvaluationDecisionService.EvaluateScriptEvidenceOutcome(textLog.ToString());
+
+                // A script item only ever reports Pass, Fail or Not Applicable. When the tool
+                // itself fails the control is unverified, which is reported as Fail; the note
+                // records that it was a tooling failure rather than an observed control gap.
+                if (ScriptOutcomeInvariants.IsTimeout(execError))
+                {
+                    LogDiagnostic($"[{it.Id}] Script timed out; reported as Fail because the control was never verified.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        $"The audit script for {it.Id} exceeded its command timeout, so the control could not be verified. Re-run it or verify this item manually.",
+                        scriptOutcome);
+                }
+
+                // A script that returned no structured Result was never assessed. Scraping the
+                // console text for the words 'Pass' or 'Fail' previously invented a verdict here,
+                // which reported unaudited controls as compliant.
+                if (scriptOutcome.Result == null)
+                {
+                    LogDiagnostic($"[{it.Id}] Script returned no structured result; reported as Fail because the control was never verified.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        $"The audit script for {it.Id} returned no Result row, so the control could not be verified. Re-run it or verify this item manually.",
+                        scriptOutcome);
+                }
+
+                var outcome = scriptOutcome.Result;
                 var score = scriptOutcome.Score;
+
+                // The engine could not evaluate the target database, so the control is unverified.
+                if (string.Equals(outcome, SqlScriptResultParser.Unassessed, StringComparison.Ordinal))
+                {
+                    LogDiagnostic($"[{it.Id}] Database could not be evaluated; reported as Fail because the control was never verified.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        string.IsNullOrWhiteSpace(scriptOutcome.Finding)
+                            ? $"The audit script for {it.Id} could not evaluate its target database, so the control could not be verified."
+                            : scriptOutcome.Finding!,
+                        scriptOutcome);
+                }
+
+                if (ScriptOutcomeInvariants.IsContradictoryPass(outcome, score))
+                {
+                    LogDiagnostic($"[{it.Id}] Script returned Pass with score {score}; reported as Fail because the verdict is unreliable.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        $"The audit script for {it.Id} returned Pass with a score of {score}, which contradict each other. The control could not be reliably verified.",
+                        scriptOutcome);
+                }
+
+                // A script may now declare the control absent from this environment rather than
+                // unimplemented. That verdict is authoritative and needs no enrichment.
+                if (NotApplicableEvidence.IsNotApplicableOutcome(scriptOutcome.Result))
+                {
+                    var naFinding = string.IsNullOrWhiteSpace(scriptOutcome.Finding)
+                        ? $"Not applicable: {it.Description}."
+                        : scriptOutcome.Finding!;
+                    return new ChecklistResult(it.Id, it.Description, it.Verification, NotApplicableEvidence.Outcome,
+                        $"{NotApplicableEvidence.Marker}. {naFinding}", string.Join(';', files), "Script")
+                    {
+                        Score = null,
+                        Severity = "Informational",
+                        Finding = naFinding,
+                        Recommendation = null,
+                        RiskImpact = null,
+                        Effort = null,
+                        DatabasesVerified = scriptOutcome.DatabasesVerified,
+                        ScriptOutcome = scriptOutcome,
+                        NotApplicable = true,
+                        NotApplicableJustification = naFinding,
+                    };
+                }
 
                 // Turn the structured SQL result into audit-report wording (Finding, Evidence,
                 // RiskImpact, Recommendation, Severity) using only the values the script
@@ -1163,12 +1316,9 @@ WHERE d.name = DB_NAME();";
                     ? ai!.Finding!
                     : (scriptOutcome.Finding ?? string.Empty);
 
-                // Evidence opening with "Not Applicable." means the enricher found no
-                // supporting artefact at all: the control does not exist to be assessed, so
-                // the item is reported as Not Applicable and carries no weight in the score.
-                var notApplicable = NotApplicableEvidence.IsMarked(ai?.Evidence);
-                if (notApplicable) outcome = NotApplicableEvidence.Outcome;
-
+                // Not Applicable is decided deterministically - by the platform rules before the
+                // run, or by the script's own Result column - never by inferring it from an
+                // absence of values here.
                 return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, ai?.Evidence, string.Join(';', files), "Script")
                 {
                     Score = score,
@@ -1178,7 +1328,6 @@ WHERE d.name = DB_NAME();";
                     Recommendation = ai?.Recommendation,
                     DatabasesVerified = scriptOutcome.DatabasesVerified,
                     ScriptOutcome = scriptOutcome,
-                    NotApplicable = notApplicable ? true : null,
                 };
             }
 
@@ -1763,13 +1912,7 @@ WHERE d.name = DB_NAME();";
         // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
         // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
         public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation)
-            => ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out _);
-
-        // <paramref name="markedNotApplicable"/> reports whether this enrichment moved the
-        // item to Outcome Not Applicable, so the CLI/IDE host can tell Copilot the verdict changed.
-        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, out bool markedNotApplicable)
         {
-            markedNotApplicable = false;
             if (string.IsNullOrWhiteSpace(id)) return false;
             if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
                 && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
@@ -1798,20 +1941,7 @@ WHERE d.name = DB_NAME();";
             if (!string.IsNullOrWhiteSpace(riskImpact)) target["RiskImpact"] = riskImpact;
             if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
 
-            // Evidence opening with "Not Applicable." means the control does not exist to be
-            // assessed, so the item is re-stamped Not Applicable and dropped from the scoring.
-            // Only script-evaluated items qualify, exactly as in the desktop flow: a manual item
-            // already carries a human verdict that must never be overwritten by wording.
-            var isScriptItem = string.Equals(
-                target["Technique"]?.GetValue<string>(), "Script", StringComparison.OrdinalIgnoreCase);
-            if (isScriptItem && NotApplicableEvidence.IsMarked(evidence))
-            {
-                target["Outcome"] = NotApplicableEvidence.Outcome;
-                target["NotApplicable"] = true;
-                // An unassessable control carries no severity weight, as in the desktop flow.
-                target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, null, isNotApplicable: true);
-                markedNotApplicable = true;
-            }
+            // Not Applicable is settled deterministically upstream; enrichment rewrites wording only.
 
             try
             {
@@ -2192,9 +2322,11 @@ WHERE d.name = DB_NAME();";
             var finding = string.IsNullOrWhiteSpace(reason)
                 ? "Database evaluation failed"
                 : $"Database evaluation failed: {reason}";
+            // The control was never assessed here, so no Score is written: a fabricated 0 was
+            // previously indistinguishable from a control that genuinely failed.
             return new SqlScriptRow(
-                new[] { "Result", "Score", "DatabaseQueried", "Finding" },
-                new[] { "Fail", "0", databaseName, finding });
+                new[] { "Result", "DatabaseQueried", "Finding" },
+                new[] { SqlScriptResultParser.Unassessed, databaseName, finding });
         }
 
         // Executes a (possibly multi-batch) SQL script and captures every returned row

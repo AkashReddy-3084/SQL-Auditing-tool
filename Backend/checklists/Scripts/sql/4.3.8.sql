@@ -1,10 +1,10 @@
--- Checklist: [Indexing Strategy] Index maintenance (rebuild/reorganize) scheduled based on fragmentation
+﻿-- Checklist: [Indexing Strategy] Index maintenance (rebuild/reorganize) scheduled based on fragmentation
 -- Scope: SERVER
 -- Scoring: 3 = an enabled index-maintenance job on an enabled schedule driven by fragmentation; 2 = an enabled, scheduled index-maintenance job with no fragmentation logic, or Azure SQL Database platform-managed; 1 = index-maintenance job exists but is disabled or has no enabled schedule; 0 = no index-maintenance job, or job metadata unreadable
 
 SET NOCOUNT ON;
 
-DECLARE @Result NVARCHAR(10) = 'Fail';
+DECLARE @Result NVARCHAR(20) = 'Fail';
 DECLARE @Score INT = 0;
 DECLARE @DatabaseQueried NVARCHAR(MAX) = 'master';
 DECLARE @Finding NVARCHAR(MAX) = 'SQL Agent job metadata could not be read; index maintenance scheduling is unverified';
@@ -90,4 +90,20 @@ END;
 DROP TABLE #IdxJobs;
 
 SET @Result = CASE WHEN @Score >= 2 THEN 'Pass' ELSE 'Fail' END;
+-- SQL Server Agent does not exist on Azure SQL Database or on Express, so its absence is not
+-- evidence that this control is missing - the obligation moves to the external scheduler.
+IF (CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+    OR CONVERT(nvarchar(128), SERVERPROPERTY('Edition')) LIKE 'Express%'
+    OR DB_ID('msdb') IS NULL)
+BEGIN
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Result = 'Not Applicable';
+    SET @Score = NULL;
+    SET @Finding = N'SQL Server Agent is not available on this edition ('
+        + ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('Edition')), N'unknown')
+        + N'), so this control cannot be evidenced inside the database engine. Confirm how it is '
+        + N'handled by whatever schedules work outside SQL Server (Windows Task Scheduler, Azure '
+        + N'Data Factory, Control-M, Airflow). Engine-side evidence: '
+        + ISNULL(@Finding, N'none');
+END
 SELECT @Result AS Result, @Score AS Score, @DatabaseQueried AS DatabaseQueried, @Finding AS Finding;

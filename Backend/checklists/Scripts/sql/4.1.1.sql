@@ -1,4 +1,4 @@
-/*==============================================================================
+﻿/*==============================================================================
   Checklist Item : 4.1.1
   Description    : Modeling approach is deliberate (3NF integration layer
                    and/or dimensional marts)
@@ -9,7 +9,7 @@
 ==============================================================================*/
 SET NOCOUNT ON;
 
-DECLARE @Result          nvarchar(50)   = N'Needs Review';
+DECLARE @Result          nvarchar(50);
 DECLARE @Score           int            = 0;
 DECLARE @DatabaseQueried nvarchar(max)  = N'(none)';
 DECLARE @Finding         nvarchar(max)  = N'';
@@ -192,10 +192,12 @@ CROSS APPLY
 /* ---------- 4. Roll up to a single server-level verdict ---------- */
 IF NOT EXISTS (SELECT 1 FROM #Scored)
 BEGIN
-    SET @Score           = 0;
-    SET @Result          = N'Needs Review';
+    -- No user database exists, so the modelling approach has nothing to apply to.
+    -- NULL score marks this Not Applicable rather than failed.
+    SET @Score           = NULL;
+    SET @Result          = N'Not Applicable';
     SET @DatabaseQueried = N'(none)';
-    SET @Finding         = N'No accessible user databases were found, so the modelling approach could not be assessed.';
+    SET @Finding         = N'No accessible user databases were found, so the modelling approach does not apply to this instance.';
 END
 ELSE
 BEGIN
@@ -205,7 +207,7 @@ BEGIN
                       WHEN 3 THEN N'Pass'
                       WHEN 2 THEN N'Partial'
                       WHEN 1 THEN N'Fail'
-                      ELSE N'Needs Review'
+                      ELSE N'Fail'
                   END;
 
     SELECT @DatabaseQueried = STUFF((
