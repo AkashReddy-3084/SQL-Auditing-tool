@@ -58,8 +58,9 @@ public static class AuditWorkbookDocuments
         sb.AppendLine("|--------|------:|");
         var coverage = model.Coverage;
         sb.AppendLine($"| Total controls | {coverage.Total} |");
+        sb.AppendLine($"| Validated/scored | {ValidatedCount(model)} |");
         sb.AppendLine($"| Deterministic | {coverage.Deterministic} |");
-        sb.AppendLine($"| AI analysis | {coverage.AiAssisted} |");
+        sb.AppendLine($"| AI-confirmed or auto-approved | {coverage.AiAssisted} |");
         sb.AppendLine($"| Manual attestation | {coverage.ManualAttestation} |");
         sb.AppendLine($"| Needs review | {coverage.NeedsReview} |");
         sb.AppendLine($"| Awaiting validation | {coverage.AwaitingValidation} |");
@@ -68,15 +69,16 @@ public static class AuditWorkbookDocuments
         sb.AppendLine();
         sb.AppendLine("### Area Summary");
         sb.AppendLine();
-        sb.AppendLine("| Area | Weight | Score | Rating | Controls | Validated | Not validated |");
-        sb.AppendLine("|------|-------:|------:|--------|---------:|----------:|--------------:|");
+        sb.AppendLine("| Area | Weight | Score | Rating | Controls | Validated | Score 0-1 | Score 2-3 | Not validated |");
+        sb.AppendLine("|------|-------:|------:|--------|---------:|----------:|----------:|----------:|--------------:|");
         foreach (var area in model.Areas)
         {
             var notValidated = area.Items.Count - area.ScoredCount;
             sb.AppendLine(
                 $"| {area.Area.Number}. {Md(model.AreaName(area.Area.Number))} | {area.Area.Weight:0.#}% | " +
                 $"{AuditWorkbookBuilder.Percent(area.ScorePercent)} | {calculator.GetRiskRating(area.ScorePercent).Label} | " +
-                $"{area.Items.Count} | {area.ScoredCount} | {notValidated} |");
+            $"{area.Items.Count} | {area.ScoredCount} | {area.Items.Count(i => i.IsScored && i.Score <= 1)} | " +
+            $"{area.Items.Count(i => i.IsScored && i.Score >= 2)} | {notValidated} |");
         }
 
         sb.AppendLine();
@@ -194,6 +196,17 @@ public static class AuditWorkbookDocuments
         });
         sb.AppendLine();
         sb.AppendLine("> The score is calculated from validated items only. Items that are not applicable or awaiting validation are excluded from the arithmetic and shown as \"—\" rather than zero.");
+        sb.AppendLine();
+        var strongest = model.Areas.Where(a => a.ScorePercent.HasValue).OrderByDescending(a => a.ScorePercent).FirstOrDefault();
+        var weakest = model.Areas.Where(a => a.ScorePercent.HasValue).OrderBy(a => a.ScorePercent).FirstOrDefault();
+        if (strongest is not null && weakest is not null)
+        {
+            sb.AppendLine(
+                $"**Executive interpretation:** {Md(model.AreaName(strongest.Area.Number))} is the strongest scored area at " +
+                $"{AuditWorkbookBuilder.Percent(strongest.ScorePercent)}; {Md(model.AreaName(weakest.Area.Number))} is the weakest at " +
+                $"{AuditWorkbookBuilder.Percent(weakest.ScorePercent)}. The report contains " +
+                $"{CountSeverity(model, "Critical") + CountSeverity(model, "High")} Critical/High finding(s) requiring priority review.");
+        }
 
         sb.AppendLine();
         sb.AppendLine("### 1.2 Area Scorecard");
@@ -263,8 +276,38 @@ public static class AuditWorkbookDocuments
             }
         }
 
+        AppendModeledScoreOpportunities(sb, model);
+
         sb.AppendLine();
-        sb.AppendLine("## 2. Detailed Findings by Area");
+        sb.AppendLine("## 2. Solution Overview (Discovered)");
+        sb.AppendLine();
+        sb.AppendLine("> This section contains only target, database, and evidence-source facts available to the audit. It does not infer application topology or business ownership.");
+        sb.AppendLine();
+        sb.AppendLine("### 2.1 Target Profile");
+        sb.AppendLine();
+        AppendKeyValues(sb, new (string, string)[]
+        {
+            ("Target", model.Target),
+            ("Deployment mode", model.DeploymentMode),
+            ("In-scope databases discovered", model.Databases.Count.ToString(CultureInfo.InvariantCulture)),
+            ("Evidence generated", model.GeneratedDate),
+        });
+        sb.AppendLine();
+        sb.AppendLine("### 2.2 Database Inventory");
+        sb.AppendLine();
+        sb.AppendLine("| # | Database | Validated outcomes | Score 0-1 | Score 2-3 | Not assessed | Findings |");
+        sb.AppendLine("|---|----------|-------------------:|----------:|----------:|-------------:|---------:|");
+        foreach (var database in model.Databases)
+        {
+            var items = model.ItemsForDatabase(database);
+            sb.AppendLine(
+                $"| {database.Id} | {Md(database.Name)} | {items.Count(i => i.IsScored)} | " +
+                $"{items.Count(i => i.IsScored && i.Score <= 1)} | {items.Count(i => i.IsScored && i.Score >= 2)} | " +
+                $"{items.Count(i => !i.IsScored)} | {model.Findings.Count(f => f.ImpactedDatabases.Contains(database))} |");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("## 3. Detailed Findings by Area");
 
         foreach (var area in model.Areas.Where(a => a.Items.Count > 0))
         {
@@ -307,15 +350,15 @@ public static class AuditWorkbookDocuments
         if (model.AccessIssues.Count > 0)
         {
             sb.AppendLine();
-            sb.AppendLine("## 3. Access & Collection Issues");
+            sb.AppendLine("## 4. Access & Collection Issues");
             sb.AppendLine();
-            sb.AppendLine("| Ref | Title | Failure Type | Status |");
-            sb.AppendLine("|-----|-------|--------------|--------|");
+            sb.AppendLine("| Ref | Title | Failure Type | Status | Detail |");
+            sb.AppendLine("|-----|-------|--------------|--------|--------|");
             foreach (var issue in model.AccessIssues)
             {
                 sb.AppendLine(
                     $"| {Md(issue.Item.Id)} | {Md(AuditWorkbookBuilder.Text(issue.Item.Description))} | " +
-                    $"{issue.FailureType} | {AuditWorkbookModel.Status(issue.Item)} |");
+                    $"{issue.FailureType} | {AuditWorkbookModel.Status(issue.Item)} | {Md(issue.Detail)} |");
             }
         }
 
@@ -447,88 +490,7 @@ public static class AuditWorkbookDocuments
 
     public static string RenderHtmlReadout(AuditWorkbookModel model)
     {
-        var calculator = new ScoreCalculator();
-        var payload = new
-        {
-            target = model.Target,
-            generated = model.GeneratedDate,
-            workbook = ReportSuiteGenerator.ExcelReportFileName,
-            deploymentMode = model.DeploymentMode,
-            overallScore = model.OverallScore,
-            rating = model.OverallRating.Label,
-            coverage = new
-            {
-                total = model.Coverage.Total,
-                deterministic = model.Coverage.Deterministic,
-                ai = model.Coverage.AiAssisted,
-                manual = model.Coverage.ManualAttestation,
-                needsReview = model.Coverage.NeedsReview,
-                awaiting = model.Coverage.AwaitingValidation,
-                notApplicable = model.Coverage.NotApplicable,
-                risks = model.Findings.Count,
-            },
-            databases = model.Databases.Select(d => new { id = d.Id, name = d.Name }),
-            areas = model.Areas.Select(a => new
-            {
-                number = a.Area.Number,
-                name = model.AreaName(a.Area.Number),
-                weight = a.Area.Weight,
-                score = a.ScorePercent,
-                rating = calculator.GetRiskRating(a.ScorePercent).Label,
-                items = a.Items.Count,
-                validated = a.ScoredCount,
-                categories = a.Categories.Select(c => new
-                {
-                    id = model.CategoryLabel(c.CategoryId),
-                    score = c.ScorePercent,
-                    rating = calculator.GetRiskRating(c.ScorePercent).Label,
-                    validated = c.ScoredCount,
-                    items = c.Items.Count,
-                }),
-            }),
-            controls = model.Items.Select(i => new
-            {
-                id = i.Id,
-                area = i.AreaNumber,
-                category = model.CategoryLabel(i.CategoryId),
-                title = i.Description,
-                status = AuditWorkbookModel.Status(i),
-                score = i.IsScored ? i.Score : null,
-                producedBy = AuditWorkbookModel.ProducedBy(i),
-                severity = AuditWorkbookBuilder.Text(i.Severity),
-                rationale = AuditWorkbookBuilder.Text(i.Finding),
-                databases = AuditWorkbookBuilder.DatabasesOf(i),
-            }),
-            risks = model.Findings.Select(f => new
-            {
-                riskId = f.RiskId,
-                id = f.Item.Id,
-                area = model.AreaName(f.Item.AreaNumber),
-                severity = AuditWorkbookBuilder.Text(f.Item.Severity),
-                risk = f.Severity.RiskScore,
-                likelihood = f.Severity.Likelihood,
-                impact = f.Severity.Impact,
-                sla = f.Severity.Sla,
-                scope = f.Scope,
-                impacted = AuditWorkbookBuilder.DatabaseList(f.ImpactedDatabases, AuditWorkbookBuilder.InstanceScope),
-                finding = AuditWorkbookBuilder.Text(f.Item.Finding),
-                recommendation = AuditWorkbookBuilder.Text(f.Item.Recommendation),
-                status = f.Status,
-            }),
-            accessIssues = model.AccessIssues.Select(a => new
-            {
-                id = a.Item.Id,
-                title = AuditWorkbookBuilder.Text(a.Item.Description),
-                failureType = a.FailureType,
-                status = AuditWorkbookModel.Status(a.Item),
-                detail = a.Detail,
-            }),
-        };
-
-        return HtmlTemplate
-            .Replace("__TARGET__", WebUtility.HtmlEncode(model.Target), StringComparison.Ordinal)
-            .Replace("__GENERATED__", WebUtility.HtmlEncode(model.GeneratedDate), StringComparison.Ordinal)
-            .Replace("__PAYLOAD__", JsonSerializer.Serialize(payload), StringComparison.Ordinal);
+        return RichHtmlReadoutRenderer.Render(model, new[] { model });
     }
 
     // -- helpers -------------------------------------------------------------
@@ -538,6 +500,88 @@ public static class AuditWorkbookDocuments
 
     private static int CountSeverity(IEnumerable<WorkbookFinding> findings, string severity) =>
         findings.Count(f => string.Equals(f.Item.Severity, severity, StringComparison.OrdinalIgnoreCase));
+
+    private static int ValidatedCount(AuditWorkbookModel model) => model.Items.Count(i => i.IsScored);
+
+    private static void AppendModeledScoreOpportunities(StringBuilder sb, AuditWorkbookModel model)
+    {
+        var current = model.OverallScore;
+        sb.AppendLine();
+        sb.AppendLine("### 1.6 Modeled Score Improvement Opportunities");
+        sb.AppendLine();
+        sb.AppendLine("> **Modeled opportunity, not a forecast.** Each scenario holds the validated denominator and area weights constant, changes selected scored controls to 3, then reapplies the audit formula. Final credit requires implementation, evidence, and a rerun.");
+        sb.AppendLine();
+        sb.AppendLine("### Scenario Projections");
+        sb.AppendLine();
+        sb.AppendLine("| Scenario | Controls moved to 3 | Current overall | Projected overall | Increase | Assumption |");
+        sb.AppendLine("|----------|--------------------:|----------------:|------------------:|---------:|------------|");
+        AppendScenario(sb, model, "Close Critical risks", i => IsSeverity(i, "Critical"), "All controls linked to Critical risks reach score 3");
+        AppendScenario(sb, model, "Close Critical and High risks", i => IsSeverity(i, "Critical") || IsSeverity(i, "High"), "All controls linked to Critical/High risks reach score 3");
+        AppendScenario(sb, model, "Raise all score 0 controls", i => i.IsScored && i.Score == 0, "Every currently validated zero reaches score 3");
+        AppendScenario(sb, model, "Raise all score 0-1 controls", i => i.IsScored && i.Score <= 1, "Every currently weak validated control reaches score 3");
+        AppendScenario(sb, model, "Raise every scored control to 3", i => i.IsScored, "Theoretical ceiling for the currently validated denominator");
+
+        sb.AppendLine();
+        sb.AppendLine("### Opportunity by Area");
+        sb.AppendLine();
+        sb.AppendLine("| Area | Current area | Controls below 3 | Projected area if fixed | Area increase | Projected overall | Overall increase |");
+        sb.AppendLine("|------|-------------:|-----------------:|------------------------:|--------------:|------------------:|-----------------:|");
+        foreach (var area in model.Areas)
+        {
+            var selected = area.Items.Where(i => i.IsScored && i.Score < 3).ToHashSet();
+            var projectedArea = ProjectedArea(area, selected.Contains);
+            var projectedOverall = ProjectedOverall(model, selected.Contains);
+            sb.AppendLine(
+                $"| {area.Area.Number}. {Md(model.AreaName(area.Area.Number))} | {AuditWorkbookBuilder.Percent(area.ScorePercent)} | " +
+                $"{selected.Count} | {AuditWorkbookBuilder.Percent(projectedArea)} | {Delta(projectedArea, area.ScorePercent)} | " +
+                $"{AuditWorkbookBuilder.Percent(projectedOverall)} | {Delta(projectedOverall, current)} |");
+        }
+    }
+
+    private static void AppendScenario(
+        StringBuilder sb,
+        AuditWorkbookModel model,
+        string name,
+        Func<ChecklistItemResult, bool> selected,
+        string assumption)
+    {
+        var count = model.Items.Count(i => i.IsScored && i.Score < 3 && selected(i));
+        var projected = ProjectedOverall(model, selected);
+        sb.AppendLine(
+            $"| {name} | {count} | {AuditWorkbookBuilder.Percent(model.OverallScore)} | " +
+            $"{AuditWorkbookBuilder.Percent(projected)} | {Delta(projected, model.OverallScore)} | {assumption} |");
+    }
+
+    private static double? ProjectedOverall(AuditWorkbookModel model, Func<ChecklistItemResult, bool> selected)
+    {
+        var scoredAreas = model.Areas
+            .Select(area => new { Area = area, Score = ProjectedArea(area, selected) })
+            .Where(value => value.Score.HasValue)
+            .ToList();
+        var weight = scoredAreas.Sum(value => value.Area.Area.Weight);
+        return weight <= 0
+            ? null
+            : scoredAreas.Sum(value => value.Score!.Value * value.Area.Area.Weight) / weight;
+    }
+
+    private static double? ProjectedArea(AreaScore area, Func<ChecklistItemResult, bool> selected)
+    {
+        var categories = area.Items
+            .GroupBy(i => i.CategoryId)
+            .Select(group => group.Where(i => i.IsScored).ToList())
+            .Where(items => items.Count > 0)
+            .Select(items => items.Sum(i => selected(i) ? 3 : i.Score!.Value) / (items.Count * 3.0) * 100)
+            .ToList();
+        return categories.Count == 0 ? null : categories.Average();
+    }
+
+    private static bool IsSeverity(ChecklistItemResult item, string severity) =>
+        item.IsScored && string.Equals(item.Severity, severity, StringComparison.OrdinalIgnoreCase);
+
+    private static string Delta(double? projected, double? current) =>
+        projected.HasValue && current.HasValue
+            ? $"+{Math.Max(0, projected.Value - current.Value).ToString("0.00", CultureInfo.InvariantCulture)} pp"
+            : AuditWorkbookBuilder.NoValue;
 
     private static string ScoreText(ChecklistItemResult item) =>
         item.IsScored ? item.Score!.Value.ToString(CultureInfo.InvariantCulture) : AuditWorkbookBuilder.NoValue;
@@ -557,6 +601,7 @@ public static class AuditWorkbookDocuments
             .Replace("\r", " ", StringComparison.Ordinal)
             .Replace("\n", "<br>", StringComparison.Ordinal);
 
+#if false // Superseded by RichHtmlReadoutRenderer; retained temporarily for source-history comparison.
     private const string HtmlTemplate = """
 <!DOCTYPE html>
 <html lang="en">
@@ -718,4 +763,5 @@ document.getElementById("accessBody").innerHTML = data.accessIssues.length
 </body>
 </html>
 """;
+#endif
 }

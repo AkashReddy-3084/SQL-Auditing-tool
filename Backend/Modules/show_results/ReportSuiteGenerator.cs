@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace SqlAuditor.Reporting;
@@ -65,10 +66,44 @@ public sealed class ReportSuiteGenerator
         GenerateIndependently(HtmlReportFileName, () =>
             WriteTextAtomically(
                 Path.Combine(outputDirectory, HtmlReportFileName),
-                AuditWorkbookDocuments.RenderHtmlReadout(model)),
+                RichHtmlReadoutRenderer.Render(model, BuildEstateModels(model, outputDirectory, metadata))),
             messages, reportError);
 
         return messages;
+    }
+
+    private static IReadOnlyList<AuditWorkbookModel> BuildEstateModels(
+        AuditWorkbookModel current,
+        string outputDirectory,
+        ReportMetadata? metadata)
+    {
+        var models = new List<AuditWorkbookModel> { current };
+        var resultsRoot = Directory.GetParent(Path.GetFullPath(outputDirectory))?.FullName;
+        if (resultsRoot is null || !Directory.Exists(resultsRoot)) return models;
+
+        foreach (var directory in Directory.EnumerateDirectories(resultsRoot)
+                     .OrderByDescending(Path.GetFileName, StringComparer.Ordinal))
+        {
+            if (string.Equals(directory, Path.GetFullPath(outputDirectory), StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var jsonPath = Path.Combine(directory, "checklist_results.json");
+            if (!File.Exists(jsonPath)) continue;
+
+            try
+            {
+                var candidate = AuditWorkbookBuilder.Build(jsonPath, directory, metadata ?? new ReportMetadata());
+                if (models.Any(model => string.Equals(model.Target, candidate.Target, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                models.Add(candidate);
+            }
+            catch
+            {
+                // A malformed historical run must not prevent the active report from being generated.
+            }
+        }
+
+        return models;
     }
 
     private static void GenerateIndependently(
