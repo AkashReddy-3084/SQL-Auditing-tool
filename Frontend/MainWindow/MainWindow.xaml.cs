@@ -2071,6 +2071,8 @@ namespace SQLAuditor.Wpf
             InvalidateSqlVerification();
             SetTabIndex(0);
             UpdateStageIndicators();
+            // Rerun and Edit reuse the previous run's server, so the server inputs are locked.
+            SetServerInputsLocked(true);
 
             var mode = editMode ? "Edit" : "Rerun";
             Log($"{mode} mode: reusing run {System.IO.Path.GetFileName(run.RunDirectory)} for {meta.ServerName}. Reports will overwrite the original folder.");
@@ -2088,6 +2090,14 @@ namespace SQLAuditor.Wpf
         }
 
         private void SelectAuthMethod(bool sqlLogin) => AuthMethodCombo.SelectedIndex = sqlLogin ? 1 : 0;
+
+        // The SQL password stays editable (it is never stored and must be re-entered for SQL auth).
+        private void SetServerInputsLocked(bool locked)
+        {
+            FqdnText.IsEnabled = !locked;
+            AuthMethodCombo.IsEnabled = !locked;
+            SqlUserBox.IsEnabled = !locked;
+        }
 
         // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
         private SQLAuditor.Lib.RunInputs BuildRunInputs()
@@ -2175,6 +2185,7 @@ namespace SQLAuditor.Wpf
             _resumeFqdn = null;
             _resumeDatabases = null;
             _resumeSelectedItemIds = null;
+            SetServerInputsLocked(false);
         }
 
         private void ExitSummaryBtn_Click(object sender, RoutedEventArgs e)
