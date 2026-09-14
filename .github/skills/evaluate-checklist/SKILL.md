@@ -117,12 +117,16 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 
 ### 4. Report
 
-`evaluate` generates the full report suite automatically in the run directory. Once every item is
-enriched and reviewed, call `show_reports` and report **its** counts — the counts `evaluate` printed
-are provisional, because Not Applicable is decided during enrichment.
+`evaluate` generates the full report suite automatically in the run directory, but it does **not**
+refresh `results/historical_last_run.json`.
 
-Call `generate_report()` only when an explicit regeneration is needed, or to merge the newly
-evaluated manual results into `results/historical_last_run.json` (existing entries are preserved).
+Once every item is enriched and reviewed, **ask the user whether to generate the final report** —
+e.g. "All items are complete. Shall I generate the final report now?" Never generate it silently.
+- When the user confirms, call `generate_report()`. This is the step that refreshes
+  `results/historical_last_run.json` with the newly evaluated manual results (existing entries are
+  preserved) and regenerates the full report suite.
+- Then call `show_reports` and report **its** counts — the counts `evaluate` printed are provisional,
+  because Not Applicable is decided during enrichment.
 
 ## What gets written
 

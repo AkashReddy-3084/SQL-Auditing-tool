@@ -220,6 +220,23 @@ public static class PreviousEvaluationStore
         return results;
     }
 
+    /// <summary>
+    /// Reads a single run by its directory (full or relative path), for rerun/edit. Returns null
+    /// when the directory or its results are missing.
+    /// </summary>
+    public static PreviousEvaluation? GetRun(string runDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(runDirectory)) return null;
+
+        var full = Path.GetFullPath(runDirectory);
+        if (!Directory.Exists(full)) return null;
+        if (!File.Exists(Path.Combine(full, "checklist_results.json"))) return null;
+
+        AuditOutputPaths.TryParseRunDirectoryName(full, out var startedAt, out var directoryServer);
+        var metadata = Read(full) ?? Reconstruct(full, directoryServer, startedAt);
+        return new PreviousEvaluation { RunDirectory = full, Metadata = metadata };
+    }
+
     private static bool MatchesServer(string directoryServer, string serverName) =>
         string.Equals(directoryServer, serverName, StringComparison.OrdinalIgnoreCase)
         || string.Equals(CollisionSuffix.Replace(directoryServer, string.Empty), serverName, StringComparison.OrdinalIgnoreCase);

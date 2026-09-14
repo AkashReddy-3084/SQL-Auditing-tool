@@ -48,13 +48,25 @@ public static class AuditTools
 
     [McpServerTool(Name = "evaluate")]
     [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes checklist_results.json and the complete report suite in a timestamp-and-server run directory under results.")]
-    public static async Task<string> EvaluateAsync(
+    public static Task<string> EvaluateAsync(
         [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
         [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 3: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
         [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
         [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         CancellationToken cancellationToken = default)
+        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
+
+    // Shared core used by both `evaluate` (fresh run) and `rerun_evaluation` (same folder).
+    private static async Task<string> EvaluateCoreAsync(
+        string? manualResults,
+        string? server,
+        string? authMethod,
+        string? sqlUser,
+        string? items,
+        bool reuseActiveRunDirectory,
+        string[]? targetDatabases,
+        CancellationToken cancellationToken)
     {
         // STEP 1 — manual-results source. Asked first, and always answered by the user.
         var manualMode = manualResults?.Trim().ToLowerInvariant();
@@ -156,10 +168,19 @@ public static class AuditTools
         // Manual items with a reusable historical result are copied forward inside the engine
         // when the user chose Option 1, so they never reach the review queue below.
         // Generate the complete report suite from this run's persisted results.
+        // Record the server/auth so this run can be rerun or edited later.
+        auditor.LastRunInputs = new RunInputs
+        {
+            Fqdn = server,
+            AuthMethod = method == "sql" ? "SQL Login" : "Windows Authentication",
+            SqlUser = method == "sql" ? sqlUser : null,
+        };
+
         var results = await auditor.RunChecklistAsync(
             null, null, valid, cancellationToken,
             useHistoricalManualResults.Value,
-            generateReports: true);
+            generateReports: true, targetDatabases: targetDatabases,
+            reuseActiveRunDirectory: reuseActiveRunDirectory);
 
         var sb = new StringBuilder();
         if (unknown.Length > 0)
@@ -271,7 +292,109 @@ public static class AuditTools
         sb.AppendLine("Report suite generated in the same run directory:");
         foreach (var fileName in ReportSuiteGenerator.FileNames)
             sb.AppendLine($"- {fileName}");
+        sb.AppendLine();
+        sb.AppendLine("FINAL STEP \u2014 once every item above is resolved and enriched, ASK the user whether to generate the final report. "
+            + "Only when they confirm, call generate_report \u2014 that step refreshes historical_last_run.json. Never generate it silently.");
         return sb.ToString();
+    }
+
+    [McpServerTool(Name = "list_evaluations")]
+    [Description("List the most recent evaluation runs across all servers (newest first), each with an index, server, date, score, item count, status and run directory. Use an index with rerun_evaluation to redo one in place.")]
+    public static Task<string> ListEvaluationsAsync(
+        [Description("How many recent runs to list. Defaults to 5.")] int count = 5)
+    {
+        if (count <= 0) count = 5;
+        var runs = PreviousEvaluationStore.FindRecentAcrossServers(count);
+        if (runs.Count == 0)
+            return Task.FromResult("No previous evaluation runs were found under the results/ folder.");
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"{runs.Count} most recent evaluation run(s) across all servers:");
+        for (int i = 0; i < runs.Count; i++)
+        {
+            var r = runs[i];
+            var m = r.Metadata;
+            sb.AppendLine();
+            sb.AppendLine($"[{i + 1}] {m.ServerName} \u2014 {r.EvaluatedDisplay} \u2014 {r.ScoreDisplay}");
+            sb.AppendLine($"    Items: {m.ItemCount}   Status: {m.Status}   Duration: {r.DurationDisplay}");
+            sb.AppendLine($"    Run: {r.RunDirectory}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("Rerun one with: rerun_evaluation(run=\"<index-or-path>\", manualResults=\"last-runs|fresh\").");
+        return Task.FromResult(sb.ToString());
+    }
+
+    [McpServerTool(Name = "rerun_evaluation")]
+    [Description("Re-run (or edit) a previous evaluation, overwriting its reports in the SAME run directory. Provide 'run' as an index from list_evaluations or a run directory path. The server and authentication are always reused from the original run and cannot be changed; only the checklist items may be edited via 'items'. Manual-results handling still comes from the user (manualResults='last-runs' or 'fresh'), and for SQL Login the password is read from SQLAUDITOR_SQL_PASSWORD, never chat.")]
+    public static async Task<string> RerunEvaluationAsync(
+        [Description("Which run to redo: an index from list_evaluations (e.g. '1') or a run directory path.")] string? run = null,
+        [Description("How manual/AI-Manual items are handled: 'last-runs' to copy prior decisions, or 'fresh'. MUST come from the user.")] string? manualResults = null,
+        [Description("Optional: override the checklist items (edit). Defaults to the run's stored selection.")] string? items = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(run))
+            return "Provide 'run' \u2014 an index from list_evaluations or a run directory path. Call list_evaluations to see the choices.";
+
+        var selected = ResolveRunSelection(run);
+        if (selected is null)
+            return $"No completed run found for '{run}'. Call list_evaluations to see valid indexes and paths.";
+        var meta = selected.Metadata;
+
+        // Server and authentication are always reused from the original run and cannot be changed
+        // on rerun/edit; only the checklist items may be overridden.
+        var server = meta.Fqdn;
+        var authMethod = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? "sql" : "windows";
+        var sqlUser = meta.SqlUser;
+        if (string.IsNullOrWhiteSpace(items) && meta.SelectedItemIds is { Count: > 0 })
+            items = string.Join(",", meta.SelectedItemIds);
+
+        // Manual-results source is the only thing that must come from the user. Gate it HERE with a
+        // rerun-specific prompt so the follow-up turn calls rerun_evaluation again — NEVER evaluate,
+        // which would start a fresh run in a NEW folder instead of updating the original.
+        var manualMode = manualResults?.Trim().ToLowerInvariant();
+        var manualResolved = manualMode is "last-runs" or "lastruns" or "last" or "historical" or "reuse" or "1"
+                                        or "fresh" or "new" or "none" or "2";
+        if (!manualResolved)
+            return $"To rerun run '{run}' ({meta.ServerName}), ask the user how manual/AI-Manual items should be handled, then "
+                 + "call rerun_evaluation AGAIN (NOT evaluate) with the same 'run' plus manualResults set:\n"
+                 + "  Option 1 \u2014 Use the Last Runs: manualResults='last-runs'\n"
+                 + "  Option 2 \u2014 Fresh Evaluation: manualResults='fresh'\n"
+                 + "Do NOT call 'evaluate' for a rerun \u2014 that creates a new run folder instead of updating the original.";
+
+        if (string.IsNullOrWhiteSpace(server))
+            return $"Run '{run}' predates input capture and has no stored server, so it cannot be rerun here. Run a fresh 'evaluate' instead.";
+        if (string.IsNullOrWhiteSpace(items))
+            return $"Run '{run}' has no stored checklist items. Call rerun_evaluation again with 'items' set (e.g. '1.1.1,2.1.4').";
+        if (string.Equals(authMethod, "sql", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD")))
+            return $"Run '{run}' uses SQL Login ('{sqlUser}'), but SQLAUDITOR_SQL_PASSWORD is not set. Ask the user to set it in the "
+                 + "session that launched VS Code, restart the server, then call rerun_evaluation again \u2014 or use Windows auth.";
+
+        var targetDatabases = (meta.Databases is { Count: > 0 }) ? meta.Databases.ToArray() : null;
+
+        // Reuse the SAME folder so the reports are overwritten in place.
+        AuditOutputPaths.ResumeRun(selected.RunDirectory);
+
+        return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items,
+            reuseActiveRunDirectory: true, targetDatabases: targetDatabases, cancellationToken);
+    }
+
+    // Resolves a run argument to a stored run: a 1-based index into the recent-runs list,
+    // a run directory path, or just the folder name under results/.
+    private static PreviousEvaluation? ResolveRunSelection(string runArg)
+    {
+        runArg = runArg.Trim();
+        if (int.TryParse(runArg, out var idx) && idx > 0)
+        {
+            var recent = PreviousEvaluationStore.FindRecentAcrossServers(Math.Max(idx, 5));
+            return idx <= recent.Count ? recent[idx - 1] : null;
+        }
+
+        var direct = PreviousEvaluationStore.GetRun(runArg);
+        if (direct != null) return direct;
+
+        var underResults = Path.Combine(AuditOutputPaths.RootDirectory, runArg);
+        return PreviousEvaluationStore.GetRun(underResults);
     }
 
     [McpServerTool(Name = "generate_report")]
