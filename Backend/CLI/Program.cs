@@ -368,6 +368,14 @@ namespace SQLAuditor
                 Console.CancelKeyPress -= onCancel;
             }
 
+            if (auditor.LastDetectedPlatform is { } rerunPlatform
+                && rerunPlatform.Platform != SQLAuditor.Lib.PlatformApplicability.PlatformUnknown)
+            {
+                Console.WriteLine($"Detected platform: {rerunPlatform.Display} (EngineEdition {rerunPlatform.EngineEdition}).");
+                if (auditor.LastPlatformExclusionCount > 0)
+                    Console.WriteLine($"{auditor.LastPlatformExclusionCount} item(s) recorded as Not Applicable to this platform - no script ran and no model was called for them.");
+            }
+
             Console.WriteLine();
             Console.WriteLine("Summary:");
             foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key))
