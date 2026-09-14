@@ -126,6 +126,12 @@ namespace SQLAuditor.Lib
         private ScriptResultAiEnricher? _scriptEnricher;
         private ManualResultAiEnricher? _manualResultEnricher;
 
+        /// <summary>The normalized connection string this auditor runs against.</summary>
+        public string ConnectionString => _connectionString;
+
+        /// <summary>UI-supplied inputs (server/auth/LLM) recorded with the run so it can be rerun or edited later.</summary>
+        public RunInputs? LastRunInputs { get; set; }
+
         public Auditor(string connectionString)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
@@ -885,11 +891,17 @@ WHERE d.name = DB_NAME();";
             System.Threading.CancellationToken cancellationToken,
             bool useHistoricalManualResults,
             bool generateReports,
-            System.Collections.Generic.IEnumerable<string>? targetDatabases)
+            System.Collections.Generic.IEnumerable<string>? targetDatabases,
+            bool reuseActiveRunDirectory = false)
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
-            var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
+            var runStartedAt = DateTime.Now;
+            // Rerun/edit reuses the already-resumed run directory so reports overwrite the same
+            // timestamp folder; a normal run creates a fresh directory.
+            var resultsDir = reuseActiveRunDirectory
+                ? AuditOutputPaths.CurrentRunDirectory
+                : AuditOutputPaths.BeginRun(_connectionString);
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
@@ -1687,6 +1699,23 @@ WHERE d.name = DB_NAME();";
             }
             catch { }
 
+            // Makes this run discoverable as the server's previous evaluation, and records the
+            // inputs needed to rerun or edit it later (never the password or API key).
+            try
+            {
+                var runInputs = (LastRunInputs ?? new RunInputs()) with
+                {
+                    Databases = databaseTargets?.ToList(),
+                    SelectedItemIds = selectedIds?
+                        .Where(id => !string.IsNullOrWhiteSpace(id))
+                        .Select(id => id.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                };
+                PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now, runInputs);
+            }
+            catch { }
+
             // Automatically produce the final Markdown summary report and the Excel workbook from
             // the freshly written checklist_results.json. The historical manual results are NOT
             // refreshed here: that happens only when the user explicitly asks for the report.
@@ -1766,6 +1795,10 @@ WHERE d.name = DB_NAME();";
             {
                 messages.Add(message);
             }
+
+            // Keeps the reusable run summary aligned with manual decisions made after the engine finished.
+            try { PreviousEvaluationStore.Refresh(resultsDir); }
+            catch { }
 
             return string.Join(Environment.NewLine, messages);
         }

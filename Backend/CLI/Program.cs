@@ -20,6 +20,18 @@ namespace SQLAuditor
                 return await RunEvaluateCommandAsync(args);
             }
 
+            // List the most recent evaluation runs across all servers.
+            if (args.Length > 0 && string.Equals(args[0], "history", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunHistoryCommand(args);
+            }
+
+            // Rerun (or edit) a previous run, overwriting its reports in the same folder.
+            if (args.Length > 0 && string.Equals(args[0], "rerun", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunRerunCommandAsync(args);
+            }
+
             // Record a review decision for a NeedsReview item (used by the Copilot CLI skill).
             if (args.Length > 0 && string.Equals(args[0], "resolve_review", StringComparison.OrdinalIgnoreCase))
             {
@@ -185,6 +197,232 @@ namespace SQLAuditor
             }
         }
 
+        // ---------------------------------------------------------------------
+        // `history` subcommand: list the most recent runs across all servers
+        // ---------------------------------------------------------------------
+        static int RunHistoryCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            int count = 5;
+            var countOpt = GetOption(opts, "count");
+            if (!string.IsNullOrWhiteSpace(countOpt) && int.TryParse(countOpt, out var c) && c > 0) count = c;
+
+            var runs = SQLAuditor.Lib.PreviousEvaluationStore.FindRecentAcrossServers(count);
+            if (runs.Count == 0)
+            {
+                Console.WriteLine("No previous evaluation runs were found under the results/ folder.");
+                return 0;
+            }
+
+            Console.WriteLine($"{runs.Count} most recent evaluation run(s) across all servers:");
+            Console.WriteLine();
+            for (int i = 0; i < runs.Count; i++)
+            {
+                var r = runs[i];
+                var m = r.Metadata;
+                Console.WriteLine($"[{i + 1}] {m.ServerName}   {r.EvaluatedDisplay}   {r.ScoreDisplay}");
+                Console.WriteLine($"     Items: {m.ItemCount}   Status: {m.Status}   Duration: {r.DurationDisplay}");
+                Console.WriteLine($"     Run:   {r.RunDirectory}");
+                Console.WriteLine();
+            }
+            Console.WriteLine("Rerun one with:  sqlauditor rerun --run <index-or-path> --manual-results <last-runs|fresh> [--server <host>] [--user <name>] [--items <ids>]");
+            return 0;
+        }
+
+        // ---------------------------------------------------------------------
+        // `rerun` subcommand: re-run a previous run into the SAME folder.
+        // With no overrides it reruns exactly; --items / --server act as an edit.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunRerunCommandAsync(string[] args)
+        {
+            try
+            {
+                return await RunRerunCoreAsync(args);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}");
+                return 3;
+            }
+        }
+
+        static async Task<int> RunRerunCoreAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h")) { PrintRerunUsage(); return 0; }
+            bool copilotMode = opts.ContainsKey("copilot");
+
+            var runArg = GetOption(opts, "run");
+            if (string.IsNullOrWhiteSpace(runArg))
+            {
+                Console.Error.WriteLine("Error: --run <index-or-path> is required. Run 'sqlauditor history' to list runs.");
+                return 2;
+            }
+            var run = ResolveRunSelection(runArg);
+            if (run is null)
+            {
+                Console.Error.WriteLine($"Error: could not find a completed run for '{runArg}'. Run 'sqlauditor history' to list runs.");
+                return 2;
+            }
+            var meta = run.Metadata;
+
+            bool? useHistorical = ResolveManualResultsMode(opts);
+            if (useHistorical is null)
+            {
+                if (copilotMode)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("=== MANUAL RESULTS SOURCE REQUIRED (rerun) ===");
+                    Console.WriteLine("Ask the user how manual items should be handled, then run 'rerun' AGAIN (NOT 'evaluate')");
+                    Console.WriteLine($"with the same --run {runArg} plus EXACTLY ONE of:");
+                    Console.WriteLine("  --manual-results last-runs     (Option 1 \u2014 reuse the last runs)");
+                    Console.WriteLine("  --manual-results fresh         (Option 2 \u2014 evaluate fresh)");
+                    Console.WriteLine("Do NOT run 'evaluate' for a rerun \u2014 that creates a new run folder instead of updating the original.");
+                    Console.WriteLine("=== END ===");
+                    return 2;
+                }
+                useHistorical = PromptManualResultsMode();
+            }
+
+            // Server and authentication are reused from the original run and cannot be changed on
+            // rerun/edit; only the checklist items may be overridden.
+            string? server = meta.Fqdn;
+            if (string.IsNullOrWhiteSpace(server))
+            {
+                Console.Error.WriteLine("Error: this run predates input capture and has no stored server, so it cannot be rerun. Run 'evaluate' instead.");
+                return 2;
+            }
+
+            string? user = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? meta.SqlUser : null;
+            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+            if (!string.IsNullOrWhiteSpace(user) && string.IsNullOrWhiteSpace(pass))
+            {
+                if (copilotMode)
+                {
+                    Console.Error.WriteLine($"Error: SQL Login user '{user}' requires a password. Set SQLAUDITOR_SQL_PASSWORD in your session.");
+                    return 2;
+                }
+                pass = PromptSecret($"SQL password for '{user}':");
+            }
+
+            string connectionString = !string.IsNullOrWhiteSpace(user)
+                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
+                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+
+            // Items: override with --items, else reuse the stored selection.
+            var itemsCsv = GetOption(opts, "items");
+            string[] ids = !string.IsNullOrWhiteSpace(itemsCsv)
+                ? itemsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+                : (meta.SelectedItemIds ?? Array.Empty<string>()).ToArray();
+            if (ids.Length == 0) { Console.Error.WriteLine("Error: this run has no stored checklist items; pass --items."); return 2; }
+
+            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var structure = await auditor.GetChecklistStructureAsync();
+            var knownIds = new System.Collections.Generic.HashSet<string>(
+                structure.SelectMany(s => s.Items).Select(i => i.Id), StringComparer.OrdinalIgnoreCase);
+            var validIds = ids.Where(id => knownIds.Contains(id)).ToArray();
+            if (validIds.Length == 0) { Console.Error.WriteLine("Error: none of the checklist IDs exist."); return 2; }
+
+            // Databases: reuse the stored scope where present (null = all user databases).
+            var targetDatabases = (meta.Databases != null && meta.Databases.Count > 0) ? meta.Databases.ToArray() : null;
+
+            Console.WriteLine($"Rerunning {validIds.Length} item(s) into the original folder: {run.RunDirectory}");
+            Console.WriteLine($"Target server: {server}");
+            Console.WriteLine(useHistorical.Value
+                ? "Manual items: reusing last-runs results where available."
+                : "Manual items: fresh evaluation.");
+            Console.WriteLine();
+
+            // Reuse the SAME run folder so the reports are overwritten in place.
+            SQLAuditor.Lib.AuditOutputPaths.ResumeRun(run.RunDirectory);
+            auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
+            {
+                Fqdn = server,
+                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
+                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+            };
+
+            using var cts = new System.Threading.CancellationTokenSource();
+            ConsoleCancelEventHandler onCancel = (_, e) =>
+            {
+                e.Cancel = true;
+                if (!cts.IsCancellationRequested) { Console.WriteLine(); Console.WriteLine("Cancellation requested \u2014 stopping after the current item..."); cts.Cancel(); }
+            };
+            Console.CancelKeyPress += onCancel;
+
+            SQLAuditor.Lib.ChecklistResult[] results;
+            try
+            {
+                var progress = new Progress<SQLAuditor.Lib.ChecklistResult>(r =>
+                {
+                    if (string.Equals(r.Outcome, "Evaluating", StringComparison.OrdinalIgnoreCase)) return;
+                    Console.WriteLine($"  [{r.Id}] {r.Outcome,-11} ({r.Technique}) - {r.Description}");
+                });
+                results = await auditor.RunChecklistAsync(
+                    progress, null, validIds, cts.Token,
+                    useHistorical.Value, generateReports: true,
+                    targetDatabases: targetDatabases, reuseActiveRunDirectory: true);
+            }
+            finally
+            {
+                Console.CancelKeyPress -= onCancel;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Summary:");
+            foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key))
+                Console.WriteLine($"  {g.Key,-12}: {g.Count()}");
+
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
+            Console.WriteLine();
+            Console.WriteLine($"Reports updated in the original folder: {resultsDir}");
+
+            bool anyFail = results.Any(r => string.Equals(r.Outcome, "Fail", StringComparison.OrdinalIgnoreCase));
+            return anyFail ? 1 : 0;
+        }
+
+        // Resolves a --run argument to a stored run: a 1-based index into the recent-runs
+        // list, a run directory path, or just the folder name under results/.
+        static SQLAuditor.Lib.PreviousEvaluation? ResolveRunSelection(string runArg)
+        {
+            runArg = runArg.Trim();
+            if (int.TryParse(runArg, out var idx) && idx > 0)
+            {
+                var recent = SQLAuditor.Lib.PreviousEvaluationStore.FindRecentAcrossServers(Math.Max(idx, 5));
+                return idx <= recent.Count ? recent[idx - 1] : null;
+            }
+
+            var direct = SQLAuditor.Lib.PreviousEvaluationStore.GetRun(runArg);
+            if (direct != null) return direct;
+
+            var underResults = Path.Combine(SQLAuditor.Lib.AuditOutputPaths.RootDirectory, runArg);
+            return SQLAuditor.Lib.PreviousEvaluationStore.GetRun(underResults);
+        }
+
+        static void PrintRerunUsage()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Usage: sqlauditor rerun --run <index-or-path> [options]");
+            Console.WriteLine();
+            Console.WriteLine("Re-runs a previous evaluation and overwrites its reports in the SAME run");
+            Console.WriteLine("folder. The server and authentication are reused from the original run and");
+            Console.WriteLine("cannot be changed; only the checklist items may be edited via --items.");
+            Console.WriteLine();
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --run <index|path>  Which run to redo: a number from 'sqlauditor history',");
+            Console.WriteLine("                      a run directory path, or a folder name under results/.");
+            Console.WriteLine("  --manual-results <last-runs|fresh>  How manual items are handled.");
+            Console.WriteLine("  --items <ids>       Override the checklist IDs (edit). Defaults to the stored set.");
+            Console.WriteLine("  --password <pw>     SQL login password (only if the run used SQL Login).");
+            Console.WriteLine("                      Or set SQLAUDITOR_SQL_PASSWORD.");
+            Console.WriteLine("  --copilot           Non-interactive mode for the Copilot CLI skill.");
+            Console.WriteLine("  --help              Show this help.");
+            Console.WriteLine();
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  sqlauditor rerun --run 1 --manual-results last-runs");
+            Console.WriteLine("  sqlauditor rerun --run 1 --items 1.1.1,2.1.4 --fresh   (edit the selection)");
+        }
+
         static async Task<int> RunEvaluateCoreAsync(string[] args)
         {
             var opts = ParseOptions(args);
@@ -339,6 +577,14 @@ namespace SQLAuditor
                     }
                 }
             });
+
+            // Record the server/auth for this run so it can be rerun or edited later.
+            auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
+            {
+                Fqdn = server,
+                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
+                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+            };
 
             SQLAuditor.Lib.ChecklistResult[] results;
             try

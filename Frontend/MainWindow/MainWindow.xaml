@@ -237,6 +237,7 @@
                     <TextBlock Text="Enterprise review workspace for SQL checklist evaluation, manual follow-up, and reporting." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0" />
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="EvaluationHistoryBtn" Content="Evaluation History" Style="{StaticResource ModernButton}" Click="EvaluationHistoryBtn_Click" Margin="0,0,12,0" MinWidth="150" ToolTip="View the 5 most recent evaluation runs and rerun or edit one." />
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage1Label" Text="1  Login" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage2Label" Text="2  Checklist" FontSize="14" FontWeight="SemiBold" /></Border>
                     <Border Style="{StaticResource StagePill}"><TextBlock x:Name="Stage3Label" Text="3  Evaluate" FontSize="14" FontWeight="SemiBold" /></Border>

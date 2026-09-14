@@ -36,6 +36,13 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 >   SQL Server and **no** credentials. Never start an evaluation for a script-generation request,
 >   and never generate scripts when asked to evaluate.
 
+> **Rerun/redo a previous run — use `rerun`, NEVER `evaluate`.**
+> When the user asks to "rerun", "redo", "re-evaluate", "update", or "run again" a previous
+> evaluation (or points at a run from `history`), use the **rerun** command below. It overwrites
+> the reports **in the original run folder**. Do NOT call `evaluate` for this — `evaluate` always
+> creates a NEW timestamped folder. The server, authentication and databases are reused from the
+> original run and cannot be changed; only `--items` may be edited.
+
 ## Commands
 
 - **evaluate** — run the evaluation engine (no LLM) and surface Needs Review items:
@@ -43,6 +50,18 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results <last-runs|fresh> --items <ids> --server <host> [--user <name>]
   ```
   `--manual-results` is **required** and must come from the user (see step 1 below).
+- **history** — list the most recent runs across all servers (newest first, each with an index):
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 history
+  ```
+- **rerun** — re-run (or edit) a previous run, overwriting its reports in the SAME folder:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 rerun --run <index-or-path> --copilot --manual-results <last-runs|fresh> [--items <ids>]
+  ```
+  `--run` is an index from `history` or a run directory path. The server, authentication and
+  databases are reused from that run; pass `--items` only to edit the checklist selection. Like
+  `evaluate`, `--manual-results` is **required** and must come from the user. This updates the
+  original folder — it does NOT create a new run directory.
 - **generate_report** — refresh the historical manual results and render the final outputs:
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report
@@ -154,10 +173,15 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
      needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
 8. Do not write a final summary until every review item is resolved and every script item
    is enriched. The full report suite is generated automatically by `evaluate` in the run
-   directory. Then run **show_reports** and report **its** counts — the counts `evaluate` printed
-   are provisional, because Not Applicable is decided during enrichment.
-   - Run **generate_report** only when an explicit regeneration is needed, or to merge the newly
-     evaluated manual results into `results/historical_last_run.json` (existing entries are preserved).
+   directory (but `results/historical_last_run.json` is **not** refreshed there).
+9. **Once every item is resolved and enriched, ASK the user whether to generate the final
+   report** — e.g. "All items are complete. Shall I generate the final report now?" Wait for
+   their answer; never generate it silently.
+   - When the user confirms, run **generate_report**. This is the step that refreshes
+     `results/historical_last_run.json` with the newly evaluated manual results (existing entries
+     are preserved) and regenerates the full report suite in the run directory.
+   - Then run **show_reports** and report **its** counts — the counts `evaluate` printed are
+     provisional, because Not Applicable is decided during enrichment.
 
 ## Generating scripts (separate from evaluation)
 
