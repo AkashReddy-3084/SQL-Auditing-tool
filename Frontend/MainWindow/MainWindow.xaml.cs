@@ -119,10 +119,41 @@ namespace SQLAuditor.Wpf
         private bool _suppressDatabaseSelectionSync = false;
         private int _sqlConnectionInputsVersion = 0;
         private bool _isVerifyingSql = false;
+        // Servers queued for a fleet audit. One entry behaves exactly like the old single-server flow.
+        private readonly System.Collections.ObjectModel.ObservableCollection<ServerEntry> _servers = new();
+        private bool _suppressMultiServerToggle;
+        // Per-server copies of the evaluation/manual state, keyed by ServerEntry.DisplayName.
+        private readonly System.Collections.Generic.Dictionary<string, ServerUiState> _serverUiStates =
+            new(StringComparer.OrdinalIgnoreCase);
+        private string? _selectedServerKey;
+        // Set during a fleet run so file writes target the selected server, not the process-wide run.
+        private string? _uiRunDirectory;
+        private string? _batchDirectory;
+
+        private sealed class ServerUiState
+        {
+            public required string DisplayName { get; init; }
+            public string? RunDirectory { get; set; }
+            public System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)> EvalItemMap { get; set; } = new();
+            public System.Collections.Generic.Dictionary<string, (string Status, string Technique)> EvalStatusMap { get; set; } = new();
+            public System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem> ManualQueue { get; set; } = new();
+            public System.Collections.Generic.Dictionary<string, string> ManualInstructions { get; set; } = new();
+            public System.Collections.Generic.Dictionary<string, ManualEvaluationState> ManualStateMap { get; set; } = new();
+            public System.Collections.Generic.HashSet<string> CopiedManualIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+            public int ManualIndex { get; set; } = -1;
+        }
+
+        private string UiRunDirectory => _uiRunDirectory ?? AuditOutputPaths.CurrentRunDirectory;
+
+        private string UiFilePath(string fileName) => System.IO.Path.Combine(UiRunDirectory, fileName);
 
         public MainWindow()
         {
             InitializeComponent();
+            ServerListBox.ItemsSource = _servers;
+            ServerProgressList.ItemsSource = _servers;
+            _servers.CollectionChanged += (s, e) => UpdateServerListSummary();
+            UpdateServerListSummary();
             // wire auth selection UI
             AuthMethodCombo.SelectionChanged += (s, e) =>
             {
@@ -539,8 +570,501 @@ namespace SQLAuditor.Wpf
             Log("Load Scripts button is deprecated; use Load Checklist instead.");
         }
 
+        private void UpdateServerListSummary()
+        {
+            ServerListCountText.Text = _servers.Count switch
+            {
+                0 => "none added",
+                1 => "1 server",
+                _ => $"{_servers.Count} servers"
+            };
+
+            var hasServers = _servers.Count > 0;
+            ServerListBox.Visibility = hasServers ? Visibility.Visible : Visibility.Collapsed;
+            ServerEmptyState.Visibility = hasServers ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private void AddServerBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var fqdn = FqdnText.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(fqdn))
+            {
+                MessageBox.Show(this, "Enter a SQL Server FQDN before adding it to the list.", "Server Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // The same instance may be added more than once; each copy needs its own label so
+            // progress and run folders stay distinguishable.
+            var label = fqdn;
+            var copy = 2;
+            while (_servers.Any(s => string.Equals(s.DisplayName, label, StringComparison.OrdinalIgnoreCase)))
+            {
+                label = $"{fqdn} #{copy++}";
+            }
+
+            var isSqlLogin = string.Equals(
+                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
+                "SQL Login", StringComparison.OrdinalIgnoreCase);
+
+            if (isSqlLogin && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            {
+                MessageBox.Show(this, "SQL Login needs both a username and a password.", "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var selectedDatabases = GetSelectedDatabaseNames();
+            var entry = new ServerEntry
+            {
+                Server = fqdn,
+                Name = label,
+                AuthMode = isSqlLogin ? ServerAuthMode.Sql : ServerAuthMode.Windows,
+                User = isSqlLogin ? SqlUserBox.Text.Trim() : null,
+                Password = isSqlLogin ? SqlPassBox.Password : null,
+                Databases = selectedDatabases.Length > 0 ? selectedDatabases : null,
+                Status = _isVerified ? "Verified" : "Not verified",
+            };
+
+            _servers.Add(entry);
+            Log($"Added {label} to the server list ({entry.AuthLabel}).");
+        }
+
+        private void RemoveServerRow_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as System.Windows.Controls.Button)?.Tag is not ServerEntry entry) return;
+
+            _servers.Remove(entry);
+            Log($"Removed {entry.DisplayName} from the server list.");
+        }
+
+        /// <summary>
+        /// Multi-server mode is opt-in: the evaluation dispatch keys off _servers.Count, so leaving
+        /// the mode clears the list to keep a single-server run on the single-server path.
+        /// </summary>
+        private void MultiServerToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_suppressMultiServerToggle) return;
+
+            var multiServer = MultiServerToggle.IsChecked == true;
+
+            if (!multiServer && _servers.Count > 0)
+            {
+                var confirm = MessageBox.Show(
+                    this,
+                    $"Switching back to a single-server audit removes the {_servers.Count} server(s) you added. Continue?",
+                    "Clear Server List",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (confirm != MessageBoxResult.Yes)
+                {
+                    _suppressMultiServerToggle = true;
+                    MultiServerToggle.IsChecked = true;
+                    _suppressMultiServerToggle = false;
+                    return;
+                }
+
+                _servers.Clear();
+            }
+
+            ServerListSection.Visibility = multiServer ? Visibility.Visible : Visibility.Collapsed;
+            ServersRow.Height = multiServer ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+
+            Log(multiServer
+                ? "Multi-server mode on — add the servers to run in parallel."
+                : "Multi-server mode off — only the verified server will be audited.");
+        }
+
+        /// <summary>
+        /// Once the server list is scrolled to its limit, hand the wheel back to the page so the
+        /// tab keeps scrolling instead of stalling under the cursor.
+        /// </summary>
+        private void ServerListBox_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+        {
+            var scroll = FindDescendant<System.Windows.Controls.ScrollViewer>(ServerListBox);
+            if (scroll == null) return;
+
+            var atTop = e.Delta > 0 && scroll.VerticalOffset <= 0;
+            var atBottom = e.Delta < 0 && scroll.VerticalOffset >= scroll.ScrollableHeight;
+            if (!atTop && !atBottom) return;
+
+            e.Handled = true;
+            ServerListBox.RaiseEvent(new System.Windows.Input.MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = UIElement.MouseWheelEvent,
+                Source = ServerListBox,
+            });
+        }
+
+        private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+        {
+            var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+            for (var i = 0; i < count; i++)
+            {
+                var child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+                if (child is T match) return match;
+
+                var nested = FindDescendant<T>(child);
+                if (nested != null) return nested;
+            }
+
+            return null;
+        }
+
+        private void ImportServersBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new OpenFileDialog
+            {
+                Title = "Import server list",
+                Filter = "Server list (*.json;*.csv)|*.json;*.csv|All files (*.*)|*.*",
+            };
+            if (dialog.ShowDialog(this) != true) return;
+
+            var loaded = ServerTargetLoader.FromFile(dialog.FileName);
+            foreach (var error in loaded.Errors) Log($"Server list: {error}");
+
+            var added = 0;
+            foreach (var target in loaded.Targets)
+            {
+                if (_servers.Any(s => string.Equals(s.DisplayName, target.DisplayName, StringComparison.OrdinalIgnoreCase))) continue;
+                _servers.Add(new ServerEntry
+                {
+                    Server = target.Server,
+                    Name = target.DisplayName,
+                    AuthMode = target.AuthMode,
+                    User = target.User,
+                    Password = target.Password,
+                    Databases = target.Databases,
+                });
+                added++;
+            }
+
+            Log($"Imported {added} server(s) from {System.IO.Path.GetFileName(dialog.FileName)}.");
+            if (added == 0 && loaded.Errors.Count > 0)
+            {
+                MessageBox.Show(this, string.Join(Environment.NewLine, loaded.Errors), "Import Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        /// <summary>
+        /// Fleet path: every server runs the same item selection concurrently, each in its own run
+        /// folder and with its own copy of the evaluation/manual UI state. The Servers list selects
+        /// which server the tree and the manual panel are showing.
+        /// </summary>
+        private async Task RunMultiServerEvaluationAsync(System.Collections.Generic.List<string> selected)
+        {
+            var maxParallel = MultiServerRunOptions.DefaultMaxParallel;
+
+            SetTabIndex(2);
+            UpdateStageIndicators();
+            EvalTree.Items.Clear();
+            ServerProgressPanel.Visibility = Visibility.Visible;
+            _batchDirectory = MultiServerRunner.CreateBatchDirectory();
+
+            _checklistOrder = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (_loadedStructure != null)
+            {
+                var checklistPosition = 0;
+                foreach (var pair in _loadedStructure) _checklistOrder[pair.Item.Id] = checklistPosition++;
+            }
+
+            _serverUiStates.Clear();
+            _selectedServerKey = null;
+            foreach (var entry in _servers)
+            {
+                var state = new ServerUiState { DisplayName = entry.DisplayName };
+                PopulateServerUiState(state, selected);
+                _serverUiStates[entry.DisplayName] = state;
+                entry.Status = "Queued";
+            }
+
+            // Progress objects must be built here so each one captures the UI SynchronizationContext;
+            // the runner invokes the factory from a worker thread.
+            var progressByServer = new System.Collections.Generic.Dictionary<string, IProgress<SQLAuditor.Lib.ChecklistResult>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in _servers)
+            {
+                var key = entry.DisplayName;
+                progressByServer[key] = new Progress<SQLAuditor.Lib.ChecklistResult>(r => ApplyServerItemProgress(key, r));
+            }
+
+            SelectServer(_servers[0].DisplayName);
+            Log($"Starting fleet evaluation of {_servers.Count} server(s), {maxParallel} at a time.");
+
+            var serverProgress = new Progress<ServerRunResult>(r =>
+            {
+                var entry = _servers.FirstOrDefault(s => string.Equals(s.DisplayName, r.DisplayName, StringComparison.OrdinalIgnoreCase));
+                if (entry != null)
+                {
+                    entry.Status = r.Status switch
+                    {
+                        ServerRunStatus.Running => "Running...",
+                        ServerRunStatus.Succeeded => $"Done ({r.ItemsEvaluated})",
+                        ServerRunStatus.Canceled => "Canceled",
+                        _ => "Failed"
+                    };
+                    entry.RunDirectory = r.RunDirectory;
+                }
+
+                if (_serverUiStates.TryGetValue(r.DisplayName, out var state))
+                {
+                    state.RunDirectory = r.RunDirectory;
+                    if (string.Equals(_selectedServerKey, r.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _uiRunDirectory = r.RunDirectory;
+                    }
+                }
+
+                if (r.Status == ServerRunStatus.Running) return;
+
+                RequestEvaluationTreeRender();
+                Log(r.Status == ServerRunStatus.Succeeded
+                    ? $"[{r.DisplayName}] {r.ItemsEvaluated} item(s) evaluated -> {r.RunDirectory}"
+                    : $"[{r.DisplayName}] {r.Status}: {r.Error}");
+            });
+
+            try
+            {
+                _evaluationCts = new System.Threading.CancellationTokenSource();
+                _isEvaluating = true;
+
+                var targetsByKey = _servers.ToDictionary(s => s.DisplayName, s => s.ToTarget(), StringComparer.OrdinalIgnoreCase);
+                var options = new MultiServerRunOptions
+                {
+                    Targets = targetsByKey.Values.ToList(),
+                    SelectedIds = selected,
+                    UseHistoricalManualResults = UseHistoricalManualResults,
+                    MaxParallel = maxParallel,
+                    BatchDirectory = _batchDirectory,
+                    ProgressFactory = target => progressByServer.TryGetValue(target.DisplayName, out var p) ? p : null,
+                    UserInputFactory = target =>
+                    {
+                        var key = target.DisplayName;
+                        return (item, instructions) => QueueServerManualItemAsync(key, item, instructions);
+                    },
+                };
+
+                var batch = await Task.Run(
+                    () => MultiServerRunner.RunAsync(options, serverProgress, _evaluationCts.Token),
+                    _evaluationCts.Token);
+
+                _isEvaluating = false;
+
+                // Manual decisions submitted while the run was in flight are written per server.
+                // Reports are regenerated once afterwards; RegenerateReportFromPersisted already
+                // covers every server in a fleet run.
+                foreach (var entry in _servers)
+                {
+                    if (!_serverUiStates.TryGetValue(entry.DisplayName, out var state) || state.RunDirectory is null) continue;
+                    SelectServer(entry.DisplayName);
+                    await ReapplySubmittedManualResultsAsync();
+                }
+
+                SelectServer(_servers[0].DisplayName);
+                RegenerateReportFromPersisted();
+                UpdateSummaryView(LoadPersistedResults() ?? Array.Empty<ChecklistResult>());
+
+                var pendingManual = _serverUiStates.Values.Sum(s => s.ManualQueue.Count(i =>
+                    !s.ManualStateMap.TryGetValue(i.Id, out var st) || !st.IsSubmitted));
+
+                Log($"Fleet evaluation complete. {batch.SucceededCount} succeeded, {batch.FailedCount} failed, {batch.CanceledCount} canceled.");
+                Log($"Batch manifest: {System.IO.Path.Combine(batch.BatchDirectory, MultiServerRunner.ManifestFileName)}");
+                MessageBox.Show(
+                    this,
+                    $"Fleet evaluation finished.\n\n{batch.SucceededCount} succeeded, {batch.FailedCount} failed, {batch.CanceledCount} canceled."
+                    + (pendingManual > 0
+                        ? $"\n\n{pendingManual} manual item(s) still need a decision. Pick a server in the Servers list to review its items."
+                        : string.Empty),
+                    "Fleet Evaluation Complete",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Fleet evaluation cancelled.");
+            }
+            catch (Exception ex)
+            {
+                Log("Fleet evaluation error: " + ex.Message);
+            }
+            finally
+            {
+                _isEvaluating = false;
+            }
+        }
+
+        // Mirrors the single-server initialisation so each server starts with the same
+        // "Not Started" tree and the same historical-reuse decisions.
+        private void PopulateServerUiState(ServerUiState state, System.Collections.Generic.List<string> selected)
+        {
+            var selectedLookup = new System.Collections.Generic.HashSet<string>(selected, StringComparer.OrdinalIgnoreCase);
+
+            if (UseHistoricalManualResults)
+            {
+                foreach (var id in selected)
+                {
+                    if (!_historicalManualIds.Contains(id)) continue;
+                    if (_itemTypeMap != null && _itemTypeMap.TryGetValue(id, out var t)
+                        && string.Equals(t, "Script", StringComparison.OrdinalIgnoreCase)) continue;
+                    state.CopiedManualIds.Add(id);
+                }
+            }
+
+            if (_loadedStructure == null) return;
+
+            foreach (var pair in _loadedStructure)
+            {
+                if (!selectedLookup.Contains(pair.Item.Id)) continue;
+                state.EvalItemMap[pair.Item.Id] = pair;
+
+                var initialTechnique = "AI-Manual";
+                if (_itemTypeMap != null && _itemTypeMap.TryGetValue(pair.Item.Id, out var mappedType)
+                    && string.Equals(mappedType, "Script", StringComparison.OrdinalIgnoreCase))
+                {
+                    initialTechnique = "Script";
+                }
+                else if (_mcpFeasibleItemIds.Contains(pair.Item.Id))
+                {
+                    initialTechnique = "AI-MCP";
+                }
+
+                state.EvalStatusMap[pair.Item.Id] = ("Not Started", initialTechnique);
+            }
+        }
+
+        private void ApplyServerItemProgress(string serverKey, SQLAuditor.Lib.ChecklistResult r)
+        {
+            if (!_serverUiStates.TryGetValue(serverKey, out var state)) return;
+            if (!state.EvalItemMap.ContainsKey(r.Id)) return;
+
+            var uiOutcome = NormalizeUiStatus(r.Outcome, r.Technique);
+            var current = state.EvalStatusMap.TryGetValue(r.Id, out var st) ? st.Status : "Not Started";
+
+            // Do not regress pending/submitted manual states back to generating/evaluating.
+            var isIncomingIntermediate = string.Equals(uiOutcome, "Generating Manual Plan", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uiOutcome, "Evaluating", StringComparison.OrdinalIgnoreCase);
+            var isCurrentReady = string.Equals(current, "Pending Manual Evaluation", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(current, "Passed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(current, "Failed", StringComparison.OrdinalIgnoreCase);
+
+            if (!(isIncomingIntermediate && isCurrentReady))
+            {
+                state.EvalStatusMap[r.Id] = (uiOutcome, r.Technique);
+            }
+
+            // Every server is visible in the tree, so any server's progress repaints it.
+            RequestEvaluationTreeRender();
+            UpdateEvaluationProgressDisplay();
+        }
+        private Task<string?> QueueServerManualItemAsync(string serverKey, SQLAuditor.Lib.ChecklistItem item, string instructionsFromAuditor)
+        {
+            var instructions = instructionsFromAuditor ?? string.Empty;
+            try
+            {
+                this.Dispatcher.Invoke(() =>
+                {
+                    if (!_serverUiStates.TryGetValue(serverKey, out var state)) return;
+
+                    if (!state.ManualQueue.Any(q => string.Equals(q.Id, item.Id, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var position = _checklistOrder != null && _checklistOrder.TryGetValue(item.Id, out var order) ? order : int.MaxValue;
+                        var index = state.ManualQueue.FindIndex(q =>
+                            (_checklistOrder != null && _checklistOrder.TryGetValue(q.Id, out var o) ? o : int.MaxValue) > position);
+                        if (index < 0) state.ManualQueue.Add(item);
+                        else state.ManualQueue.Insert(index, item);
+                    }
+
+                    state.ManualInstructions[item.Id] = instructions;
+                    if (!state.ManualStateMap.TryGetValue(item.Id, out var manualState))
+                    {
+                        manualState = new ManualEvaluationState();
+                        state.ManualStateMap[item.Id] = manualState;
+                    }
+                    manualState.Instructions = instructions;
+
+                    if (!manualState.IsSubmitted)
+                    {
+                        state.EvalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
+                    }
+                    if (state.ManualIndex == -1) state.ManualIndex = 0;
+
+                    if (string.Equals(_selectedServerKey, serverKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (_manualIndex == -1) _manualIndex = 0;
+                        ShowManualAtIndex();
+                    }
+
+                    RequestEvaluationTreeRender();
+                });
+            }
+            catch { }
+
+            // Returns immediately: several servers evaluate at once, so this must never block.
+            return Task.FromResult<string?>(string.Empty);
+        }
+
+        private void SelectServer(string key)
+        {
+            if (_selectedServerKey != null && _serverUiStates.TryGetValue(_selectedServerKey, out var previous))
+            {
+                previous.ManualIndex = _manualIndex;
+            }
+
+            if (!_serverUiStates.TryGetValue(key, out var next)) return;
+
+            _selectedServerKey = key;
+            _uiRunDirectory = next.RunDirectory;
+            _evalItemMap = next.EvalItemMap;
+            _evalStatusMap = next.EvalStatusMap;
+            _manualQueue = next.ManualQueue;
+            _manualInstructions = next.ManualInstructions;
+            _manualStateMap = next.ManualStateMap;
+            _copiedManualIds = next.CopiedManualIds;
+            _manualIndex = next.ManualIndex;
+
+            if (ServerProgressList != null)
+            {
+                var entry = _servers.FirstOrDefault(s => string.Equals(s.DisplayName, key, StringComparison.OrdinalIgnoreCase));
+                if (!ReferenceEquals(ServerProgressList.SelectedItem, entry)) ServerProgressList.SelectedItem = entry;
+            }
+
+            RenderEvaluationTree();
+            UpdateEvaluationProgressDisplay();
+            ShowManualAtIndex();
+        }
+
+        private void ServerProgressList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (ServerProgressList.SelectedItem is ServerEntry entry
+                && !string.Equals(_selectedServerKey, entry.DisplayName, StringComparison.OrdinalIgnoreCase))
+            {
+                SelectServer(entry.DisplayName);
+            }
+        }
+
         private async void StartEvalBtn_Click(object sender, RoutedEventArgs e)
         {
+            var selectedChecklistIds = _selectedIds is { Count: > 0 }
+                ? new System.Collections.Generic.List<string>(_selectedIds)
+                : new System.Collections.Generic.List<string>();
+
+            if (_servers.Count > 1)
+            {
+                if (selectedChecklistIds.Count == 0)
+                {
+                    MessageBox.Show("No loaded checklist selection found. Click Load Checklist first.", "Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                await RunMultiServerEvaluationAsync(selectedChecklistIds);
+                return;
+            }
+
+            // A single-server run owns the process-wide run directory again.
+            _batchDirectory = null;
+            _uiRunDirectory = null;
+            _selectedServerKey = null;
+            _serverUiStates.Clear();
+            ServerProgressPanel.Visibility = Visibility.Collapsed;
+
             var targetDatabases = GetSelectedDatabaseNames();
             if (targetDatabases.Length == 0)
             {
@@ -730,7 +1254,7 @@ namespace SQLAuditor.Wpf
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full five-file report suite are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
+                Log($"Summary report generated at {UiFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
             }
             catch (OperationCanceledException)
             {
@@ -796,7 +1320,7 @@ namespace SQLAuditor.Wpf
                 MessageBox.Show(this, "Evaluation completed successfully.", "Evaluation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
                 // checklist_results.json and the full five-file report suite are produced
                 // automatically by the Auditor at the end of the assessment.
-                Log($"Summary report generated at {AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
+                Log($"Summary report generated at {UiFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName)}");
             }
             catch (OperationCanceledException)
             {
@@ -919,7 +1443,9 @@ namespace SQLAuditor.Wpf
             }
             var it = _manualQueue[_manualIndex];
             var state = EnsureManualState(it.Id);
-            ManualTitle.Text = $"Manual evaluation for {it.Id}";
+            ManualTitle.Text = _serverUiStates.Count > 1 && _selectedServerKey != null
+                ? $"Manual evaluation for {it.Id}  —  {_selectedServerKey}"
+                : $"Manual evaluation for {it.Id}";
             ManualStepsText.Text = ToPlainText(state.Instructions);
             _isHydratingManualUi = true;
             ManualOutputBox.Text = state.Remarks;
@@ -988,7 +1514,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                var path = UiFilePath("checklist_results.json");
                 if (!System.IO.File.Exists(path)) return Array.Empty<ChecklistResult>();
                 var txt = System.IO.File.ReadAllText(path);
                 return JsonSerializer.Deserialize<ChecklistResult[]>(txt) ?? Array.Empty<ChecklistResult>();
@@ -1261,11 +1787,11 @@ namespace SQLAuditor.Wpf
             if (pendingIds.Count == 0) return 0;
             if (_evalItemMap == null) return 0;
 
-            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            var path = UiFilePath("checklist_results.json");
             var exportedFileName = System.IO.Path.GetFileName(csvPath);
             var skippedCount = 0;
 
-            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLockFor(UiRunDirectory))
             {
                 var list = System.IO.File.Exists(path)
                     ? JsonSerializer.Deserialize<System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>>(System.IO.File.ReadAllText(path))
@@ -1419,6 +1945,20 @@ namespace SQLAuditor.Wpf
 
         private void UpdateEvaluationProgressDisplay()
         {
+            // A fleet run counts every server's items so the bar reflects the whole batch.
+            if (_serverUiStates.Count > 1)
+            {
+                var fleetTotal = _serverUiStates.Values.Sum(s => s.EvalItemMap.Count);
+                var fleetDone = _serverUiStates.Values.Sum(s => s.EvalStatusMap.Count(kvp =>
+                    s.EvalItemMap.ContainsKey(kvp.Key) && IsTerminalEvaluationStatus(kvp.Value.Status)));
+
+                EvalProgressBar.Minimum = 0;
+                EvalProgressBar.Maximum = Math.Max(fleetTotal, 1);
+                EvalProgressBar.Value = Math.Min(fleetDone, Math.Max(fleetTotal, 1));
+                EvalProgressText.Text = $"{fleetDone} / {fleetTotal} across {_serverUiStates.Count} servers";
+                return;
+            }
+
             if (_evalItemMap == null || _evalStatusMap == null)
             {
                 EvalProgressBar.Value = 0;
@@ -1439,14 +1979,68 @@ namespace SQLAuditor.Wpf
 
         private void RenderEvaluationTree()
         {
+            // A fleet run shows every server at once: server -> technique -> area -> sub-area -> item.
+            if (_serverUiStates.Count > 1)
+            {
+                EvalTree.Items.Clear();
+                foreach (var entry in _servers)
+                {
+                    if (!_serverUiStates.TryGetValue(entry.DisplayName, out var state)) continue;
+
+                    var done = state.EvalStatusMap.Count(kvp =>
+                        state.EvalItemMap.ContainsKey(kvp.Key) && IsTerminalEvaluationStatus(kvp.Value.Status));
+                    var serverNode = new System.Windows.Controls.TreeViewItem
+                    {
+                        Header = BuildServerNodeHeader(entry, done, state.EvalItemMap.Count),
+                        IsExpanded = true,
+                        Tag = entry.DisplayName,
+                    };
+
+                    foreach (var node in BuildTechniqueNodes(state.EvalItemMap, state.EvalStatusMap))
+                    {
+                        serverNode.Items.Add(node);
+                    }
+
+                    EvalTree.Items.Add(serverNode);
+                }
+                return;
+            }
+
             if (_evalItemMap == null || _evalStatusMap == null) return;
             EvalTree.Items.Clear();
+            foreach (var node in BuildTechniqueNodes(_evalItemMap, _evalStatusMap))
+            {
+                EvalTree.Items.Add(node);
+            }
+        }
+
+        private object BuildServerNodeHeader(ServerEntry entry, int finished, int total)
+        {
+            var text = new System.Windows.Controls.TextBlock();
+            text.Inlines.Add(new System.Windows.Documents.Run($"{entry.DisplayName} ")
+            {
+                FontWeight = FontWeights.Bold
+            });
+            text.Inlines.Add(new System.Windows.Documents.Run($"[{entry.Status}] ")
+            {
+                Foreground = GetStatusBrush(entry.Status),
+                FontWeight = FontWeights.SemiBold
+            });
+            text.Inlines.Add(new System.Windows.Documents.Run($"{finished} / {total} items"));
+            return text;
+        }
+
+        private System.Collections.Generic.List<System.Windows.Controls.TreeViewItem> BuildTechniqueNodes(
+            System.Collections.Generic.Dictionary<string, (string Area, SQLAuditor.Lib.ChecklistItem Item)> evalItemMap,
+            System.Collections.Generic.Dictionary<string, (string Status, string Technique)> evalStatusMap)
+        {
+            var nodes = new System.Collections.Generic.List<System.Windows.Controls.TreeViewItem>();
             var techniqueOrder = new[] { "Script", "AI-MCP", "AI-Manual" };
 
             foreach (var technique in techniqueOrder)
             {
-                var techniqueItems = _evalItemMap
-                    .Where(kv => _evalStatusMap.TryGetValue(kv.Key, out var state) && string.Equals(state.Technique, technique, StringComparison.OrdinalIgnoreCase))
+                var techniqueItems = evalItemMap
+                    .Where(kv => evalStatusMap.TryGetValue(kv.Key, out var state) && string.Equals(state.Technique, technique, StringComparison.OrdinalIgnoreCase))
                     .Select(kv => kv.Value)
                     .OrderBy(v => v.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds))
                     .ToList();
@@ -1475,7 +2069,7 @@ namespace SQLAuditor.Wpf
 
                         foreach (var pair in subAreaGrp.OrderBy(x => x.Item.Id, System.Collections.Generic.Comparer<string>.Create(CompareChecklistIds)))
                         {
-                            var status = _evalStatusMap.TryGetValue(pair.Item.Id, out var st) ? st.Status : "Not Started";
+                            var status = evalStatusMap.TryGetValue(pair.Item.Id, out var st) ? st.Status : "Not Started";
                             var statusBrush = GetStatusBrush(status);
                             var text = new System.Windows.Controls.TextBlock();
                             text.Inlines.Add(new System.Windows.Documents.Run($"[{status}] ")
@@ -1500,8 +2094,10 @@ namespace SQLAuditor.Wpf
                     techniqueNode.Items.Add(areaNode);
                 }
 
-                EvalTree.Items.Add(techniqueNode);
+                nodes.Add(techniqueNode);
             }
+
+            return nodes;
         }
 
         private string EvaluateManualOutcome(string response)
@@ -1672,7 +2268,7 @@ namespace SQLAuditor.Wpf
                 }
 
                 if (forceWrite || !_isEvaluating)
-                    WriteManualResultToDisk(updated);
+                    WriteManualResultToDisk(updated, UiFilePath("checklist_results.json"));
             }
             catch (Exception ex)
             {
@@ -1684,11 +2280,10 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private static void WriteManualResultToDisk(SQLAuditor.Lib.ChecklistResult updated)
+        private static void WriteManualResultToDisk(SQLAuditor.Lib.ChecklistResult updated, string path)
         {
-            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
             // The engine writes this same file from its own thread at the end of a run.
-            lock (SQLAuditor.Lib.Auditor.ResultsFileLock)
+            lock (SQLAuditor.Lib.Auditor.ResultsFileLockFor(System.IO.Path.GetDirectoryName(path)!))
             {
                 var list = new System.Collections.Generic.List<SQLAuditor.Lib.ChecklistResult>();
                 if (System.IO.File.Exists(path))
@@ -1725,7 +2320,7 @@ namespace SQLAuditor.Wpf
 
         private System.Collections.Generic.IReadOnlyCollection<ChecklistResult>? LoadPersistedResults()
         {
-            var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            var path = UiFilePath("checklist_results.json");
             if (!System.IO.File.Exists(path)) return null;
             try
             {
@@ -1742,7 +2337,30 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var message = SQLAuditor.Lib.Auditor.GenerateReports();
+                // A fleet run must refresh every server: a manual decision recorded after the batch
+                // finished only lands in the server it was made against.
+                if (_serverUiStates.Count > 1)
+                {
+                    foreach (var state in _serverUiStates.Values)
+                    {
+                        if (string.IsNullOrWhiteSpace(state.RunDirectory)) continue;
+                        var serverMessage = SQLAuditor.Lib.Auditor.GenerateReports(runDirectory: state.RunDirectory);
+                        if (!string.IsNullOrWhiteSpace(serverMessage))
+                            Log($"[{state.DisplayName}] " + serverMessage.Replace(Environment.NewLine, " | "));
+                    }
+                    RefreshHistoricalManualAvailability();
+
+                    // Consolidated artifacts are rebuilt from the per-server results that were just
+                    // refreshed, so they always agree with them.
+                    if (!string.IsNullOrWhiteSpace(_batchDirectory))
+                    {
+                        foreach (var batchMessage in SQLAuditor.Lib.BatchReportGenerator.Generate(_batchDirectory))
+                            Log($"[consolidated] {batchMessage}");
+                    }
+                    return;
+                }
+
+                var message = SQLAuditor.Lib.Auditor.GenerateReports(runDirectory: _uiRunDirectory);
                 if (!string.IsNullOrWhiteSpace(message)) Log(message.Replace(Environment.NewLine, " | "));
                 RefreshHistoricalManualAvailability();
             }
@@ -1920,7 +2538,7 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var defaultPath = AuditOutputPaths.GetCurrentFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName);
+                var defaultPath = UiFilePath(SqlAuditor.Reporting.ReportSuiteGenerator.AuditReportFileName);
                 if (!System.IO.File.Exists(defaultPath))
                 {
                     MessageBox.Show($"No final report found at {defaultPath}. Run evaluation first.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -2886,7 +3504,8 @@ namespace SQLAuditor.Wpf
             try
             {
                 // Only a started run has a directory to log into; nothing is written to results/ itself.
-                var dir = AuditOutputPaths.ActiveRunDirectory;
+                // A fleet run logs to the batch folder, since a line rarely belongs to one server.
+                var dir = _batchDirectory ?? AuditOutputPaths.ActiveRunDirectory;
                 var line = $"{DateTime.UtcNow:O} {message}\n";
                 if (dir != null)
                 {
@@ -2940,7 +3559,7 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                var path = UiFilePath("checklist_results.json");
                 if (!System.IO.File.Exists(path)) { Log($"No checklist results found at {path}"); return; }
                 var txt = System.IO.File.ReadAllText(path);
                 var arr = JsonSerializer.Deserialize<SQLAuditor.Lib.ChecklistResult[]>(txt) ?? Array.Empty<SQLAuditor.Lib.ChecklistResult>();
@@ -2951,7 +3570,7 @@ namespace SQLAuditor.Wpf
                 try
                 {
                     RegenerateReportFromPersisted();
-                    Log($"Rendered reports saved to {AuditOutputPaths.CurrentRunDirectory}");
+                    Log($"Rendered reports saved to {UiRunDirectory}");
                 }
                 catch (Exception ex) { Log("Failed to save report: " + ex.Message); }
 
@@ -2976,7 +3595,7 @@ namespace SQLAuditor.Wpf
                     return;
                 }
 
-                var resultsPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+                var resultsPath = UiFilePath("checklist_results.json");
                 if (!System.IO.File.Exists(resultsPath))
                 {
                     MessageBox.Show("No completed evaluation results were found. Run the evaluation first.", "No evaluation results", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -3006,7 +3625,7 @@ namespace SQLAuditor.Wpf
                     FileName = $"manual_checks_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
                     DefaultExt = ".csv",
                     Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
-                    InitialDirectory = AuditOutputPaths.CurrentRunDirectory,
+                    InitialDirectory = UiRunDirectory,
                     AddExtension = true,
                     OverwritePrompt = true,
                 };
@@ -3024,7 +3643,7 @@ namespace SQLAuditor.Wpf
                 Log($"Exported {manualChecks.Count} manual check(s) to {dialog.FileName}; {skippedCount} unanswered check(s) were skipped.");
                 MessageBox.Show(
                     $"Manual checks exported to:\n{dialog.FileName}\n\n"
-                    + $"{skippedCount} unanswered manual check(s) were excluded from scoring. Reports were generated in:\n{AuditOutputPaths.CurrentRunDirectory}",
+                    + $"{skippedCount} unanswered manual check(s) were excluded from scoring. Reports were generated in:\n{UiRunDirectory}",
                     "Reports generated",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -3045,7 +3664,7 @@ namespace SQLAuditor.Wpf
             }
 
             if (_evalItemMap == null || _evalStatusMap == null
-                || !System.IO.File.Exists(AuditOutputPaths.GetCurrentFilePath("checklist_results.json")))
+                || !System.IO.File.Exists(UiFilePath("checklist_results.json")))
             {
                 MessageBox.Show("Start and complete the new evaluation before importing the filled CSV.", "No completed evaluation", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;

@@ -15,6 +15,7 @@
   <!-- Feature modules build into the engine library; the CLI and IDE hosts have their own projects. -->
   <ItemGroup>
     <Compile Include="..\..\Modules\**\*.cs" />
+    <EmbeddedResource Include="..\..\Modules\show_results\templates\estate-readout.html" LogicalName="SqlAuditor.Reporting.estate-readout.html" />
   </ItemGroup>
 
 </Project>

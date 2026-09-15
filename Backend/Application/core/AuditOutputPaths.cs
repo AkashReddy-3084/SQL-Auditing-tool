@@ -13,6 +13,9 @@ public static class AuditOutputPaths
 
     private static string? _activeRunDirectory;
 
+    // Flows down one server's async call tree so parallel runs never share a run directory.
+    private static readonly AsyncLocal<string?> ScopedRunDirectory = new();
+
     public static string RootDirectory =>
         Path.Combine(Directory.GetCurrentDirectory(), "results");
 
@@ -20,6 +23,9 @@ public static class AuditOutputPaths
     {
         get
         {
+            var scoped = ScopedRunDirectory.Value;
+            if (scoped is not null) return scoped;
+
             lock (SyncRoot)
             {
                 return _activeRunDirectory;
@@ -31,22 +37,37 @@ public static class AuditOutputPaths
     {
         get
         {
+            var scoped = ScopedRunDirectory.Value;
+            if (scoped is not null) return scoped;
+
             lock (SyncRoot)
             {
                 return _activeRunDirectory
                     ?? FindLatestRunDirectory()
-                    ?? CreateRunDirectory("unknown-server");
+                    ?? CreateRunDirectory("unknown-server", setAsActive: true);
             }
         }
     }
 
-    public static string BeginRun(string? connectionString)
+    public static IDisposable EnterRunScope(string runDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runDirectory);
+        return new RunScope(runDirectory);
+    }
+
+    /// <summary>Run directory of the enclosing <see cref="EnterRunScope"/>, or null when unscoped.</summary>
+    public static string? AmbientRunDirectory => ScopedRunDirectory.Value;
+
+    public static string BeginRun(string? connectionString) =>
+        BeginRun(connectionString, setAsActive: true);
+
+    public static string BeginRun(string? connectionString, bool setAsActive)
     {
         lock (SyncRoot)
         {
             Directory.CreateDirectory(RootDirectory);
             var serverName = SanitizeServerName(ReadServerName(connectionString));
-            return CreateRunDirectory(serverName);
+            return CreateRunDirectory(serverName, setAsActive);
         }
     }
 
@@ -55,11 +76,13 @@ public static class AuditOutputPaths
 
     public static string? FindLatestFile(string fileName)
     {
+        var active = ActiveRunDirectory;
+
         lock (SyncRoot)
         {
-            if (_activeRunDirectory is not null)
+            if (active is not null)
             {
-                var activePath = Path.Combine(_activeRunDirectory, fileName);
+                var activePath = Path.Combine(active, fileName);
                 if (File.Exists(activePath)) return activePath;
             }
 
@@ -81,7 +104,7 @@ public static class AuditOutputPaths
             ?? directories.FirstOrDefault();
     }
 
-    private static string CreateRunDirectory(string serverName)
+    private static string CreateRunDirectory(string serverName, bool setAsActive)
     {
         Directory.CreateDirectory(RootDirectory);
 
@@ -96,7 +119,7 @@ public static class AuditOutputPaths
         }
 
         Directory.CreateDirectory(runDirectory);
-        _activeRunDirectory = runDirectory;
+        if (setAsActive) _activeRunDirectory = runDirectory;
         return runDirectory;
     }
 
@@ -143,5 +166,24 @@ public static class AuditOutputPaths
             .Trim('.', '-', '_');
         if (string.IsNullOrWhiteSpace(sanitized)) sanitized = "unknown-server";
         return sanitized.Length <= 80 ? sanitized : sanitized[..80];
+    }
+
+    private sealed class RunScope : IDisposable
+    {
+        private readonly string? _previous;
+        private bool _disposed;
+
+        public RunScope(string runDirectory)
+        {
+            _previous = ScopedRunDirectory.Value;
+            ScopedRunDirectory.Value = runDirectory;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            ScopedRunDirectory.Value = _previous;
+        }
     }
 }

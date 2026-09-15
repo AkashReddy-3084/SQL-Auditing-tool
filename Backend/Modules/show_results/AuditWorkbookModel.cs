@@ -152,7 +152,8 @@ public static class AuditWorkbookBuilder
     public static AuditWorkbookModel Build(
         string resultsJsonPath,
         string outputDirectory,
-        ReportMetadata metadata)
+        ReportMetadata metadata,
+        string? targetOverride = null)
     {
         var items = new ReportInputEnricher()
             .Enrich(ChecklistResultsLoader.Load(resultsJsonPath))
@@ -168,7 +169,7 @@ public static class AuditWorkbookBuilder
 
         return new AuditWorkbookModel
         {
-            Target = ResolveTarget(outputDirectory),
+            Target = string.IsNullOrWhiteSpace(targetOverride) ? ResolveTarget(outputDirectory) : targetOverride,
             GeneratedDate = metadata.ReportDate,
             Metadata = metadata,
             Catalog = ChecklistCatalog.Discover(Path.GetDirectoryName(Path.GetFullPath(resultsJsonPath))),
