@@ -767,53 +767,6 @@ WHERE d.name = DB_NAME();";
             else Console.WriteLine("Mapping file not found.");
         }
 
-        // Save a generated script and update deterministic-script-mapping.json to track it.
-        // IMPORTANT: This API is reserved for the UI "Generate Scripts" operator action only.
-        // The Generate Scripts button in the checklist UI is currently disabled; do NOT call
-        // this method from any automated runtime paths. Keep this method as the single
-        // intentional writer for scripts under Backend/checklists/Scripts/sql and for the
-        // deterministic mapping. Any other code that modifies files under scripts/sql
-        // must be removed or refactored to call this method only via the operator-driven UI.
-        // This method intentionally performs file writes (script + mapping) and is best
-        // executed only with operator consent.
-        // This method is currently retained but the UI button that invokes it is disabled/commented.
-        public async Task<string> SaveGeneratedScriptAsync(string checklistId, string scriptText, string? suggestedFileName = null)
-        {
-            var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-            var scriptsDir = Path.Combine(repoRoot, "Backend", "checklists", "Scripts", "sql");
-            Directory.CreateDirectory(scriptsDir);
-            var safeId = System.Text.RegularExpressions.Regex.Replace(checklistId ?? "unknown", "[^a-zA-Z0-9_.-]", "_");
-            var fileName = string.IsNullOrWhiteSpace(suggestedFileName)? $"{safeId}.sql" : suggestedFileName;
-            var fullPath = Path.Combine(scriptsDir, fileName);
-            await File.WriteAllTextAsync(fullPath, scriptText ?? string.Empty);
-
-            // Update deterministic mapping
-            try
-            {
-                var mapPath = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
-                var mappingDict = new System.Collections.Generic.Dictionary<string, JsonElement>();
-                if (File.Exists(mapPath))
-                {
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(File.ReadAllText(mapPath));
-                        foreach (var prop in doc.RootElement.EnumerateObject())
-                            mappingDict[prop.Name] = prop.Value.Clone();
-                    }
-                    catch { mappingDict = new(); }
-                }
-
-                var rel = Path.Combine("Backend", "checklists", "Scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
-                var scope = GetDeclaredScriptScope(scriptText);
-                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, scope, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
-                mappingDict[checklistId] = newEntry;
-                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mappingDict, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch { /* best-effort only */ }
-
-            return fullPath;
-        }
-
         /// <param name="useHistoricalManualResults">
         /// When true, manual/AI-Manual items that already have a completed result in
         /// results/historical_last_run.json are copied forward and skip manual-step generation and

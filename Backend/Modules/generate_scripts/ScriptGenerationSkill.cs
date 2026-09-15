@@ -12,24 +12,19 @@ using SQLAuditor.Agents;
 namespace SQLAuditor.Lib;
 
 /// <summary>
-/// Shared "generate scripts" skill for the IDE (MCP) and CLI hosts. Unlike the WPF app —
-/// which drives <see cref="ScriptGeneratorAgent"/> against a configured LLM endpoint —
-/// GitHub Copilot is the AI here, so this helper makes NO LLM/API calls. It runs the same
-/// pipeline on the same four prompt templates in Backend/Modules/generate_scripts/prompts
+/// Shared script-generation helpers for every host. This class makes NO LLM/API calls: it only
+/// reads the four canonical prompt templates in Backend/Modules/generate_scripts/prompts
 /// (script_generator_system.txt, script_generator_user.txt, script_validation_system.txt,
-/// script_validation_user.txt), plus <see cref="ScriptOutputValidator"/>, the
-/// <see cref="ScriptGenerationResponse"/> parser and the exact on-disk layout that
-/// <see cref="ScriptGeneratorAgent"/> produces. Copilot generates each script from the
-/// generation prompts this class hands it, then calls back to
-/// <see cref="SaveGeneratedScriptAsync"/>, which runs the deterministic format gate, hands
-/// back the validation prompts for the C1-C7 review, and only saves once that review returns
-/// a verdict — mirroring the WPF pipeline (generate → validate → correct/retry → save → update).
+/// script_validation_user.txt), fills them for a checklist item and resolves the on-disk layout.
+/// The Configure Checklist flow drives these helpers for each NEW custom checklist item —
+/// <see cref="CustomChecklistPipeline"/> in the WPF app and <see cref="CustomChecklistHostFlow"/>
+/// in the IDE/CLI hosts. Existing/default checklist items are never regenerated.
 /// </summary>
 public static class ScriptGenerationSkill
 {
     /// <summary>
-    /// Locates the Backend base path (the folder <see cref="ScriptGeneratorAgent"/> expects),
-    /// by walking up from the current directory to the folder containing the checklist.
+    /// Locates the Backend base path by walking up from the current directory to the folder
+    /// containing the checklist.
     /// </summary>
     public static string ResolveBasePath()
     {
@@ -108,7 +103,6 @@ public static class ScriptGenerationSkill
         {
             if (lookup.TryGetValue(id, out var it))
             {
-                // Mirror the WPF mapping (MainWindow.GenerateScriptsBtn_Click) exactly.
                 items.Add(new ScriptGenChecklistItem
                 {
                     ChecklistId = it.Id,
@@ -157,7 +151,7 @@ public static class ScriptGenerationSkill
             sb.AppendLine($"  - {it.ChecklistId}: {it.CheckName}");
         sb.AppendLine();
 
-        sb.AppendLine("## How to process (mirror the WPF Generate Scripts flow)");
+        sb.AppendLine("## How to process");
         sb.AppendLine("- Process the items in BATCHES OF UP TO 10, generating the items within each batch in");
         sb.AppendLine("  parallel, and only start the next batch once the current batch is saved.");
         sb.AppendLine("- For EACH item: write the ANALYSIS, decide FEASIBLE, then emit the full raw response in the");
@@ -193,10 +187,9 @@ public static class ScriptGenerationSkill
 
     /// <summary>
     /// Builds the review request for ONE generated script from the canonical validation templates
-    /// (script_validation_system.txt + script_validation_user.txt). This is the IDE/CLI equivalent
-    /// of <see cref="ChecklistItemProcessor.ValidateScriptAsync"/>: Copilot performs the C1-C7
-    /// review the template defines and hands the verdict back to
-    /// <see cref="SaveGeneratedScriptAsync"/>.
+    /// (script_validation_system.txt + script_validation_user.txt). This is the host-driven
+    /// equivalent of <see cref="ChecklistItemProcessor.ValidateScriptAsync"/>: the AI layer performs
+    /// the C1-C7 review the template defines and hands the verdict back to the caller.
     /// </summary>
     public static string BuildValidationInstructions(
         ScriptGenChecklistItem item,
@@ -230,156 +223,6 @@ public static class ScriptGenerationSkill
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Validates a Copilot-generated raw response and, when valid, persists it exactly like
-    /// <see cref="ScriptGeneratorAgent"/> does: writes the script file, updates the deterministic
-    /// script mapping and the execution-results file. Mirrors the WPF pipeline stage for stage —
-    /// deterministic format gate, then the template-driven C1-C7 review supplied in
-    /// <paramref name="validationVerdict"/>, then save. On any failure it returns actionable
-    /// feedback so Copilot can correct the script and resubmit.
-    /// </summary>
-    public static async Task<string> SaveGeneratedScriptAsync(
-        string checklistId,
-        string rawResponse,
-        string? validationVerdict = null,
-        string? saveInvocationHint = null,
-        CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(checklistId))
-            return "Error: 'checklistId' is required.";
-        if (string.IsNullOrWhiteSpace(rawResponse))
-            return $"Error: no generated response supplied for '{checklistId}'. Generate the script first, then save its full raw output.";
-
-        var basePath = ResolveBasePath();
-        var sqlDir = Path.Combine(basePath, "checklists", "Scripts", "sql");
-        var ps1Dir = Path.Combine(basePath, "checklists", "Scripts", "ps1");
-        var resultsDir = Path.Combine(basePath, "results");
-        Directory.CreateDirectory(sqlDir);
-        Directory.CreateDirectory(ps1Dir);
-        Directory.CreateDirectory(resultsDir);
-
-        // Reuse the exact parser the WPF/LLM pipeline uses so the accepted format is identical.
-        var response = ChecklistItemProcessor.ParseResponse(rawResponse);
-
-        // Resolve item metadata (CheckName/Category) for the results entry.
-        var (items, _) = await LoadItemsAsync(new[] { checklistId });
-        var item = items.FirstOrDefault();
-        var checkName = item?.CheckName ?? checklistId;
-        var category = item?.Category ?? "";
-
-        // NOT FEASIBLE — record the classification without saving a script (as the agent does).
-        if (!response.IsFeasible)
-        {
-            await UpsertExecutionResultAsync(resultsDir, new ExecutionResultEntry
-            {
-                ChecklistId = checklistId,
-                CheckName = checkName,
-                Category = category,
-                Status = "Not Feasible",
-                Reason = response.Reason
-            });
-            UpsertMapping(basePath, checklistId, null, response);
-            return $"Recorded [{checklistId}] as NOT FEASIBLE: {response.Reason}. No script saved. "
-                 + "Mapping and execution-results updated.";
-        }
-
-        // STEP — local format validation (reuse the existing validator).
-        var validation = new ScriptOutputValidator().Validate(response);
-        if (!validation.IsValid)
-        {
-            return $"VALIDATION FAILED for [{checklistId}]: {validation.Error}\n"
-                 + "Correct the script so it satisfies the required output format (Result, Score, "
-                 + "DatabaseQueried, Finding — with @Result/@Score for SQL) and call the save command again. "
-                 + "This is the pipeline's correction/retry step; retry up to 3 times before giving up.";
-        }
-
-        // STEP — content review driven by script_validation_system.txt / script_validation_user.txt.
-        // Same stage ChecklistItemProcessor.ValidateScriptAsync runs in the WPF pipeline; here the
-        // host performs it, so nothing is saved until it returns a verdict from those templates.
-        var reviewItem = item ?? new ScriptGenChecklistItem
-        {
-            ChecklistId = checklistId,
-            Category = category,
-            CheckName = checkName,
-            Scope = response.Scope,
-            Description = checkName,
-            ExpectedOutcome = checkName
-        };
-
-        if (string.IsNullOrWhiteSpace(validationVerdict))
-        {
-            return BuildValidationInstructions(
-                reviewItem,
-                response,
-                saveInvocationHint
-                    ?? "call the save command again with the same checklist ID and response, plus the verdict.");
-        }
-
-        // Require the template's verdict line explicitly — the shared parser defaults to valid when
-        // no marker is present, which would let a free-form reply bypass the review.
-        if (!Regex.IsMatch(validationVerdict, @"VERDICT:\s*(VALID|INVALID)", RegexOptions.IgnoreCase))
-        {
-            return $"VALIDATION VERDICT NOT RECOGNISED for [{checklistId}]. Nothing was saved.\n"
-                 + "Review the script against the C1-C7 checks in script_validation_system.txt and resubmit "
-                 + "a verdict that starts with 'VERDICT: VALID' or 'VERDICT: INVALID' in the template's "
-                 + "response format.";
-        }
-
-        var review = ChecklistItemProcessor.ParseValidationResponse(validationVerdict);
-        var correctionNote = string.Empty;
-
-        if (!review.IsValid)
-        {
-            if (string.IsNullOrWhiteSpace(review.CorrectedScript))
-            {
-                return $"VALIDATION REJECTED [{checklistId}] (C1-C7): "
-                     + $"{(string.IsNullOrWhiteSpace(review.Issues) ? "no issues listed" : review.Issues)}\n"
-                     + "Nothing was saved. Supply the complete corrected script between "
-                     + "---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END--- in the verdict, or "
-                     + "regenerate the item and start the save/validate cycle again (up to 3 times).";
-            }
-
-            response.ScriptContent = review.CorrectedScript;
-
-            var revalidation = new ScriptOutputValidator().Validate(response);
-            if (!revalidation.IsValid)
-            {
-                return $"CORRECTED SCRIPT STILL INVALID for [{checklistId}]: {revalidation.Error}\n"
-                     + $"Review issues were: {review.Issues}\n"
-                     + "Nothing was saved. Correct the script and resubmit.";
-            }
-
-            correctionNote = " Corrected script from the C1-C7 review was applied.";
-        }
-
-        // STEP — save the script using the same file layout as ScriptGeneratorAgent.
-        var safeId = Regex.Replace(checklistId, @"[^a-zA-Z0-9_.-]+", "_").Trim('_');
-        if (string.IsNullOrWhiteSpace(safeId)) safeId = "unknown";
-        var filename = $"{safeId}.{response.ScriptType}";
-        var outputDir = response.ScriptType == "sql" ? sqlDir : ps1Dir;
-        var scriptPath = Path.Combine(outputDir, filename);
-        await File.WriteAllTextAsync(scriptPath, response.ScriptContent, cancellationToken);
-
-        // STEP — update mapping + execution-results (same shapes the agent writes).
-        var relativeScriptFile = $"Backend/checklists/Scripts/{response.ScriptType}/{filename}";
-        UpsertMapping(basePath, checklistId, relativeScriptFile, response);
-
-        await UpsertExecutionResultAsync(resultsDir, new ExecutionResultEntry
-        {
-            ChecklistId = checklistId,
-            CheckName = checkName,
-            Category = category,
-            Scope = response.Scope,
-            Status = "Script Generated",
-            ScriptType = response.ScriptType,
-            ScriptPath = $"{response.ScriptType}/{filename}",
-            ScoringLogic = response.ScoringLogic
-        });
-
-        return $"Saved [{checklistId}] -> {response.ScriptType}/{filename} "
-             + $"(Scope: {response.Scope}). Mapping and execution-results updated.{correctionNote}";
-    }
-
     private static string FillUserPrompt(string template, ScriptGenChecklistItem item) =>
         template
             .Replace("{checklist_id}", item.ChecklistId)
@@ -402,20 +245,6 @@ public static class ScriptGenerationSkill
             .Replace("{scope}", response.Scope ?? "")
             .Replace("{scoring_logic}", response.ScoringLogic ?? "")
             .Replace("{script_content}", response.ScriptContent ?? "");
-
-    private static void UpsertMapping(
-        string basePath, string checklistId, string? scriptFile, ScriptGenerationResponse response)
-    {
-        // Routed through the configuration store so the entry lands in the default or the custom
-        // mapping according to who owns the ID, and the merged runtime mapping is regenerated.
-        ChecklistConfigurationStore.UpsertMappingEntry(
-            checklistId,
-            scriptFile,
-            response.Scope,
-            response.IsAdminCheck,
-            response.IsDocumentationCheck,
-            response.McpFeasibility);
-    }
 
     internal static async Task UpsertExecutionResultAsync(string resultsDir, ExecutionResultEntry entry)
     {

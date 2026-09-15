@@ -1,6 +1,6 @@
 ---
 name: evaluate-checklist
-description: Audit a SQL Server instance against the governance checklist from inside VS Code, and list, rerun or edit previous audit runs, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit", and also for "show the run history", "evaluation history", "list the last runs", "previous evaluations", "rerun that run", "redo the last audit", "re-evaluate run 2". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for script GENERATION (that is the generate-script skill), from Copilot CLI (that is the sql-auditor skill), or for Copilot session/chat history and standups (that is the chronicle skill) — here "run history" always means SQL audit runs under results/.
+description: Audit a SQL Server instance against the governance checklist from inside VS Code, and list, rerun or edit previous audit runs, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit", and also for "show the run history", "evaluation history", "list the last runs", "previous evaluations", "rerun that run", "redo the last audit", "re-evaluate run 2". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for adding a custom checklist item (that is the configure-checklist skill), from Copilot CLI (that is the sql-auditor skill), or for Copilot session/chat history and standups (that is the chronicle skill) — here "run history" always means SQL audit runs under results/.
 license: MIT
 ---
 
@@ -22,7 +22,8 @@ Copilot CLI and bypasses this flow.
 > same engine through `Backend/CLI/sql-auditor.ps1`. Only report a failure if that wrapper also
 > cannot run.
 
-> **Evaluation, not generation.** Never call `generate_scripts` or `save_generated_script` here.
+> **Evaluation, not generation.** Never author or save audit scripts here. Scripts are created
+> only by `configure_checklist`, for a NEW custom checklist item.
 
 ## Trigger
 

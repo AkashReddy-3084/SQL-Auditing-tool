@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "generate scripts for checklist ..." whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -17,24 +17,22 @@ or to supply any LLM configuration.
 All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper script
 `Backend/CLI/sql-auditor.ps1`, which locates or builds `SQLAuditor.exe` automatically.
 
-> **When to use this skill instead of the MCP skills.** `evaluate-checklist` and `generate-script`
-> only work when the `sql-auditor` MCP server is connected (VS Code). In Copilot CLI — or in any
-> session where those tools are missing — use this skill: it drives the **same** engine through the
-> wrapper script and needs no MCP server. Never tell the user the audit cannot run because the MCP
-> tools are unavailable; run the commands below instead.
+> **When to use this skill instead of the MCP skills.** `evaluate-checklist` and
+> `configure-checklist` only work when the `sql-auditor` MCP server is connected (VS Code). In
+> Copilot CLI — or in any session where those tools are missing — use this skill: it drives the
+> **same** engine through the wrapper script and needs no MCP server. Never tell the user the audit
+> cannot run because the MCP tools are unavailable; run the commands below instead.
 
 > **Always show the manual verification steps.** After running `evaluate`, your first
 > response must present the full Manual Verification Steps (objective, numbered steps, and
 > SQL) for **every** Needs Review item — automatically, every time, without the user asking.
 > Only ask for Pass/Fail decisions afterwards.
 
-> **Evaluate vs. generate scripts are two SEPARATE operations.**
-> - **"evaluate checklist ..."** → run the **evaluate** command below (connects to a SQL Server,
->   runs the deterministic scripts, and surfaces Needs Review items). This does NOT create scripts.
-> - **"generate scripts for checklist ..."** (a.k.a. "create/write audit scripts") → run the
->   **generate_scripts** command below. This authors read-only audit scripts and needs **no**
->   SQL Server and **no** credentials. Never start an evaluation for a script-generation request,
->   and never generate scripts when asked to evaluate.
+> **There is no standalone script-generation command.** Audit scripts are authored **only** by
+> `configure_checklist`, and only for the ONE new custom checklist item it reserves. Existing and
+> default checklist items already have their scripts and are never regenerated. If the user asks to
+> "generate a script", ask whether they want to **add a new custom checklist item** and run
+> `configure_checklist`; otherwise run `evaluate`.
 
 > **Rerun/redo a previous run — use `rerun`, NEVER `evaluate`.**
 > When the user asks to "rerun", "redo", "re-evaluate", "update", or "run again" a previous
@@ -80,15 +78,6 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   `--recommendation-file` — and `resolve_review` has `--notes-file`. **A quote character inside
   the text is eaten by the shell**, so write any field that quotes returned values (evidence,
   above all) to a file and pass the path instead of the text.
-- **generate_scripts** — GENERATE audit scripts for checklist items (no LLM endpoint, no SQL Server):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items <ids>
-  ```
-- **save_generated_script** — validate and save one script you generated (after generate_scripts):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file> [--validation-file <path-to-verdict-file>]
-  ```
-  Without `--validation-file` it prints the standard C1-C7 validation prompt and saves nothing.
 - **load_checklist** — list the checklist structure (read-only):
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 --dump-checklist
@@ -192,31 +181,16 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    - Then run **show_reports** and report **its** counts — the counts `evaluate` printed are
      provisional, because Not Applicable is decided during enrichment.
 
-## Generating scripts (separate from evaluation)
+## Generating scripts (only for NEW custom checklist items)
 
-When the user asks to **generate/create/write audit scripts** for checklist items, do NOT
-evaluate. You (Copilot CLI) are the script-generator AI — no SQL Server and no credentials
-are needed.
+There is no standalone script-generation command. A script is authored **only** while
+`configure_checklist` adds a NEW custom checklist item, and only for the single ID that flow
+reserves. Existing and default checklist items are never regenerated.
 
-1. Run **generate_scripts** with the checklist `--items`. It prints the generator system
-   prompt plus one request per item.
-2. For each item, follow the system prompt exactly: write the ANALYSIS, decide FEASIBLE, then
-   emit the full raw response — the `FEASIBLE`/`SCRIPT_TYPE`/`SCOPE`/`SCRIPT_NAME`/
-   `SCORING_LOGIC` fields and the script between `---SCRIPT_START---` and `---SCRIPT_END---`.
-   Every feasible script must output `Result`, `Score`, `DatabaseQueried`, and `Finding`.
-   Process the items in batches of up to 10 in parallel.
-3. Save each generated item by writing its complete raw response to a file and running
-   **save_generated_script** with `--id` and `--response-file`. The first call runs the format
-   gate and prints the validation system/user prompt for that script. Review the script using
-   ONLY those C1-C7 checks, write your verdict to a file, and run **save_generated_script**
-   again adding `--validation-file`. Use `VERDICT: VALID`, or `VERDICT: INVALID` with `ISSUES:`
-   and the corrected script between `---CORRECTED_SCRIPT_START---` and
-   `---CORRECTED_SCRIPT_END---`. Nothing is written to disk until a verdict is supplied. If it
-   reports `VALIDATION FAILED` or `VALIDATION REJECTED`, correct the script and save again
-   (retry up to 3 times). On success it writes the script under
-   `Backend/checklists/Scripts/` and updates
-   `Backend/checklists/deterministic-script-mapping.json` and
-   `Backend/results/execution-results.json`.
+Run `configure_checklist` (see `Backend/Modules/configure_checklist`) and follow the prompts it
+prints: guardrails → semantic match → Area/Sub-area classification → script generation → C1-C7
+review → user approval. Nothing reaches `custom-checklist.json`,
+`custom-deterministic-script-mapping.json` or `Backend/checklists/Scripts/` until the user approves.
 
 ## Examples
 
@@ -230,11 +204,6 @@ powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --
 
 # Record a decision after reviewing with the user
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
-
-# Generate audit scripts for two controls (no server needed), then save one
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items 1.1.2,3.1.1
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt --validation-file .\results\3.1.1.verdict.txt
 
 # Show the final report
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report

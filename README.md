@@ -77,7 +77,7 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
 3. **Checklist** — select the controls to evaluate.
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
-5. **Generate Scripts** — runs the script-generation pipeline for the selected controls and writes them to `Backend/checklists/Scripts/`.
+5. **Add New Custom Checklist Item** — describes a new check, generates and validates its audit script, and adds it to the checklist after you approve. This is the only flow that authors scripts into `Backend/checklists/Scripts/`, and it does so only for the new item.
 6. **Summary** — generates the scored report and lets you export it.
 7. **Export Manual CSV + Generate** — after evaluation finishes, exports every selected manual check and its verification guidance to CSV. Unanswered manual checks are recorded as **Skipped**, excluded from all scores, and retained in the generated Markdown and Excel reports for audit transparency. Submitted and previously copied manual decisions are preserved.
 
@@ -104,8 +104,8 @@ The same evaluation engine is available as a console command for automation and 
 reuses the checklist, scoring, and report generation. The CLI makes **no LLM/API calls**
 and needs **no `.env` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL`**. Controls that
 need human judgement come back as **Needs Review** for a person — or GitHub Copilot CLI — to
-decide, and `generate_scripts` hands the standard generator prompt to Copilot CLI in the same
-spirit.
+decide, and `configure_checklist` hands the standard generator prompt to Copilot CLI in the same
+spirit when a new custom checklist item is added.
 
 ### Build
 
@@ -139,8 +139,8 @@ Related subcommands: `resolve_review --id <id> --decision <pass\|fail\|needsrevi
 records a decision for a `Needs Review` item and regenerates the report;
 `enrich_result --id <id> [--finding <text>] [--evidence <text>] [--risk <text>] [--recommendation <text>]`
 records the audit wording for a script-evaluated item (its Outcome, Score, Severity and
-Databases Verified stay script-derived); `generate_scripts --items <ids>` runs the script
-generation pipeline (see below); `show_reports [--kind json]`
+Databases Verified stay script-derived); `configure_checklist` adds a new custom checklist item
+and generates its script (see below); `show_reports [--kind json]`
 prints the latest report; `--dump-checklist` lists the checklist structure.
 
 Examples:
@@ -184,19 +184,22 @@ failed, `2` usage/validation error, `3` unexpected error.
 
 ### Generate audit scripts
 
+There is **no standalone script-generation command**. Audit scripts are authored only as part of
+`configure_checklist`, and only for the single NEW custom checklist item that flow reserves.
+Existing and default checklist items already have their scripts and are never regenerated.
+
 ```powershell
-Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe generate_scripts --items 1.1.2,3.1.1
-Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe save_generated_script --id 3.1.1 --response-file <raw response> [--validation-file <verdict>]
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe configure_checklist --title "<title>" --description "<description>"
 ```
 
-This is **generation, not evaluation**: no SQL Server, no credentials, no LLM settings.
-`generate_scripts` prints the generator system prompt from `Backend/Modules/generate_scripts/prompts/` plus one
-filled request per item; Copilot CLI (or you) answers it, and `save_generated_script` runs the
-rest of the pipeline — the deterministic format gate, the C1-C7 validation prompt, the verdict
-and any corrected script — before writing to `Backend/checklists/Scripts/{sql,ps1}/` and
-updating `Backend/checklists/deterministic-script-mapping.json` and
-`Backend/results/execution-results.json`. Without `--validation-file` the save command prints
-the validation prompt and saves nothing.
+This is **configuration, not evaluation**: no SQL Server, no credentials, no LLM settings. The
+command serves the guardrails, semantic-match and classification prompts, reserves an ID inside an
+existing Sub-area, then serves the generator prompt from
+`Backend/Modules/generate_scripts/prompts/`. Copilot CLI (or you) answers it, and the command runs
+the rest of the pipeline — the deterministic format gate, the C1-C7 validation prompt, the verdict
+and any corrected script. Nothing is written to `Backend/checklists/Scripts/{sql,ps1}/`,
+`custom-checklist.json` or `custom-deterministic-script-mapping.json` until you approve with
+`--approve`.
 
 The mapping records each generated script's `scope`. `SERVER` scripts use instance/system
 catalogs; `DATABASE` scripts inspect only the current database. Database names are supplied only
@@ -229,7 +232,8 @@ Workflow:
 The auditor can be driven from **GitHub Copilot Chat** in VS Code through a Model Context
 Protocol (MCP) server. In this mode **Copilot Chat is the AI** — it orchestrates the
 conversation, reviews items that need judgement, and (through MCP **sampling**) answers the
-generation and validation prompts that `generate_scripts` runs. The server makes **no direct
+generation and validation prompts that `configure_checklist` serves when a new custom checklist
+item is added. The server makes **no direct
 LLM/API calls**, so **no `PROVIDER_BASE_URL` / `PROVIDER_API_KEY` / `MODEL` is required** for
 the IDE flow.
 
@@ -239,8 +243,7 @@ the IDE flow.
 | --- | --- |
 | `load_checklist` | List checklist areas and item IDs (read-only; no SQL needed) |
 | `evaluate` | Run the ordered evaluation workflow and return outcomes |
-| `generate_scripts` | Run the script-generation pipeline for the given checklist IDs, sampling Copilot for each generation and validation step (no SQL needed) |
-| `save_generated_script` / `validate_generated_script` | Fallback for clients without sampling: validate and save a script the model authored from the returned prompt |
+| `configure_checklist` | Add a NEW custom checklist item under an existing Area/Sub-area, generating and validating its audit script before you approve it (no SQL needed). This is the only tool that authors scripts |
 | `enrich_result` | Record Copilot-authored Finding/Evidence/RiskImpact/Recommendation for a script-evaluated item |
 | `resolve_review` | Record a Pass/Fail decision for an item that needs review |
 | `generate_report` | Refresh `historical_last_run.json` and regenerate the five-file report suite |
@@ -295,7 +298,7 @@ Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mir
 
 Example prompts: `use load_checklist`, `evaluate checklist 1.2.1 and 3.1.2`,
 `mark 3.1.1 as pass, notes: verified naming standards`,
-`generate scripts for checklist 1.1.2, 3.1.1` (this calls `generate_scripts`, never
+`add a custom checklist item for TDE` (this calls `configure_checklist`, never
 `evaluate`).
 
 ## Output
@@ -330,7 +333,6 @@ The `results/` folder is git-ignored, as its directory names and logs can contai
 | Symptom | Cause |
 | --- | --- |
 | `Setting 'PROVIDER_API_KEY' still holds the placeholder value` | The variable (or the `.env` entry) holds a `<placeholder>` instead of a real value |
-| `generate_scripts` falls back to "this client did not offer sampling" | The MCP client does not support `sampling/createMessage`; answer the returned prompt and save with `save_generated_script` |
 | `401 Unauthorized` from the provider | Invalid or expired API key |
 | `error code: 524` or `TaskCanceledException` | The LLM took too long; the request exceeded the provider gateway limit |
 | `Could not open a connection to SQL Server` | Wrong FQDN, instance not running, or TCP/named pipes disabled |

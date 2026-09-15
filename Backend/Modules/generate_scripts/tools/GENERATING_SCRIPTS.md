@@ -4,11 +4,11 @@ Generating deterministic SQL scripts (operator workflow)
 Purpose
 - - -
 This project keeps deterministic SQL scripts in `Backend/checklists/Scripts/sql`.
-Scripts must be created externally (for example, using your local GHCP Copilot),
-reviewed by an operator, and then saved into the repository. The tool intentionally
-disables automatic generation and runtime writes — the only approved in-tool writer
-is `Auditor.SaveGeneratedScriptAsync`, which is currently wired to the (disabled)
-"Generate Scripts" button and is commented for operator use.
+Scripts for the default checklist are authored externally (for example, using your local
+GHCP Copilot), reviewed by an operator, and then saved into the repository. There is no
+standalone in-tool generator: the only in-tool writer is the **Configure Checklist** flow,
+and it writes a script only for the ONE new custom checklist item it reserves. Existing and
+default checklist items are never regenerated.
 
 How to author a script with GHCP Copilot
 - - - - - - - - - - - - - - - - - -
@@ -22,12 +22,13 @@ How to author a script with GHCP Copilot
 3. Save the generated SQL into a local file (naming convention suggestion:
    `<checklistId>_<short-description>.sql`) under `Backend/checklists/Scripts/sql`.
 
-How to persist via the operator UI (disabled currently)
+How new custom checklist items get their scripts
 - - - - - - - - - - - - - - - - - - - - -
-When the team decides to re-enable the operator flow:
-- The `Generate Scripts` button in the Frontend is the only approved writer.
-- It should call `Auditor.SaveGeneratedScriptAsync(checklistId, scriptText, suggestedFileName)`
-  which writes the file and updates `Backend/checklists/deterministic-script-mapping.json`.
+- The **Add New Custom Checklist Item** flow (WPF), the `configure_checklist` MCP tool (IDE)
+  and the `configure_checklist` CLI subcommand all run the same pipeline.
+- It generates, format-gates and C1-C7 reviews the script for the newly reserved ID, then
+  writes it and updates `custom-deterministic-script-mapping.json` plus the merged
+  `deterministic-script-mapping.json` — only after the user approves.
 
 Notes
 - - -

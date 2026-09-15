@@ -15,8 +15,8 @@ Usage the user may have typed:
 
 Follow the repository skill `.github/skills/evaluate-checklist/SKILL.md` exactly. In short:
 
-1. This is **evaluation, not script generation**. Do NOT call `generate_scripts` or
-   `save_generated_script`.
+1. This is **evaluation, not script generation**. Never author or save audit scripts here;
+   scripts are created only by `configure_checklist` for a NEW custom checklist item.
 2. Take the text the user typed after the command **verbatim** as the `items` argument and call
    the `evaluate` tool on the `sql-auditor` MCP server. The tool resolves single IDs, lists,
    ranges and `all` itself — do not pre-expand them and do not reformat them.
