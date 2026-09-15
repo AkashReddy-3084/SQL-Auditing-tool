@@ -47,9 +47,11 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 
 - **evaluate** — run the evaluation engine (no LLM) and surface Needs Review items:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results <last-runs|fresh> --items <ids> --server <host> [--user <name>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results <last-runs|fresh> --items <ids> --server <host> --databases <names|all> [--user <name>]
   ```
   `--manual-results` is **required** and must come from the user (see step 1 below).
+  `--databases` is **required** in `--copilot` mode and must also come from the user (see step 2b):
+  without it the command prints the list of user databases on the instance and stops.
 - **history** — list the most recent runs across all servers (newest first, each with an index):
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 history
@@ -113,6 +115,13 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    `--user <name>`; the password comes from the `SQLAUDITOR_SQL_PASSWORD` session
    environment variable — **never** ask for it in chat. Omit `--user` for Windows
    Integrated authentication. The CLI runs the engine only; it never calls an LLM.
+2b. **Ask which databases to audit.** Without `--databases`, `evaluate --copilot` prints a
+   `=== DATABASE SELECTION REQUIRED ===` block listing the user databases on the instance and
+   stops. Show that list to the user, let them pick one, several or all, and run `evaluate`
+   again with `--databases <name1,name2>` or `--databases all`. Never choose for them: the
+   scope decides which databases the database-scoped checks run against, and therefore the
+   Pass/Fail/Not Applicable counts. System databases (master, model, msdb, tempdb) are never
+   audit targets and are never offered.
 3. Read the `=== COPILOT ENRICHMENT REQUIRED ===` block. Script-evaluated items already
    have their Outcome, Score, Severity and Databases Verified decided — **never change
    those**. For each item you author the wording from the `Script result` shown there,
@@ -213,10 +222,11 @@ are needed.
 
 ```powershell
 # Evaluate two controls against a local server (Windows auth, fresh manual evaluation)
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results fresh --items 1.1.1,3.1.4 --server localhost
+# Run it first without --databases to get the list of databases to offer the user.
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results fresh --items 1.1.1,3.1.4 --server localhost --databases AdventureWorks2025
 
 # Re-run reusing the manual results recorded by the previous audit
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost --databases all
 
 # Record a decision after reviewing with the user
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"

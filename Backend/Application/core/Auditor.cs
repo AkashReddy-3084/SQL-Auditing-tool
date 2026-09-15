@@ -216,13 +216,15 @@ namespace SQLAuditor.Lib
                 ? 0
                 : Convert.ToInt32(editionValue);
 
+            // Only user databases are returned: system databases hold no audited user data,
+            // and RunChecklistAsync rejects them when they are selected explicitly.
             var discoverySql = engineEdition == 5
                 ? "SELECT [name] FROM sys.databases " +
                   "WHERE [name] <> N'master' AND state = 0 AND source_database_id IS NULL " +
                   "ORDER BY [name];"
-                  // tempdb is excluded because it is recreated on every restart and is not auditable.
                 : "SELECT [name] FROM sys.databases " +
-                  "WHERE database_id <> 2 AND state = 0 AND source_database_id IS NULL " +
+                  "WHERE [name] NOT IN (N'master', N'model', N'msdb', N'tempdb') " +
+                  "AND state = 0 AND source_database_id IS NULL " +
                   "AND HAS_DBACCESS([name]) = 1 " +
                   "ORDER BY [name];";
 

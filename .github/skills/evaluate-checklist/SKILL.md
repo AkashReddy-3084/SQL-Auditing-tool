@@ -42,7 +42,7 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 
 | Tool | Purpose |
 |------|---------|
-| `evaluate` | Gathers the manual-results choice, server + auth, runs the engine, returns the work you must do |
+| `evaluate` | Gathers the manual-results choice, server + auth, database scope, runs the engine, returns the work you must do |
 | `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
 | `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
@@ -84,6 +84,13 @@ that question, then call `evaluate` again with the answer plus everything gather
 - **Never guess the server name** or use a default such as `localhost`.
 - **Never ask for a password in chat.** For SQL Login the tool needs only the username; the
   password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched VS Code.
+- **Never choose the databases.** Once the connection details are known, `evaluate` returns a
+  `STEP 4b of 6 — DATABASE SELECTION REQUIRED` block listing the user databases on the instance.
+  Show that list, let the user pick one, several or all of them, then call `evaluate` again with
+  `databases="<name1,name2>"` or `databases="all"`. This scope decides which databases the
+  database-scoped checks run against, and therefore the Pass/Fail/Not Applicable counts, so it
+  must match what the user would have selected in the desktop app. System databases (master,
+  model, msdb, tempdb) are never audit targets and are never offered.
 
 With Option 1, manual items that already have a result in `results/historical_last_run.json` are
 copied forward and listed as `Copied from last runs (N item(s))`. Those items are **done**: do not

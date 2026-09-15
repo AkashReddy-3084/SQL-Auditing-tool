@@ -323,8 +323,15 @@ namespace SQLAuditor
             var validIds = ids.Where(id => knownIds.Contains(id)).ToArray();
             if (validIds.Length == 0) { Console.Error.WriteLine("Error: none of the checklist IDs exist."); return 2; }
 
-            // Databases: reuse the stored scope where present (null = all user databases).
-            var targetDatabases = (meta.Databases != null && meta.Databases.Count > 0) ? meta.Databases.ToArray() : null;
+            // Databases: reuse the stored scope (null = all user databases), dropping any
+            // system database recorded by an older build.
+            var storedDatabases = (meta.Databases ?? (System.Collections.Generic.IReadOnlyList<string>)Array.Empty<string>())
+                .Where(name => !(string.Equals(name, "master", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(name, "model", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(name, "msdb", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(name, "tempdb", StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+            var targetDatabases = storedDatabases.Length > 0 ? storedDatabases : null;
 
             Console.WriteLine($"Rerunning {validIds.Length} item(s) into the original folder: {run.RunDirectory}");
             Console.WriteLine($"Target server: {server}");
@@ -550,6 +557,44 @@ namespace SQLAuditor
 
             var auditor = new SQLAuditor.Lib.Auditor(connectionString);
 
+            // --- Step 4: Databases to audit ---
+            // The desktop app makes the user pick the databases, so the CLI must ask too:
+            // auditing every database silently changes the counts for database-scoped checks.
+            string[] availableDatabases;
+            try
+            {
+                availableDatabases = await auditor.GetAvailableDatabasesAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: could not connect to '{server}' to list its databases: {ex.Message}");
+                return 2;
+            }
+
+            if (availableDatabases.Length == 0)
+            {
+                Console.Error.WriteLine($"Error: no accessible user database was found on '{server}'; database-scoped checks cannot run.");
+                return 2;
+            }
+
+            var databaseSpec = GetOption(opts, "databases") ?? GetOption(opts, "db");
+            if (string.IsNullOrWhiteSpace(databaseSpec))
+            {
+                if (copilotMode)
+                {
+                    PrintDatabaseSelectionQuestion(server!, availableDatabases);
+                    return 2;
+                }
+                databaseSpec = PromptDatabaseSelection(availableDatabases);
+            }
+
+            if (!TryResolveDatabaseSelection(databaseSpec, availableDatabases, out var targetDatabases, out var databaseError))
+            {
+                Console.Error.WriteLine("Error: " + databaseError);
+                Console.Error.WriteLine("Available user databases: " + string.Join(", ", availableDatabases));
+                return 2;
+            }
+
             // Validate requested IDs against the known checklist structure.
             var structure = await auditor.GetChecklistStructureAsync();
             var knownIds = new System.Collections.Generic.HashSet<string>(
@@ -573,6 +618,7 @@ namespace SQLAuditor
 
             Console.WriteLine($"Evaluating {validIds.Length} checklist item(s): {string.Join(", ", validIds)}");
             Console.WriteLine($"Target server: {server}");
+            Console.WriteLine($"Target databases ({targetDatabases.Length}): {string.Join(", ", targetDatabases)}");
             Console.WriteLine("(Press Ctrl+C to stop; partial results are still saved.)");
             Console.WriteLine();
 
@@ -627,7 +673,8 @@ namespace SQLAuditor
                 results = await auditor.RunChecklistAsync(
                     progress, null, validIds, cts.Token,
                     useHistoricalManualResults.Value,
-                    generateReports: true);
+                    generateReports: true,
+                    targetDatabases: targetDatabases);
             }
             finally
             {
@@ -787,7 +834,7 @@ namespace SQLAuditor
             Console.WriteLine("Usage: sqlauditor evaluate [options]");
             Console.WriteLine();
             Console.WriteLine("Any option not supplied is prompted for interactively (manual-results");
-            Console.WriteLine("source, then server, then login details, then checklist IDs).");
+            Console.WriteLine("source, then server, then login details, then checklist IDs, then databases).");
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  --manual-results <last-runs|fresh>");
@@ -796,6 +843,8 @@ namespace SQLAuditor
             Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
             Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
+            Console.WriteLine("  --databases <names> Comma-separated user databases the database-scoped checks");
+            Console.WriteLine("                      run against, or 'all'. System databases are never audited.");
             Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
             Console.WriteLine("                      Omit for Windows Integrated authentication.");
             Console.WriteLine("  --password <pw>     SQL login password. Or set SQLAUDITOR_SQL_PASSWORD.");
@@ -812,7 +861,7 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
-            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --fresh");
+            Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --databases Sales --fresh");
         }
 
         // ---------------------------------------------------------------------
@@ -892,6 +941,90 @@ namespace SQLAuditor
             Console.WriteLine("  --manual-results last-runs     (Option 1)");
             Console.WriteLine("  --manual-results fresh         (Option 2)");
             Console.WriteLine("=== END MANUAL RESULTS SOURCE REQUIRED ===");
+        }
+
+        // ---------------------------------------------------------------------
+        // Database scope: which user databases the database-scoped checks run against.
+        // Mirrors the desktop app's database picker so all three entry points audit
+        // the same set and report the same Pass/Fail/Not Applicable counts.
+        // ---------------------------------------------------------------------
+        static string PromptDatabaseSelection(string[] available)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Which databases should be audited? (system databases are never audit targets)");
+            for (int i = 0; i < available.Length; i++)
+                Console.WriteLine($"  {i + 1}) {available[i]}");
+            Console.WriteLine("  a) All databases");
+
+            if (Console.IsInputRedirected)
+            {
+                Console.WriteLine("Non-interactive session: defaulting to all user databases. Pass --databases to narrow the scope.");
+                return "all";
+            }
+
+            while (true)
+            {
+                var ans = Prompt("Enter names or numbers (comma-separated), or 'a' for all:").Trim();
+                if (ans.Length == 0) { Console.WriteLine("Select at least one database."); continue; }
+                if (TryResolveDatabaseSelection(ans, available, out _, out var error)) return ans;
+                Console.WriteLine(error);
+            }
+        }
+
+        static void PrintDatabaseSelectionQuestion(string server, string[] available)
+        {
+            Console.WriteLine();
+            Console.WriteLine("=== DATABASE SELECTION REQUIRED ===");
+            Console.WriteLine($"Ask the user which of these user databases on '{server}' should be audited — never decide this yourself:");
+            foreach (var name in available)
+                Console.WriteLine("  - " + name);
+            Console.WriteLine("They may pick one, several, or all of them.");
+            Console.WriteLine("Then run evaluate again, adding:");
+            Console.WriteLine("  --databases <name1,name2>      (the chosen databases)");
+            Console.WriteLine("  --databases all                (every database listed above)");
+            Console.WriteLine("System databases (master, model, msdb, tempdb) are never audit targets and are not offered.");
+            Console.WriteLine("=== END DATABASE SELECTION REQUIRED ===");
+        }
+
+        // Accepts 'all'/'*', database names, 1-based list positions, or a mix.
+        static bool TryResolveDatabaseSelection(
+            string? spec,
+            string[] available,
+            out string[] selected,
+            out string error)
+        {
+            selected = Array.Empty<string>();
+            error = string.Empty;
+
+            var input = (spec ?? string.Empty).Trim();
+            if (input.Length == 0) { error = "no database selected."; return false; }
+
+            if (string.Equals(input, "all", StringComparison.OrdinalIgnoreCase) || input is "a" or "*")
+            {
+                selected = available;
+                return true;
+            }
+
+            var chosen = new System.Collections.Generic.List<string>();
+            var unknown = new System.Collections.Generic.List<string>();
+            foreach (var token in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var match = int.TryParse(token, out var index) && index >= 1 && index <= available.Length
+                    ? available[index - 1]
+                    : available.FirstOrDefault(name => string.Equals(name, token, StringComparison.OrdinalIgnoreCase));
+                if (match == null) unknown.Add(token);
+                else chosen.Add(match);
+            }
+
+            if (unknown.Count > 0)
+            {
+                error = "not on this instance (or not accessible to this login): " + string.Join(", ", unknown);
+                return false;
+            }
+            if (chosen.Count == 0) { error = "no database selected."; return false; }
+
+            selected = chosen.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return true;
         }
 
         // Emits NeedsReview items in a clearly delimited block so the Copilot CLI skill

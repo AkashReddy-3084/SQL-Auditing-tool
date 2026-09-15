@@ -86,7 +86,7 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 1. In the exported CSV, enter `Pass` or `Fail` in **Decision** and the observation supporting that decision in **Evidence**. Keep the header row and **Checklist ID** values unchanged.
 2. Start the next evaluation with the checklist IDs represented in the CSV and wait for the automated evaluation to finish.
 3. On the **Evaluate** tab, select **Import Filled Manual CSV** and choose the completed file.
-4. The importer applies valid rows only to pending manual checks in the current run. Blank decisions or evidence, invalid decisions, duplicate IDs, IDs not selected in the run, non-manual checks, and checks already completed in the run are reported and left unchanged.
+4. The importer treats the CSV as the source of truth: every valid row for a manual check in the current run is applied, overwriting any existing decision — including manual checks already submitted or reused via "Copy last run for the manual items". Blank decisions or evidence, invalid decisions, duplicate IDs, IDs not selected in the run, and non-manual checks are reported and left unchanged.
 5. Resolve any remaining pending rows, then select **Generate Summary / Report**.
 
 The accepted decision values are `Pass`, `Passed`, `P`, `Fail`, `Failed`, and `F` (case-insensitive). The import can also be performed in the same run after the CSV has been completed externally.

@@ -1255,22 +1255,22 @@ namespace SQLAuditor.Wpf
             var ignored = 0;
             foreach (var imported in importedRows)
             {
+                // The CSV is the source of truth for manual decisions: rows for valid manual checks
+                // in the current run are always applied, overwriting any existing decision including
+                // ones already submitted or reused via "Copy last run for the manual items".
                 if (!_evalItemMap.TryGetValue(imported.Id, out var pair)
                     || !_evalStatusMap.TryGetValue(imported.Id, out var statusEntry)
-                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique)
-                    || _copiedManualIds.Contains(imported.Id))
+                    || !HistoricalManualResultsStore.IsManualTechnique(statusEntry.Technique))
                 {
                     ignored++;
                     continue;
                 }
+
+                // A decision copied from a previous run is now being overwritten by the CSV, so the
+                // item must no longer be treated as reused; otherwise reporting would keep the copy.
+                _copiedManualIds.Remove(imported.Id);
 
                 var state = EnsureManualState(imported.Id);
-                if (state.IsSubmitted)
-                {
-                    ignored++;
-                    continue;
-                }
-
                 if (string.IsNullOrWhiteSpace(state.Instructions) && !string.IsNullOrWhiteSpace(imported.ManualSteps))
                     state.Instructions = imported.ManualSteps;
                 state.SelectedOutcome = imported.Decision;
@@ -3312,7 +3312,7 @@ namespace SQLAuditor.Wpf
                 Log($"Imported {applied} manual decision(s) from {dialog.FileName}; ignored {ignored} row(s), {importFile.Issues.Count} row issue(s).");
                 MessageBox.Show(
                     $"Imported {applied} manual decision(s).\n"
-                    + $"Ignored {ignored} row(s) that were not selected manual checks or were already completed.\n"
+                    + $"Ignored {ignored} row(s) that are not selected manual checks in this run.\n"
                     + $"Rows needing correction: {importFile.Issues.Count}."
                     + details
                     + "\n\nWhen all required rows are resolved, click Generate Summary / Report.",

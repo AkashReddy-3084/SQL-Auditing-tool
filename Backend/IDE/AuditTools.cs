@@ -47,23 +47,28 @@ public static class AuditTools
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     [McpServerTool(Name = "evaluate")]
-    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes checklist_results.json and the complete report suite in a timestamp-and-server run directory under results.")]
+    [Description("Evaluate SQL audit checklist items following the standard workflow, identical to the CLI and the desktop app: (1) how manual items are handled (reuse the last runs or evaluate fresh), (2) SQL Server name, (3) authentication method, (4) checklist items, (4b) which user databases to audit, (5) automated + manual verification, (6) summary. ALWAYS call this tool to begin an evaluation. When a required input is missing it returns the exact next question to ask the user; ask that question and call evaluate again with the answer plus everything gathered so far. Never guess the server, the credentials, the database scope or the manual-results choice, and never run the evaluation before the server name has been supplied by the user. Writes checklist_results.json and the complete report suite in a timestamp-and-server run directory under results.")]
     public static Task<string> EvaluateAsync(
         [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
         [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
         [Description("STEP 3: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
         [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
         [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
+        [Description("STEP 4b: Which user databases the database-scoped checks run against — a comma-separated list of database names ('Sales,Warehouse') or 'all' for every accessible user database. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the list of databases on the instance to present to the user.")] string? databases = null,
         CancellationToken cancellationToken = default)
-        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
+        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases,
+                             reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
 
     // Shared core used by both `evaluate` (fresh run) and `rerun_evaluation` (same folder).
+    // `databaseSpec` is what the user typed; `targetDatabases` is an already-resolved scope
+    // (used by rerun, which replays the databases stored in the run metadata).
     private static async Task<string> EvaluateCoreAsync(
         string? manualResults,
         string? server,
         string? authMethod,
         string? sqlUser,
         string? items,
+        string? databaseSpec,
         bool reuseActiveRunDirectory,
         string[]? targetDatabases,
         CancellationToken cancellationToken)
@@ -142,6 +147,64 @@ public static class AuditTools
 
         var auditor = new Auditor(connectionString);
 
+        // STEP 4b — database scope. The desktop app makes the user pick the databases, so the
+        // IDE must ask too: auditing every database (including system databases) silently
+        // changes the Pass/Fail/Not Applicable counts for database-scoped checks.
+        if (targetDatabases == null)
+        {
+            string[] availableDatabases;
+            try
+            {
+                availableDatabases = await auditor.GetAvailableDatabasesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"Error: could not connect to '{server}' to list its databases: {ex.Message}\n"
+                     + "Check the server name, the authentication method and that the login has access, then call evaluate again.";
+            }
+
+            if (availableDatabases.Length == 0)
+                return $"Error: no accessible user database was found on '{server}'.\n"
+                     + "Database-scoped checks cannot run. Confirm with the user that the login can see the databases to audit.";
+
+            if (string.IsNullOrWhiteSpace(databaseSpec))
+                return "STEP 4b of 6 — DATABASE SELECTION REQUIRED.\n"
+                     + $"Ask the user which of these user databases on '{server}' should be audited — never choose for them:\n"
+                     + string.Join("\n", availableDatabases.Select(name => "  - " + name)) + "\n"
+                     + "They may pick one, several (comma-separated) or all of them.\n"
+                     + "Then call evaluate again with everything already gathered plus databases='<names>' or databases='all'.\n"
+                     + "System databases (master, model, msdb, tempdb) are never audit targets and are not offered.";
+
+            var databaseInput = databaseSpec.Trim();
+            if (string.Equals(databaseInput, "all", StringComparison.OrdinalIgnoreCase) || databaseInput == "*")
+            {
+                targetDatabases = availableDatabases;
+            }
+            else
+            {
+                var requested = databaseInput
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var unknownDatabases = requested
+                    .Where(name => !availableDatabases.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    .ToArray();
+                if (requested.Length == 0 || unknownDatabases.Length > 0)
+                    return "STEP 4b of 6 — DATABASE SELECTION INVALID.\n"
+                         + (unknownDatabases.Length > 0
+                                ? "Not on this instance (or not accessible to this login): " + string.Join(", ", unknownDatabases) + "\n"
+                                : "No database name was recognised in the answer.\n")
+                         + $"Available user databases on '{server}':\n"
+                         + string.Join("\n", availableDatabases.Select(name => "  - " + name)) + "\n"
+                         + "Ask the user to choose from this list, then call evaluate again with databases='<names>' or databases='all'.";
+
+                // Keep the instance's own casing so the run metadata matches the desktop app.
+                targetDatabases = availableDatabases
+                    .Where(name => requested.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    .ToArray();
+            }
+        }
+
         // Resolve the item spec the same way generate_scripts does, so a range or 'all'
         // works here too and the run follows master-checklist order.
         var structure = await auditor.GetChecklistStructureAsync();
@@ -185,6 +248,9 @@ public static class AuditTools
         var sb = new StringBuilder();
         if (unknown.Length > 0)
             sb.AppendLine("Skipped unknown IDs: " + string.Join(", ", unknown));
+
+        if (targetDatabases is { Length: > 0 })
+            sb.AppendLine($"Database-scoped checks ran against {targetDatabases.Length} user database(s): " + string.Join(", ", targetDatabases));
 
         if (auditor.LastDetectedPlatform is { } detectedPlatform
             && detectedPlatform.Platform != PlatformApplicability.PlatformUnknown)
@@ -378,14 +444,24 @@ public static class AuditTools
             return $"Run '{run}' uses SQL Login ('{sqlUser}'), but SQLAUDITOR_SQL_PASSWORD is not set. Ask the user to set it in the "
                  + "session that launched VS Code, restart the server, then call rerun_evaluation again \u2014 or use Windows auth.";
 
-        var targetDatabases = (meta.Databases is { Count: > 0 }) ? meta.Databases.ToArray() : null;
+        // Replay the stored scope, minus any system database recorded by an older build.
+        var storedDatabases = (meta.Databases ?? Array.Empty<string>())
+            .Where(name => !IsSystemDatabase(name))
+            .ToArray();
+        var targetDatabases = storedDatabases.Length > 0 ? storedDatabases : null;
 
         // Reuse the SAME folder so the reports are overwritten in place.
         AuditOutputPaths.ResumeRun(selected.RunDirectory);
 
-        return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items,
+        return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databaseSpec: null,
             reuseActiveRunDirectory: true, targetDatabases: targetDatabases, cancellationToken);
     }
+
+    private static bool IsSystemDatabase(string? name) =>
+        string.Equals(name, "master", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "model", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "msdb", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "tempdb", StringComparison.OrdinalIgnoreCase);
 
     // Resolves a run argument to a stored run: a 1-based index into the recent-runs list,
     // a run directory path, or just the folder name under results/.
