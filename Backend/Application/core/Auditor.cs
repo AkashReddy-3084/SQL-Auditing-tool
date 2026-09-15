@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Data;
 using System.Diagnostics;
 using System.IO;
@@ -117,8 +118,15 @@ namespace SQLAuditor.Lib
 
         // checklist_results.json is written by this engine at the end of a run and by the WPF
         // manual Pass/Fail merge after a completed run. Both writers take this lock so neither
-        // can observe or produce a half-written file.
-        public static readonly object ResultsFileLock = new object();
+        // can observe or produce a half-written file. Keyed per run directory so parallel
+        // multi-server runs do not serialise on each other.
+        private static readonly ConcurrentDictionary<string, object> ResultsFileLocks =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        public static object ResultsFileLock => ResultsFileLockFor(AuditOutputPaths.CurrentRunDirectory);
+
+        public static object ResultsFileLockFor(string runDirectory) =>
+            ResultsFileLocks.GetOrAdd(Path.GetFullPath(runDirectory), _ => new object());
 
         private string _connectionString;
         private SqlServerMcpEvaluator? _mcpEvaluator;
@@ -131,6 +139,21 @@ namespace SQLAuditor.Lib
 
         /// <summary>UI-supplied inputs (server/auth/LLM) recorded with the run so it can be rerun or edited later.</summary>
         public RunInputs? LastRunInputs { get; set; }
+
+        /// <summary>Run directory created by the most recent run on this instance.</summary>
+        public string? RunDirectory { get; private set; }
+
+        // A multi-server batch pre-creates the run directory and enters its scope; a rerun/edit
+        // reuses the already-resumed directory so reports overwrite the same timestamp folder;
+        // a standalone run creates its own.
+        private string BeginRunDirectory(bool reuseActiveRunDirectory = false)
+        {
+            var directory = reuseActiveRunDirectory
+                ? AuditOutputPaths.CurrentRunDirectory
+                : AuditOutputPaths.AmbientRunDirectory ?? AuditOutputPaths.BeginRun(_connectionString);
+            RunDirectory = directory;
+            return directory;
+        }
 
         public Auditor(string connectionString)
         {
@@ -578,7 +601,12 @@ WHERE d.name = DB_NAME();";
             return result;
         }
 
-        private string? FindRepoRoot()
+        private static readonly Lazy<string?> RepoRootCache =
+            new(LocateRepoRoot, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+        private string? FindRepoRoot() => RepoRootCache.Value;
+
+        private static string? LocateRepoRoot()
         {
             var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
             while (dir != null)
@@ -672,7 +700,7 @@ WHERE d.name = DB_NAME();";
         {
             var scriptsDir = FindSqlScriptsFolder();
             if (scriptsDir == null) return Array.Empty<ScriptResult>();
-            var resultsDir = AuditOutputPaths.BeginRun(_connectionString);
+            var resultsDir = BeginRunDirectory();
             var list = new System.Collections.Generic.List<ScriptResult>();
             foreach (var f in Directory.GetFiles(scriptsDir, "*.sql"))
             {
@@ -852,11 +880,7 @@ WHERE d.name = DB_NAME();";
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
             var runStartedAt = DateTime.Now;
-            // Rerun/edit reuses the already-resumed run directory so reports overwrite the same
-            // timestamp folder; a normal run creates a fresh directory.
-            var resultsDir = reuseActiveRunDirectory
-                ? AuditOutputPaths.CurrentRunDirectory
-                : AuditOutputPaths.BeginRun(_connectionString);
+            var resultsDir = BeginRunDirectory(reuseActiveRunDirectory);
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
@@ -1647,7 +1671,7 @@ WHERE d.name = DB_NAME();";
             {
                 Directory.CreateDirectory(resultsDir);
                 var payload = JsonSerializer.Serialize(enrichedResults, new JsonSerializerOptions { WriteIndented = true });
-                lock (ResultsFileLock)
+                lock (ResultsFileLockFor(resultsDir))
                 {
                     File.WriteAllText(jsonPath, payload);
                 }
@@ -1676,25 +1700,26 @@ WHERE d.name = DB_NAME();";
             // refreshed here: that happens only when the user explicitly asks for the report.
             if (generateReports)
             {
-                GenerateReports(refreshHistoricalManualResults: false);
+                GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir);
             }
 
             return enrichedResults;
         }
 
         /// <summary>
-        /// Produces the five client-facing artifacts in the active run directory from its persisted
-        /// checklist_results.json. Report generation is also the moment
-        /// historical_last_run.json is refreshed, so the historical file always mirrors the
+        /// Produces the five client-facing artifacts in <paramref name="runDirectory"/> (defaulting to
+        /// the active run) from its persisted checklist_results.json. Report generation is also the
+        /// moment historical_last_run.json is refreshed, so the historical file always mirrors the
         /// manual results of the latest reported audit.
         /// </summary>
-        public static string GenerateReports(bool refreshHistoricalManualResults = true)
+        public static string GenerateReports(bool refreshHistoricalManualResults = true, string? runDirectory = null)
         {
-            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath))
                 return $"No results found at {jsonPath}. Run an evaluation first.";
 
+            using var scope = AuditOutputPaths.EnterRunScope(resultsDir);
             var messages = new System.Collections.Generic.List<string>();
 
             if (refreshHistoricalManualResults)
@@ -1763,7 +1788,7 @@ WHERE d.name = DB_NAME();";
         // flow and the IDE 'resolve_review' tool so manual items can be decided by a
         // human without re-running the evaluation. Patches the JSON in place so no
         // enrichment fields are lost.
-        public bool ResolveReview(string id, string decision, string? notes, out string newOutcome)
+        public bool ResolveReview(string id, string decision, string? notes, out string newOutcome, string? runDirectory = null)
         {
             newOutcome = string.Empty;
             var norm = decision?.Trim().ToLowerInvariant();
@@ -1778,7 +1803,7 @@ WHERE d.name = DB_NAME();";
             };
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
 
-            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
             // Nothing about the control could be assessed, so it is excluded from every score -
             // the same standing a script- or MCP-evaluated item gets when its evidence declares
             // it not applicable.
@@ -1854,7 +1879,7 @@ WHERE d.name = DB_NAME();";
             catch { return false; }
 
             // Keep every generated artifact synchronized with the resolved decision.
-            try { GenerateReports(refreshHistoricalManualResults: false); } catch { }
+            try { GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir); } catch { }
 
             newOutcome = outcome;
             return true;
@@ -1899,13 +1924,13 @@ WHERE d.name = DB_NAME();";
         // supply Finding/Evidence/RiskImpact/Recommendation in the flows where this engine
         // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
         // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
-        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation)
+        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, string? runDirectory = null)
         {
             if (string.IsNullOrWhiteSpace(id)) return false;
             if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
                 && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
 
-            var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
             var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
             if (!File.Exists(jsonPath)) return false;
 
@@ -1938,7 +1963,7 @@ WHERE d.name = DB_NAME();";
             catch { return false; }
 
             // Keep every generated artifact synchronized with the enriched wording and N/A state.
-            try { GenerateReports(refreshHistoricalManualResults: false); } catch { }
+            try { GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir); } catch { }
 
             return true;
         }
