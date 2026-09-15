@@ -376,10 +376,35 @@ namespace SQLAuditor
                     Console.WriteLine($"{auditor.LastPlatformExclusionCount} item(s) recorded as Not Applicable to this platform - no script ran and no model was called for them.");
             }
 
+            // The CLI engine never calls an LLM, so a rerun must hand the same enrichment and
+            // review work back to Copilot as 'evaluate' does. Without this the script items keep
+            // null Evidence/RiskImpact/Recommendation.
+            if (copilotMode)
+            {
+                var itemLookup = structure.SelectMany(s => s.Items)
+                    .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                Console.WriteLine();
+                Console.WriteLine("NOTE: every enrich_result field also accepts a file form (--finding-file / --evidence-file / --risk-file /");
+                Console.WriteLine("      --recommendation-file <path>). Use it whenever the text contains a quote character, otherwise the");
+                Console.WriteLine("      shell truncates the value at that quote.");
+                Console.Write(SQLAuditor.Lib.Auditor.BuildScriptEnrichmentRequest(
+                    results,
+                    id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence-file \"<file holding the evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
+
+                PrintNeedsReviewForCopilot(results, validIds, itemLookup);
+            }
+
             Console.WriteLine();
-            Console.WriteLine("Summary:");
+            Console.WriteLine(copilotMode ? "Summary (PROVISIONAL - script verdicts only):" : "Summary:");
             foreach (var g in results.GroupBy(r => r.Outcome ?? "Unknown", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key))
                 Console.WriteLine($"  {g.Key,-12}: {g.Count()}");
+            if (copilotMode)
+            {
+                Console.WriteLine("Not Applicable is decided during enrichment, so these counts are not final. Once every item has been");
+                Console.WriteLine("enriched and reviewed, run 'sql-auditor show_reports' and report ITS counts, which include Not Applicable.");
+            }
 
             var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
             Console.WriteLine();

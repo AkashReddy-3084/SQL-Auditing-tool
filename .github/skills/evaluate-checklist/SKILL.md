@@ -1,6 +1,6 @@
 ---
 name: evaluate-checklist
-description: Audit a SQL Server instance against the governance checklist from inside VS Code, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for script GENERATION (that is the generate-script skill) or from Copilot CLI (that is the sql-auditor skill).
+description: Audit a SQL Server instance against the governance checklist from inside VS Code, and list, rerun or edit previous audit runs, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit", and also for "show the run history", "evaluation history", "list the last runs", "previous evaluations", "rerun that run", "redo the last audit", "re-evaluate run 2". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for script GENERATION (that is the generate-script skill), from Copilot CLI (that is the sql-auditor skill), or for Copilot session/chat history and standups (that is the chronicle skill) — here "run history" always means SQL audit runs under results/.
 license: MIT
 ---
 
@@ -31,6 +31,9 @@ Copilot CLI and bypasses this flow.
 - `/evaluate 1.1.2,3.1.1,4.2.6` — an explicit list
 - `/evaluate all` — the whole checklist
 - Any natural-language request to evaluate/audit checklist items on an instance
+- "show the run history", "evaluation history", "list the last 5 runs", "previous evaluations" —
+  audit runs under `results/`, **not** Copilot session history. Call `list_evaluations`.
+- "rerun", "redo", "re-evaluate", "run it again", "update that run" — call `rerun_evaluation`.
 
 Pass whatever the user typed straight through as the `items` argument — the tool resolves single
 IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reformat it.
@@ -40,11 +43,26 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | Tool | Purpose |
 |------|---------|
 | `evaluate` | Gathers the manual-results choice, server + auth, runs the engine, returns the work you must do |
+| `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
+| `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
 | `resolve_review` | Records the user's Pass/Fail decision for one review item |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
 | `show_reports` | The final report and the authoritative outcome counts |
 | `load_checklist` | Look up valid IDs when the user's input cannot be resolved |
+
+## Previous runs (history, rerun, edit)
+
+- **History** — `list_evaluations(count=5)` returns the newest runs with an index, server, date,
+  score, item count, status and run directory. Present that list as-is.
+- **Rerun / edit** — `rerun_evaluation(run="<index-or-path>", manualResults="last-runs|fresh")`.
+  Never use `evaluate` for a rerun: `evaluate` always creates a NEW timestamped folder, while
+  `rerun_evaluation` overwrites the reports in the original one.
+- The server, authentication and databases are always reused from the original run and cannot be
+  changed. Only `items` may be overridden, to edit the checklist selection.
+- The manual-results choice must still come from the user. When it is missing the tool returns the
+  exact prompt — ask it, then call `rerun_evaluation` **again** with the same `run`.
+- Once the rerun finishes, the review/enrichment workflow below applies unchanged.
 
 ## Workflow
 
