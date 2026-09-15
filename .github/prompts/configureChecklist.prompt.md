@@ -10,7 +10,7 @@ Add a **custom checklist item** to the SQL Server governance checklist.
 Follow the repository skill `.github/skills/configure-checklist/SKILL.md` exactly. In short:
 
 1. This is **checklist configuration, not evaluation and not script generation for an existing
-   item**. Do NOT call `evaluate` or `generate_scripts`, do NOT connect to a SQL Server, and do
+   item**. Do NOT call `evaluate`, do NOT connect to a SQL Server, and do
    NOT ask for a server name, username or password.
 2. Ask the user for exactly two things: the **Custom Checklist Title** and a **description of the
    checklist item**. Never ask for an Area, a Sub-area, a category or a checklist ID — the

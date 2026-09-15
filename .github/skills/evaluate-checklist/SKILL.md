@@ -1,6 +1,6 @@
 ---
 name: evaluate-checklist
-description: Audit a SQL Server instance against the governance checklist from inside VS Code, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for script GENERATION (that is the generate-script skill) or from Copilot CLI (that is the sql-auditor skill).
+description: Audit a SQL Server instance against the governance checklist from inside VS Code, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for adding a custom checklist item (that is the configure-checklist skill) or from Copilot CLI (that is the sql-auditor skill).
 license: MIT
 ---
 
@@ -22,7 +22,8 @@ Copilot CLI and bypasses this flow.
 > same engine through `Backend/CLI/sql-auditor.ps1`. Only report a failure if that wrapper also
 > cannot run.
 
-> **Evaluation, not generation.** Never call `generate_scripts` or `save_generated_script` here.
+> **Evaluation, not generation.** Never author or save audit scripts here. Scripts are created
+> only by `configure_checklist`, for a NEW custom checklist item.
 
 ## Trigger
 

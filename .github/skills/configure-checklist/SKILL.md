@@ -1,6 +1,6 @@
 ---
 name: configure-checklist
-description: Add a CUSTOM checklist item to the SQL Server governance checklist from inside VS Code, using the sql-auditor MCP server. Use for "/configureChecklist", "configure checklist", "add a custom checklist item", "add a new check for ...", "extend the audit checklist". This is checklist CONFIGURATION — it never connects to a SQL Server and never asks for credentials. Do NOT use for evaluating an instance (that is the evaluate-checklist skill) or for generating a script for an EXISTING checklist item (that is the generate-script skill).
+description: Add a CUSTOM checklist item to the SQL Server governance checklist from inside VS Code, using the sql-auditor MCP server. Use for "/configureChecklist", "configure checklist", "add a custom checklist item", "add a new check for ...", "extend the audit checklist". This is checklist CONFIGURATION — it never connects to a SQL Server and never asks for credentials. It is also the ONLY flow that authors an audit script, and it does so for the ONE new custom item it reserves — existing/default checklist items are never regenerated. Do NOT use for evaluating an instance (that is the evaluate-checklist skill).
 license: MIT
 ---
 
