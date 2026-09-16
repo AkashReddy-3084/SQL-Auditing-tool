@@ -84,7 +84,7 @@ internal sealed class ManualResultAiEnricher
                 ? "manual enrichment failed (permanent — disabled for run): "
                 : "manual enrichment failed (transient — this item skipped): ") + ex.Message);
 
-            if (permanent) _providerUnavailable = true;
+            if (permanent) { _providerUnavailable = true; ProviderChatClient.RecordPermanentFault(ex.Message); }
             return null;
         }
 

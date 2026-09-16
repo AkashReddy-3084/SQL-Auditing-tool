@@ -29,13 +29,15 @@ public static class EvidenceStore
         string? gitUrl,
         string? gitRef,
         IEnumerable<string>? files,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool persist = true)
     {
         var sources = await EvidenceWorkspace.ResolveAsync(localPaths, gitUrl, gitRef, files, cancellationToken);
         var manifest = await EvidenceIndexer.BuildAsync(sources, cancellationToken);
         var context = new EvidenceContext { Sources = sources, Manifest = manifest };
 
-        Save(context);
+        // A caller that attaches before the run directory exists saves it itself afterwards.
+        if (persist) Save(context);
         return context;
     }
 

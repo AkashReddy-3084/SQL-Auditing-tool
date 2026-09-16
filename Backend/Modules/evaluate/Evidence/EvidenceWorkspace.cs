@@ -20,7 +20,7 @@ public static class EvidenceWorkspace
     public const string TokenVariable = "SQLAUDITOR_GIT_TOKEN";
 
     private const int CloneDepth = 50;
-    private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(2);
 
     public static async Task<IReadOnlyList<EvidenceSourceRecord>> ResolveAsync(
         IEnumerable<string>? localPaths,
@@ -121,7 +121,9 @@ public static class EvidenceWorkspace
 
         try
         {
-            var target = Path.Combine(Path.GetTempPath(), "sqlauditor-evidence", Fingerprint(sanitized + "\u0001" + (gitRef ?? string.Empty)));
+            var root = Path.Combine(Path.GetTempPath(), "sqlauditor-evidence");
+            Directory.CreateDirectory(root);
+            var target = Path.Combine(root, Fingerprint(sanitized + "\u0001" + (gitRef ?? string.Empty)));
             if (Directory.Exists(target))
                 TryDelete(target);
             Directory.CreateDirectory(target);
@@ -137,7 +139,7 @@ public static class EvidenceWorkspace
             args.Add(BuildCloneUrl(url));
             args.Add(target);
 
-            var clone = await RunGitAsync(args, workingDirectory: null, cancellationToken);
+            var clone = await RunGitAsync(args, workingDirectory: root, cancellationToken);
             if (clone.ExitCode != 0)
             {
                 var detail = Redact(clone.Error.Trim());
@@ -288,17 +290,22 @@ public static class EvidenceWorkspace
     {
         var psi = new ProcessStartInfo("git")
         {
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? Environment.CurrentDirectory : workingDirectory,
         };
+
         foreach (var arg in arguments) psi.ArgumentList.Add(arg);
 
         // Any credential prompt would hang a non-interactive host, so git must fail instead.
+        // GIT_ASKPASS matters most: VS Code injects its own askpass helper into every child
+        // process, and git prefers it over the terminal, so GIT_TERMINAL_PROMPT alone is not enough.
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         psi.Environment["GCM_INTERACTIVE"] = "never";
+        psi.Environment["GIT_ASKPASS"] = "echo";
 
         using var process = new Process { StartInfo = psi };
         try
@@ -310,8 +317,12 @@ public static class EvidenceWorkspace
             return (-1, string.Empty, $"git could not be started ({ex.Message}). Install Git and ensure it is on PATH.");
         }
 
-        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+        // Closed at once so anything that tries to prompt sees EOF and fails instead of waiting,
+        // and so git can never consume the host's own stdin stream.
+        try { process.StandardInput.Close(); } catch { }
+
+        var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(GitTimeout);
@@ -322,7 +333,12 @@ public static class EvidenceWorkspace
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
-            return (-1, string.Empty, "git timed out.");
+
+            // The caller going away and git exceeding its own budget are different faults, and
+            // reporting the first as a timeout sends anyone debugging it down the wrong path.
+            return cancellationToken.IsCancellationRequested
+                ? (-1, string.Empty, "the request was cancelled before git finished.")
+                : (-1, string.Empty, $"git did not finish within {GitTimeout.TotalMinutes:n0} minute(s).");
         }
 
         return (process.ExitCode, await stdout, await stderr);

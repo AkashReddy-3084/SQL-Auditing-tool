@@ -74,8 +74,20 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 evaluate(items="<user input verbatim>")
 ```
 
-It walks six steps and returns the **exact next question** whenever an input is missing. Ask
+It walks the steps and returns the **exact next question** whenever an input is missing. Ask
 that question, then call `evaluate` again with the answer plus everything gathered so far.
+
+> **Start with `items` only.** The manual-results choice, the server name, the authentication
+> method, the database scope and the evidence are the **user's** answers, not yours. The tool can
+> only ask when the argument is empty — if you pass a value it assumes the user gave it to you, so
+> passing a remembered or inferred value silently skips the question.
+>
+> **Never fill these in from earlier in the conversation, from a terminal command you ran, from a
+> previous run, from run metadata, or from the workspace.** Even if you are confident you know the
+> answer, leave the argument empty so the tool asks, and put the question to the user. If you
+> believe you already have the answer, you may propose it — but only as a question they confirm
+> ("Use `(localdb)\MSSQLLocalDB` again?"), never as a value you pass unasked. `items` is the one
+> exception: if the user already named the checklist items earlier, reuse those.
 
 - **The first question is always the manual-results choice.** Present both options verbatim and
   wait for the user's answer, then pass `manualResults="last-runs"` or `manualResults="fresh"`.
@@ -130,6 +142,16 @@ answered from the SQL Server instance at all, and interviewing the user about th
 slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
 `=== EVIDENCE REVIEW AVAILABLE ===` block.
 
+> **When evidence is attached, this step runs BEFORE the `enrich_result` pass in step 2.** The
+> evidence block is printed first for that reason. Do not start enriching script items, and do not
+> begin the step 4 interview, until every item listed under "Items eligible for evidence review" has
+> either a `resolve_review` call or a stated reason the evidence could not settle it. Skipping this
+> leaves items sitting in NeedsReview that the attached files already answer.
+
+When evidence is attached the block prints a **CANDIDATE FILES PER ITEM** list — a ranked shortlist
+of the evidence paths most likely to answer each item. Open those files first rather than browsing
+the whole manifest.
+
 1. **If no evidence is attached yet, ask once:** "Do you have a Git repository, deployment pipeline
    or documentation folder I can read as evidence? Give me a local folder path, a file path, or an
    https Git URL — or say 'no' to review these manually."
@@ -138,6 +160,8 @@ slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
    - Private repositories authenticate from the `SQLAUDITOR_GIT_TOKEN` session environment
      variable. **Never ask for a token in chat** and never accept one inside the URL.
    - If they decline, skip straight to step 4.
+   - If the block says `=== EVIDENCE COULD NOT BE READ ===`, relay the error to the user verbatim
+     before doing anything else — their repository or folder failed to resolve.
 2. **Read the files yourself** with your own file tools, under the resolved paths the tool printed.
    The server makes no LLM calls — you are the analyst. For each item, first identify **the artefact
    the control requires**, then check whether that artefact is actually in the attached evidence.
@@ -153,7 +177,11 @@ slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
 - Cite only files you **actually opened**. Never cite a path you inferred from the manifest listing.
 - `pass` requires the artefact to be present **and** to show the control in place.
 - `fail` requires you to **hold** the artefact and for it to evidence a gap — an unapproved draft, an
-  unowned document, or one stating outright that the control does not exist.
+  unowned document, one stating outright that the control does not exist, or one that does not cover
+  the environment being audited.
+- **Once you hold a relevant artefact, decide.** If the attached evidence addresses the control,
+  record `pass` or `fail`. NeedsReview is only for a control the evidence does not address at all —
+  it is not a way to avoid a difficult judgement on evidence you were actually given.
 - **Never record `notapplicable` from evidence.** Whether a control has nothing to assess on this
   platform is the user's judgement, not yours. `resolve_review` rejects it when `evidenceSource` or
   `evidenceFiles` is set. Leave the item as NeedsReview and tell the user what the evidence suggests

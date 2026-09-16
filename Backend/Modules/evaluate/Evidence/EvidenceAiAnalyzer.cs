@@ -100,7 +100,7 @@ internal sealed class EvidenceAiAnalyzer
                 ? "evidence review failed (permanent — disabled for run): "
                 : "evidence review failed (transient — this item skipped): ") + ex.Message);
 
-            if (permanent) _providerUnavailable = true;
+            if (permanent) { _providerUnavailable = true; ProviderChatClient.RecordPermanentFault(ex.Message); }
             return null;
         }
 

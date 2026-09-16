@@ -53,9 +53,38 @@ public static class EvidenceAttribution
     /// evidence before falling back to questioning the user.
     /// </summary>
     public static string BuildReviewRequest(IEnumerable<string> pendingItemIds, EvidenceContext? context)
+        => BuildReviewRequest(pendingItemIds.Select(id => (id, string.Empty, string.Empty)), context);
+
+    public static string BuildReviewRequest(
+        IEnumerable<(string Id, string Description, string Category)> pendingItems,
+        EvidenceContext? context)
     {
-        var ids = pendingItemIds.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var items = pendingItems
+            .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var ids = items.Select(i => i.Id).ToList();
         var sb = new StringBuilder();
+
+        // Sources that were supplied but failed must never be reported as "nothing attached" -
+        // the user needs to know their repository or folder could not be read, and why.
+        var failed = context?.Sources.Where(s => !s.IsResolved).ToList() ?? new List<EvidenceSourceRecord>();
+        if (context != null && failed.Count > 0 && !context.HasUsableEvidence)
+        {
+            sb.AppendLine("=== EVIDENCE COULD NOT BE READ - TELL THE USER ===");
+            sb.AppendLine("Evidence was supplied for this run, but NONE of it could be resolved, so no item could be");
+            sb.AppendLine("decided from it and every documentation item below fell through to manual review.");
+            sb.AppendLine();
+            foreach (var source in failed)
+                sb.Append("- ").Append(source.Location).Append("  =>  ").AppendLine(source.Error);
+            sb.AppendLine();
+            sb.AppendLine("Report this to the user verbatim before anything else, and offer to retry with");
+            sb.AppendLine("set_evidence_sources once the cause is fixed (wrong branch, no access, network, or a");
+            sb.AppendLine("browser page URL instead of a clone URL). Do NOT silently proceed as if no evidence existed.");
+            sb.AppendLine();
+            return sb.ToString();
+        }
 
         if (context == null || !context.HasUsableEvidence)
         {
@@ -90,7 +119,11 @@ public static class EvidenceAttribution
         sb.AppendLine("       absence here is NOT proof the control is missing and is NOT grounds for 'fail'.");
         sb.AppendLine("     - Cite only files you actually opened. Never cite a path you inferred from the manifest listing.");
         sb.AppendLine("     - 'fail' requires you to HOLD the artefact and for it to evidence a gap - an unapproved draft,");
-        sb.AppendLine("       an unowned document, or one stating outright that the control does not exist.");
+        sb.AppendLine("       an unowned document, one stating outright that the control does not exist, or one that does");
+        sb.AppendLine("       not cover the environment being audited.");
+        sb.AppendLine("     - ONCE YOU HOLD A RELEVANT ARTEFACT, DECIDE. If the evidence addresses this control, record");
+        sb.AppendLine("       'pass' or 'fail' - do not defer it to the user. NeedsReview is ONLY for a control that the");
+        sb.AppendLine("       attached evidence does not address at all.");
         sb.AppendLine("     - NEVER record 'notapplicable' from evidence. Whether a control has nothing to assess on this");
         sb.AppendLine("       platform is the user's judgement. Leave such an item as NeedsReview and tell the user what");
         sb.AppendLine("       the evidence suggests and why you think it may not apply.");
@@ -98,7 +131,36 @@ public static class EvidenceAttribution
         sb.AppendLine("       review below and tell the user which items the evidence could not settle.");
         sb.AppendLine("  4. After the pass, report which items you resolved from evidence and which still need the user.");
         sb.AppendLine();
-        sb.AppendLine("Items eligible for evidence review: " + string.Join(", ", ids.OrderBy(i => i, StringComparer.OrdinalIgnoreCase)));
+
+        // Without a per-item shortlist the reviewer has to map every pending item against the whole
+        // manifest by hand, which is where this step gets skipped.
+        var ranked = items
+            .Where(i => !string.IsNullOrWhiteSpace(i.Description))
+            .Select(i => (i.Id, i.Description, Files: EvidenceRelevanceSelector.SelectFor(context.Manifest, i.Description, i.Category, 8)))
+            .ToList();
+
+        if (ranked.Count > 0)
+        {
+            sb.AppendLine("CANDIDATE FILES PER ITEM - ranked by relevance. Open these first; if none of them contains the");
+            sb.AppendLine("required artefact, leave that item as NeedsReview.");
+            foreach (var (id, description, files) in ranked)
+            {
+                sb.AppendLine();
+                sb.Append("  ").Append(id).Append(" - ").AppendLine(description);
+                if (files.Count == 0)
+                {
+                    sb.AppendLine("      (no file in the attached evidence looks relevant - expect NeedsReview)");
+                    continue;
+                }
+                foreach (var file in files)
+                    sb.Append("      ").AppendLine(file.Path);
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Items eligible for evidence review: " + string.Join(", ", ids));
+        sb.AppendLine("Work through EVERY one of them now. Do not move on to enrichment or to the manual review");
+        sb.AppendLine("until each has either a resolve_review call or a stated reason it could not be settled.");
 
         return sb.ToString();
     }

@@ -103,6 +103,14 @@ namespace SQLAuditor.Lib
 
     public class Auditor
     {
+        /// <summary>
+        /// Non-null when the AI provider rejected this run outright (expired key, unknown model),
+        /// which disables evidence review and every AI-written field.
+        /// </summary>
+        public static string? ProviderFault => ProviderChatClient.PermanentFaultMessage;
+
+        public static void ClearProviderFault() => ProviderChatClient.ClearPermanentFault();
+
         private const string RuntimeDatabasesTable = "#SqlAuditorDatabases";
 
         // MCP evaluation and manual-step generation are both provider-bound, so each stage works
@@ -1391,7 +1399,15 @@ WHERE d.name = DB_NAME();";
 
                 // Attached artefacts are tried before the reviewer is asked, so a documentation or
                 // process item a repository or pipeline can settle never reaches the review queue.
-                var evidenceResult = await TryEvaluateFromEvidenceAsync(it, manualPlan.Instructions, evidenceContext, cancellationToken);
+                // The criteria come from the deterministic builder, not from manualPlan: when an LLM
+                // generates the reviewer-facing steps it also rewrites the Pass/Fail wording, which
+                // would make the verdict differ between WPF and the CLI and between runs.
+                ChecklistResult? evidenceResult = null;
+                if (evidenceContext is { HasUsableEvidence: true })
+                {
+                    var criteria = await EvaluationDecisionService.BuildManualInstructionsAsync(it, IsDocumentationCheck(it));
+                    evidenceResult = await TryEvaluateFromEvidenceAsync(it, criteria, evidenceContext, cancellationToken);
+                }
                 if (evidenceResult != null) return evidenceResult;
 
                 if (requestUserInput != null && nonBlockingManualFallback)

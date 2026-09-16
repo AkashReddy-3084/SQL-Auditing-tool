@@ -141,7 +141,10 @@ internal static class EvaluationDecisionService
         sb.AppendLine("- The artefact is current, accessible to the people who need it, and consistent with the environment being audited.");
         sb.AppendLine("Fail:");
         sb.Append("- ").AppendLine(artefact.FailHint);
-        sb.AppendLine("- The artefact exists but is stale, incomplete, or contradicts the deployed environment.");
+        sb.AppendLine("- The artefact exists but is stale, incomplete, unapproved, or does not cover the environment being audited.");
+        sb.AppendLine("Needs Review (only this case):");
+        sb.AppendLine("- No artefact addressing this control was supplied at all, so there is nothing to judge it against.");
+        sb.AppendLine("  If an artefact for this control WAS supplied, decide Pass or Fail from it - do not defer.");
         sb.AppendLine("Not Applicable:");
         sb.Append("- ").AppendLine(artefact.NotApplicableHint);
         sb.AppendLine();
@@ -193,7 +196,9 @@ internal static class EvaluationDecisionService
                 "There is no application or database codebase for this platform to place under source control - record what is deployed and how, so the exclusion is justified.",
                 "Bring the missing assets into the repository and enforce the practice through branch policies rather than team convention.");
 
-        if (Has("pipeline", "automated build", "automated deployment", "dacpac", "rollback", "pre/post-deployment", "pre-deployment", "post-deployment", "ci/cd", "deploy"))
+        // "deploy" alone is deliberately absent: the audit area "Solution & Deployment Architecture"
+        // contains it, which routed every architecture item here instead of to its own branch.
+        if (Has("pipeline", "automated build", "automated deployment", "dacpac", "rollback", "pre/post-deployment", "pre-deployment", "post-deployment", "ci/cd", "release process"))
             return new ArtefactGuidance(
                 "Open the CI/CD pipeline definitions that build and deploy this database, and the record of their recent runs.",
                 new[]
@@ -233,6 +238,26 @@ internal static class EvaluationDecisionService
                 $"Environments are shared, missing, or their configuration diverges in ways that invalidate {control}.",
                 "Only a single environment exists by design (for example a standalone analytical sandbox) and no promotion path is intended.",
                 "Separate the environments or align their configuration, and hold the differences in source-controlled, per-environment configuration.");
+
+        if (Has("maintenance window", "patching", "patch", "cumulative update"))
+            return new ArtefactGuidance(
+                "Obtain the maintenance and patching policy for this platform, and the record of it being applied.",
+                new[]
+                {
+                    "The documented maintenance windows per environment, and how they are announced.",
+                    "The patching approach: who decides, how updates are tested before production, and the rollback position.",
+                    "The record of recent maintenance - what was applied, when, and to which environment.",
+                },
+                new[]
+                {
+                    "Confirm the maintenance window is written down per environment rather than agreed informally.",
+                    "Read the patching process end to end and confirm it names who approves, how long changes soak in a lower environment, and what happens for security-rated updates.",
+                    "Check the recorded patch level against what the instance actually reports, and confirm the last maintenance entry is recent enough to show the process is live.",
+                },
+                $"A current, approved document evidences {control}, and the maintenance record shows it is followed in practice.",
+                $"No maintenance window or patching approach is documented, it is a draft with no owner, or the recorded patch history contradicts it.",
+                "The platform is fully vendor-managed (PaaS) so patching is Microsoft's responsibility - record that as the basis.",
+                "Document the windows and the patching process, get it approved, and keep a dated record of each maintenance event.");
 
         if (Has("architecture", "topology", "diagram", "deployment model", "capacity", "scale approach"))
             return new ArtefactGuidance(

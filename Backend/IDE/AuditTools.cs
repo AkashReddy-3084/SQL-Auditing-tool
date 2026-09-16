@@ -55,8 +55,10 @@ public static class AuditTools
         [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
         [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         [Description("STEP 4b: Which user databases the database-scoped checks run against — a comma-separated list of database names ('Sales,Warehouse') or 'all' for every accessible user database. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the list of databases on the instance to present to the user.")] string? databases = null,
+        [Description("STEP 4c: Evidence for documentation and process checklist items — comma-separated local folder paths, individual file paths, and/or one https Git CLONE url (not a browser page url). Pass 'none' when the user has no evidence to attach. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the question to put to them.")] string? evidence = null,
+        [Description("STEP 4c (optional): Branch or tag to clone when 'evidence' contains a Git clone url. Omitted means the repository's default branch.")] string? evidenceRef = null,
         CancellationToken cancellationToken = default)
-        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases,
+        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases, evidence, evidenceRef,
                              reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
 
     // Shared core used by both `evaluate` (fresh run) and `rerun_evaluation` (same folder).
@@ -69,6 +71,8 @@ public static class AuditTools
         string? sqlUser,
         string? items,
         string? databaseSpec,
+        string? evidenceSpec,
+        string? evidenceRef,
         bool reuseActiveRunDirectory,
         string[]? targetDatabases,
         CancellationToken cancellationToken)
@@ -227,6 +231,61 @@ public static class AuditTools
                  + (unknown.Length > 0 ? ". Unknown: " + string.Join(", ", unknown) : $": '{spec}' matched no checklist ID.")
                  + " Call load_checklist to look up valid IDs.";
 
+        // STEP 4c — evidence. The desktop app offers this before the run, so the IDE asks too:
+        // without it every documentation and process item is handed back as manual review.
+        if (string.IsNullOrWhiteSpace(evidenceSpec))
+            return "STEP 4c of 6 \u2014 EVIDENCE FOR DOCUMENTATION ITEMS.\n"
+                 + "Many checklist items are documentation or process controls (source control, pipelines, runbooks,\n"
+                 + "architecture documents, environment separation, secrets handling). They cannot be answered from the\n"
+                 + "SQL Server instance, so without evidence they all come back for manual review.\n"
+                 + "Ask the user, and never decide for them:\n"
+                 + "  \"Do you have a Git repository, deployment pipeline or documentation folder I can read as evidence?\n"
+                 + "   Give me a local folder path, a file path, or an https Git clone URL \u2014 or say 'none' to review these manually.\"\n"
+                 + "Then call evaluate again with everything already gathered plus:\n"
+                 + "  evidence='<folder path, file path and/or https clone URL, comma-separated>'  (add evidenceRef='<branch>' for a non-default branch)\n"
+                 + "  evidence='none'                                                             (they declined)\n"
+                 + "A browser page URL (\u2026/tree/\u2026) is NOT a clone URL and will be rejected \u2014 ask for the clone URL and the branch separately.";
+
+        var evidenceDeclined = evidenceSpec.Trim().ToLowerInvariant() is "none" or "no" or "skip" or "n/a" or "-";
+        var evidenceLocalPaths = new List<string>();
+        var evidenceFilePaths = new List<string>();
+        string? evidenceGitUrl = null;
+        if (!evidenceDeclined)
+        {
+            foreach (var entry in SplitList(evidenceSpec))
+            {
+                if (entry.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || entry.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (EvidenceRepositoryUrl.TryParseBrowseUrl(entry) is { } browse)
+                        return "STEP 4c \u2014 EVIDENCE URL INVALID.\n"
+                             + EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                             + $"\n\nCall evaluate again with evidence=\"{browse.CloneUrl}\" and evidenceRef=\"{browse.Branch}\".";
+
+                    evidenceGitUrl = entry;
+                }
+                else if (File.Exists(entry)) evidenceFilePaths.Add(entry);
+                else evidenceLocalPaths.Add(entry);
+            }
+        }
+
+        // Resolved before the audit runs: cloning is quick, but doing it after a long run left it
+        // at the tail of the request, where a cancelled request killed git mid-clone.
+        EvidenceContext? evidenceContext = null;
+        if (!evidenceDeclined && (evidenceLocalPaths.Count > 0 || evidenceFilePaths.Count > 0 || evidenceGitUrl != null))
+        {
+            try
+            {
+                evidenceContext = await EvidenceStore.AttachAsync(
+                    evidenceLocalPaths, evidenceGitUrl, evidenceRef, evidenceFilePaths, cancellationToken, persist: false);
+            }
+            catch (Exception ex)
+            {
+                evidenceContext = null;
+                Console.Error.WriteLine($"Evidence could not be attached: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         // STEP 5 — run automated evaluation (manual-only items resolve to NeedsReview).
         // Manual items with a reusable historical result are copied forward inside the engine
         // when the user chose Option 1, so they never reach the review queue below.
@@ -244,6 +303,9 @@ public static class AuditTools
             useHistoricalManualResults.Value,
             generateReports: true, targetDatabases: targetDatabases,
             reuseActiveRunDirectory: reuseActiveRunDirectory);
+
+        // The manifest is written now that the run directory exists.
+        if (evidenceContext != null) EvidenceStore.Save(evidenceContext);
 
         var sb = new StringBuilder();
         if (unknown.Length > 0)
@@ -283,13 +345,6 @@ public static class AuditTools
         sb.AppendLine("result of the audit. Once every item has been enriched and reviewed, call 'show_reports' and report ITS counts,");
         sb.AppendLine("which include the Not Applicable items.");
 
-        // Script items get their verdict deterministically but their wording from Copilot,
-        // since this server makes no LLM calls.
-        sb.AppendLine();
-        sb.Append(Auditor.BuildScriptEnrichmentRequest(
-            results,
-            id => $"enrich_result(id=\"{id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\")"));
-
         // Items not decided by deterministic scripts need review. This server makes no
         // LLM calls, so Copilot Chat is the reviewer: it analyzes each item, guides the
         // user, and records the decision via the resolve_review tool.
@@ -299,14 +354,39 @@ public static class AuditTools
             .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        var itemLookup = structure.SelectMany(s => s.Items)
+            .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        // Printed before the enrichment request: whichever block comes first is the one that gets done.
+        if (manualPending.Count > 0 && evidenceContext is { HasUsableEvidence: true })
+        {
+            sb.AppendLine();
+            sb.Append(EvidenceAttribution.BuildReviewRequest(
+                manualPending.Select(r => itemLookup.TryGetValue(r.Id, out var item)
+                    ? (r.Id, item.Description, item.Category)
+                    : (r.Id, r.Description ?? string.Empty, string.Empty)),
+                evidenceContext));
+        }
+
+        // Script items get their verdict deterministically but their wording from Copilot,
+        // since this server makes no LLM calls.
+        sb.AppendLine();
+        sb.Append(Auditor.BuildScriptEnrichmentRequest(
+            results,
+            id => $"enrich_result(id=\"{id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\")"));
+
         if (manualPending.Count > 0)
         {
-            var itemLookup = structure.SelectMany(s => s.Items)
-                .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
-            sb.AppendLine();
-            sb.Append(BuildEvidenceReviewRequest(manualPending.Select(r => r.Id)));
+            if (evidenceContext is not { HasUsableEvidence: true })
+            {
+                sb.AppendLine();
+                sb.Append(EvidenceAttribution.BuildReviewRequest(
+                    manualPending.Select(r => itemLookup.TryGetValue(r.Id, out var item)
+                        ? (r.Id, item.Description, item.Category)
+                        : (r.Id, r.Description ?? string.Empty, string.Empty)),
+                    evidenceContext));
+            }
 
             sb.AppendLine();
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
@@ -407,6 +487,8 @@ public static class AuditTools
         [Description("Which run to redo: an index from list_evaluations (e.g. '1') or a run directory path.")] string? run = null,
         [Description("How manual/AI-Manual items are handled: 'last-runs' to copy prior decisions, or 'fresh'. MUST come from the user.")] string? manualResults = null,
         [Description("Optional: override the checklist items (edit). Defaults to the run's stored selection.")] string? items = null,
+        [Description("Evidence for documentation and process items \u2014 comma-separated local folder paths, file paths and/or one https Git CLONE url, or 'none' to skip. Call with it empty to get the question to put to the user.")] string? evidence = null,
+        [Description("Optional: branch or tag to clone when 'evidence' contains a Git clone url.")] string? evidenceRef = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(run))
@@ -457,6 +539,7 @@ public static class AuditTools
         AuditOutputPaths.ResumeRun(selected.RunDirectory);
 
         return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databaseSpec: null,
+            evidenceSpec: evidence, evidenceRef: evidenceRef,
             reuseActiveRunDirectory: true, targetDatabases: targetDatabases, cancellationToken);
     }
 

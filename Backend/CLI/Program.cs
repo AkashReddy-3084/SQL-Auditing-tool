@@ -622,6 +622,19 @@ namespace SQLAuditor
                 .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
+            // Evidence. The desktop app offers this before the run, so the CLI asks too: without
+            // it every documentation and process item comes back as manual review.
+            var evidenceSpec = ResolveEvidenceSpec(opts);
+            if (evidenceSpec == null)
+            {
+                if (copilotMode)
+                {
+                    PrintEvidenceQuestion();
+                    return 2;
+                }
+                evidenceSpec = PromptEvidenceSpec();
+            }
+
             Console.WriteLine($"Evaluating {validIds.Length} checklist item(s): {string.Join(", ", validIds)}");
             Console.WriteLine($"Target server: {server}");
             Console.WriteLine($"Target databases ({targetDatabases.Length}): {string.Join(", ", targetDatabases)}");
@@ -723,6 +736,14 @@ namespace SQLAuditor
                 }
             }
 
+            // Attached after the run so the manifest lands in this run's directory.
+            var evidenceContext = await AttachEvaluateEvidenceAsync(opts, evidenceSpec);
+            if (evidenceContext is { } attached && attached.Sources.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(attached));
+            }
+
             // In Copilot mode, surface the NeedsReview items in a clearly delimited block
             // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide),
             // and the script-evaluated items so it can author their audit wording.
@@ -738,14 +759,11 @@ namespace SQLAuditor
 
                 if (manualReviewItems.Count > 0)
                 {
-                    // Attached after the run so the manifest lands in this run's directory.
-                    var evidenceContext = await AttachEvaluateEvidenceAsync(opts);
-
                     Console.WriteLine();
                     Console.Write(SQLAuditor.Lib.EvidenceAttribution.BuildReviewRequest(
                         manualReviewItems.Select(r => r.Id), evidenceContext));
                     Console.WriteLine();
-                    Console.WriteLine("Attach evidence with: sql-auditor evidence add --path <folder> | --git <https url> | --file <path>");
+                    Console.WriteLine("Attach more evidence with: sql-auditor evidence add --path <folder> | --git <https clone url> | --file <path>");
                 }
 
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
@@ -878,6 +896,8 @@ namespace SQLAuditor
             Console.WriteLine("                      Branch or tag to clone when --evidence-git is used.");
             Console.WriteLine("  --evidence-file <paths>");
             Console.WriteLine("                      Comma-separated individual files to attach as evidence.");
+            Console.WriteLine("  --no-evidence       The user has no evidence to attach. Without any of the");
+            Console.WriteLine("                      --evidence-* flags or this one, evaluate stops and asks.");
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
             Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
@@ -1261,19 +1281,33 @@ namespace SQLAuditor
         // Honours the --evidence-* flags on `evaluate`; falls back to whatever is already
         // attached to the run so a second call does not re-clone.
         static async Task<SQLAuditor.Lib.EvidenceContext?> AttachEvaluateEvidenceAsync(
-            System.Collections.Generic.Dictionary<string, string> opts)
+            System.Collections.Generic.Dictionary<string, string> opts,
+            string? interactiveSpec = null)
         {
             var paths = SplitEvidenceList(GetOption(opts, "evidence-path"));
             var fileList = SplitEvidenceList(GetOption(opts, "evidence-file"));
             var gitUrl = GetOption(opts, "evidence-git");
             var gitRef = GetOption(opts, "evidence-ref");
 
+            // A free-text answer to the interactive question is classified here.
+            foreach (var entry in SplitEvidenceList(interactiveSpec))
+            {
+                if (entry.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || entry.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    gitUrl ??= entry;
+                else if (File.Exists(entry)) fileList.Add(entry);
+                else paths.Add(entry);
+            }
+
             if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
                 return SQLAuditor.Lib.EvidenceStore.Load();
 
             if (!string.IsNullOrWhiteSpace(gitUrl) && !SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
             {
-                Console.Error.WriteLine($"Warning: '{gitUrl}' is not a supported evidence repository URL and was ignored. Only https:// Git URLs are accepted.");
+                if (SQLAuditor.Lib.EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                    Console.Error.WriteLine("Warning: " + SQLAuditor.Lib.EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse));
+                else
+                    Console.Error.WriteLine($"Warning: '{gitUrl}' is not a supported evidence repository URL and was ignored. Only https:// Git clone URLs are accepted.");
                 gitUrl = null;
             }
 
@@ -1287,6 +1321,52 @@ namespace SQLAuditor
                 Console.Error.WriteLine($"Warning: could not attach evidence ({ex.GetType().Name}: {ex.Message}). Continuing with manual review.");
                 return null;
             }
+        }
+
+        // Returns the evidence answer, "" when the user declined, or null when it has not been
+        // supplied yet and must be asked for.
+        static string? ResolveEvidenceSpec(System.Collections.Generic.Dictionary<string, string> opts)
+        {
+            if (opts.ContainsKey("no-evidence")) return string.Empty;
+
+            // The granular flags are themselves an answer to the question.
+            var hasGranular = !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-path"))
+                || !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-file"))
+                || !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-git"));
+            return hasGranular ? string.Empty : null;
+        }
+
+        static void PrintEvidenceQuestion()
+        {
+            Console.WriteLine();
+            Console.WriteLine("=== EVIDENCE FOR DOCUMENTATION ITEMS ===");
+            Console.WriteLine("Many checklist items are documentation or process controls (source control, pipelines, runbooks,");
+            Console.WriteLine("architecture documents, environment separation, secrets handling). They cannot be answered from the");
+            Console.WriteLine("SQL Server instance, so without evidence they all come back for manual review.");
+            Console.WriteLine("Ask the user, and never decide for them:");
+            Console.WriteLine("  \"Do you have a Git repository, deployment pipeline or documentation folder I can read as evidence?");
+            Console.WriteLine("   Give me a local folder path, a file path, or an https Git clone URL - or say 'none' to review these manually.\"");
+            Console.WriteLine("Then run evaluate again, adding EXACTLY ONE of:");
+            Console.WriteLine("  --evidence-path <folder>  and/or  --evidence-file <path>  and/or  --evidence-git <https clone url> [--evidence-ref <branch>]");
+            Console.WriteLine("  --no-evidence             (they declined)");
+            Console.WriteLine("A browser page URL (.../tree/...) is NOT a clone URL and will be rejected - ask for the clone URL and branch separately.");
+            Console.WriteLine("=== END EVIDENCE FOR DOCUMENTATION ITEMS ===");
+        }
+
+        static string PromptEvidenceSpec()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Evidence for documentation items (optional).");
+            Console.WriteLine("Documentation and process controls are decided from artefacts - a repository, pipeline definitions,");
+            Console.WriteLine("runbooks or policy documents. Without them those items are queued for manual review.");
+
+            if (Console.IsInputRedirected)
+            {
+                Console.WriteLine("Non-interactive session: skipping evidence. Pass --evidence-path / --evidence-git to attach some.");
+                return string.Empty;
+            }
+
+            return Prompt("Evidence folder path, file path or https Git clone URL (blank to skip):").Trim();
         }
 
         // ---------------------------------------------------------------------

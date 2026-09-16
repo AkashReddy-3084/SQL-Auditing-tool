@@ -745,6 +745,8 @@ namespace SQLAuditor.Wpf
                 var idsForRun = selected.Count == 0 ? null : selected;
                 var useHistorical = UseHistoricalManualResults;
                 _auditor!.LastRunInputs = BuildRunInputs();
+                SQLAuditor.Lib.Auditor.ClearProviderFault();
+                await EnsureEvidenceIndexedAsync();
                 if (useHistorical)
                 {
                     Log($"Reusing manual results from last runs for {_copiedManualIds.Count} selected item(s); manual review is skipped for them.");
@@ -757,6 +759,10 @@ namespace SQLAuditor.Wpf
                 var results = await Task.Run(
                     () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases, reuseActiveRunDirectory: reuseFolder, evidenceContext: _evidenceContext),
                     token);
+
+                // Saved here because the evidence is indexed before this run's directory exists.
+                if (_evidenceContext != null) SQLAuditor.Lib.EvidenceStore.Save(_evidenceContext);
+                ReportProviderFault();
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
@@ -842,7 +848,12 @@ namespace SQLAuditor.Wpf
                     MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
+                SQLAuditor.Lib.Auditor.ClearProviderFault();
+                await EnsureEvidenceIndexedAsync();
                 var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases, evidenceContext: _evidenceContext);
+                // Saved here because the evidence is indexed before this run's directory exists.
+                if (_evidenceContext != null) SQLAuditor.Lib.EvidenceStore.Save(_evidenceContext);
+                ReportProviderFault();
                 RegisterEvidenceResolvedItems(results);
                 UpdateEvaluationProgressDisplay();
                 LogPlatformSummary();
@@ -2607,6 +2618,54 @@ namespace SQLAuditor.Wpf
                 return;
             }
 
+            await IndexEvidenceAsync(showSummaryDialog: true);
+        }
+
+        /// <summary>
+        /// A permanent provider fault (expired key, wrong model) silently disables every AI-backed
+        /// step, so it has to be said out loud rather than left in the diagnostics log.
+        /// </summary>
+        private void ReportProviderFault()
+        {
+            var fault = SQLAuditor.Lib.Auditor.ProviderFault;
+            if (string.IsNullOrWhiteSpace(fault)) return;
+
+            Log("AI provider unavailable for this run: " + fault);
+            MessageBox.Show(this,
+                "The AI provider rejected this run, so evidence review and AI wording were disabled and "
+                + "every documentation item was left for manual review.\n\n"
+                + fault
+                + "\n\nFix the provider configuration (commonly an expired or invalid API key) and run the evaluation again.",
+                "AI provider unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        /// <summary>
+        /// Indexes evidence the user supplied but never indexed by hand. Without this, typing a Git
+        /// URL and pressing Evaluate silently ran the audit with no evidence at all.
+        /// </summary>
+        private async Task EnsureEvidenceIndexedAsync()
+        {
+            if (_evidenceContext != null) return;
+
+            var gitUrl = (EvidenceGitUrlBox.Text ?? string.Empty).Trim();
+            if (_evidenceFolders.Count == 0 && _evidenceFiles.Count == 0 && gitUrl.Length == 0) return;
+
+            Log("Evidence was supplied but not indexed; indexing it now before the evaluation starts.");
+            await IndexEvidenceAsync(showSummaryDialog: false);
+
+            if (_evidenceContext is not { HasUsableEvidence: true })
+            {
+                MessageBox.Show(this,
+                    "The evidence you supplied could not be read, so the documentation items will be left for manual review.\n\n"
+                    + "Check the Evidence panel for the reason, fix it, and re-run if you want those items decided from the evidence.",
+                    "Evidence", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private async Task IndexEvidenceAsync(bool showSummaryDialog)
+        {
+            var gitUrl = (EvidenceGitUrlBox.Text ?? string.Empty).Trim();
+
             if (gitUrl.Length > 0)
             {
                 // Pasting the branch page from a browser is the common mistake; name the clone URL
@@ -2635,11 +2694,15 @@ namespace SQLAuditor.Wpf
             {
                 _evidenceContext = await SQLAuditor.Lib.EvidenceStore.AttachAsync(
                     _evidenceFolders, gitUrl.Length == 0 ? null : gitUrl,
-                    (EvidenceGitRefBox.Text ?? string.Empty).Trim(), _evidenceFiles);
+                    (EvidenceGitRefBox.Text ?? string.Empty).Trim(), _evidenceFiles,
+                    persist: false);
 
                 UpdateEvidenceSummary();
                 Log($"Evidence indexed: {_evidenceContext.Manifest.Files.Count} file(s) across {_evidenceContext.Sources.Count(s => s.IsResolved)} source(s).");
-                ShowEvidenceSummaryDialog(_evidenceContext);
+                foreach (var failed in _evidenceContext.Sources.Where(s => !s.IsResolved))
+                    Log($"Evidence source could not be read: {failed.Location} — {failed.Error}");
+
+                if (showSummaryDialog) ShowEvidenceSummaryDialog(_evidenceContext);
             }
             catch (Exception ex)
             {
