@@ -757,6 +757,8 @@ namespace SQLAuditor
                         Console.WriteLine("inspected and found, leaving 'Checklist ID' unchanged, then apply the decisions with:");
                         Console.WriteLine($"  sqlauditor import_manual_csv --file \"{csvPath}\"");
                         Console.WriteLine("Items left undecided stay NeedsReview. Re-importing an edited CSV overwrites earlier decisions.");
+                        Console.WriteLine("To produce a report now without waiting for the filled CSV, run 'sqlauditor export_manual_csv --generate',");
+                        Console.WriteLine("which marks the undecided manual items Skipped and regenerates the report suite.");
                     }
                     catch (Exception ex)
                     {
@@ -1145,10 +1147,13 @@ namespace SQLAuditor
             var opts = ParseOptions(args);
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
-                Console.WriteLine("Usage: sqlauditor export_manual_csv [--out <path>]");
+                Console.WriteLine("Usage: sqlauditor export_manual_csv [--out <path>] [--generate]");
                 Console.WriteLine("       Exports every manual checklist item of the current run, with its verification steps,");
                 Console.WriteLine("       to a CSV. Fill the Decision (Pass/Fail) and Evidence columns, then apply it with");
                 Console.WriteLine("       'sqlauditor import_manual_csv --file <path>'.");
+                Console.WriteLine("       --generate: also mark every still-undecided manual item as Skipped (excluded from");
+                Console.WriteLine("       scoring) and regenerate the report suite now, so a report is available before the");
+                Console.WriteLine("       filled CSV is imported. Importing the CSV later overwrites those Skipped items.");
                 return 0;
             }
 
@@ -1178,10 +1183,23 @@ namespace SQLAuditor
             var pending = rows.Count(r => string.IsNullOrWhiteSpace(r.Decision));
             Console.WriteLine($"Exported {rows.Count} manual checklist item(s) ({pending} still undecided) to:");
             Console.WriteLine($"  {outPath}");
+
+            if (opts.ContainsKey("generate") || opts.ContainsKey("g"))
+            {
+                var skipped = SQLAuditor.Lib.ManualChecklistCsv.SkipPendingManual(Path.GetFileName(outPath), resultsDir);
+                SQLAuditor.Lib.Auditor.GenerateReports(runDirectory: resultsDir);
+                Console.WriteLine();
+                Console.WriteLine($"{skipped} undecided manual item(s) were marked Skipped and excluded from scoring; the report suite was regenerated in:");
+                Console.WriteLine($"  {resultsDir}");
+                Console.WriteLine("Fill the CSV and run 'sqlauditor import_manual_csv --file ...' to replace the Skipped items with real decisions.");
+                return 0;
+            }
+
             Console.WriteLine();
             Console.WriteLine("Fill the 'Decision' column with Pass or Fail and the 'Evidence' column with what you inspected");
             Console.WriteLine("and found. Rows are matched back by 'Checklist ID', so keep that column unchanged. Then run:");
             Console.WriteLine($"  sqlauditor import_manual_csv --file \"{outPath}\"");
+            Console.WriteLine("Or run 'sqlauditor export_manual_csv --generate' to skip undecided items and generate a report now.");
             return 0;
         }
 

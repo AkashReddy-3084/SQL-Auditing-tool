@@ -68,8 +68,12 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```
 - **export_manual_csv** — export every manual item, with its verification steps, for offline review:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv [--out <path>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv [--out <path>] [--generate]
   ```
+  Add `--generate` to also mark every still-undecided manual item as **Skipped** (excluded from
+  scoring) and regenerate the report suite now — the same as the desktop "Export Manual CSV +
+  Generate" button — so a report exists before the filled CSV is imported. A later
+  `import_manual_csv` overwrites the Skipped items with the user's real decisions.
 - **import_manual_csv** — apply the Pass/Fail decisions from the filled CSV:
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 import_manual_csv --file <path>

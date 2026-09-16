@@ -47,7 +47,7 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
 | `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
-| `export_manual_csv` | Exports every manual item, with its verification steps, to a CSV the user fills in |
+| `export_manual_csv` | Exports every manual item, with its verification steps, to a CSV the user fills in. `generateReport=true` also marks undecided manual items Skipped and regenerates the report now |
 | `import_manual_csv` | Applies the Pass/Fail decisions from the filled CSV to the run |
 | `resolve_review` | Records a single Pass/Fail/Not Applicable decision — corrections only, not the main manual flow |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
@@ -154,6 +154,12 @@ into the chat — the CSV already carries them.
 
 `evaluate` generates the full report suite automatically in the run directory, but it does **not**
 refresh `results/historical_last_run.json`.
+
+If the user wants a report **before** the filled CSV comes back, call
+`export_manual_csv(generateReport=true)` (the same as the desktop "Export Manual CSV + Generate"
+button): every still-undecided manual item is marked **Skipped** and excluded from scoring, and the
+report suite is regenerated immediately. A later `import_manual_csv` overwrites those Skipped items
+with the user's real decisions and regenerates again.
 
 Once every item is enriched and reviewed, **ask the user whether to generate the final report** —
 e.g. "All items are complete. Shall I generate the final report now?" Never generate it silently.

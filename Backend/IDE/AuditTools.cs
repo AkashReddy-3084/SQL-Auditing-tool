@@ -669,9 +669,10 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "export_manual_csv")]
-    [Description("Export every manual/AI-Manual checklist item of the current run — with its area, description, verification and generated manual steps — to a CSV the user fills in offline. This is the manual review workflow: the user enters Pass/Fail in the 'Decision' column and their observation in the 'Evidence' column, then 'import_manual_csv' applies the whole file. Identical CSV contract to the desktop app and the CLI. Use after 'evaluate' reports manual items.")]
+    [Description("Export every manual/AI-Manual checklist item of the current run — with its area, description, verification and generated manual steps — to a CSV the user fills in offline. This is the manual review workflow: the user enters Pass/Fail in the 'Decision' column and their observation in the 'Evidence' column, then 'import_manual_csv' applies the whole file. Identical CSV contract to the desktop app and the CLI. Set generateReport=true to also mark every still-undecided manual item as Skipped and regenerate the report suite now (the same as the desktop 'Export Manual CSV + Generate' button), so a report is available before the filled CSV is imported. Use after 'evaluate' reports manual items.")]
     public static async Task<string> ExportManualCsvAsync(
-        [Description("Optional full path for the CSV. Defaults to a timestamped manual_checks_*.csv inside the current run directory.")] string? path = null)
+        [Description("Optional full path for the CSV. Defaults to a timestamped manual_checks_*.csv inside the current run directory.")] string? path = null,
+        [Description("When true, mark every still-undecided manual item as Skipped (excluded from scoring) and regenerate the five-file report suite immediately. A later import_manual_csv overwrites the Skipped items with the user's real decisions. Defaults to false.")] bool generateReport = false)
     {
         var resultsDir = AuditOutputPaths.CurrentRunDirectory;
         if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
@@ -701,12 +702,27 @@ public static class AuditTools
         sb.AppendLine($"Exported {rows.Count} manual checklist item(s) ({undecided} undecided) to:");
         sb.AppendLine($"  {target}");
         sb.AppendLine();
+
+        if (generateReport)
+        {
+            var skipped = ManualChecklistCsv.SkipPendingManual(Path.GetFileName(target), resultsDir);
+            Auditor.GenerateReports(runDirectory: resultsDir);
+            sb.AppendLine($"{skipped} undecided manual item(s) were marked Skipped (excluded from scoring) and the five-file report");
+            sb.AppendLine($"suite was regenerated in {resultsDir}.");
+            sb.AppendLine("Give the user the CSV path and ask them to fill the 'Decision' and 'Evidence' columns (leaving 'Checklist ID'");
+            sb.AppendLine("unchanged), then call import_manual_csv with the path to replace the Skipped items with their real decisions.");
+            sb.AppendLine("Do NOT paste the steps into chat; they are in the CSV's 'Manual Steps' column. Do NOT ask for decisions one item at a time.");
+            return sb.ToString();
+        }
+
         sb.AppendLine("Tell the user to open that CSV and, for each row, enter 'Pass' or 'Fail' in the 'Decision' column and");
         sb.AppendLine("what they inspected and found in the 'Evidence' column, leaving 'Checklist ID' unchanged. The 'Manual Steps'");
         sb.AppendLine("column already holds the verification guidance for each item. Then call");
         sb.AppendLine($"  import_manual_csv(path=\"{target}\")");
         sb.AppendLine("to apply every decision at once. Rows left blank stay NeedsReview; re-importing an edited CSV overwrites");
         sb.AppendLine("decisions that were already recorded. Do NOT ask the user for these decisions one item at a time.");
+        sb.AppendLine("To produce a report now without waiting for the filled CSV, call export_manual_csv(generateReport=true), which");
+        sb.AppendLine("marks the undecided items Skipped and regenerates the report suite.");
         sb.AppendLine();
         sb.AppendLine("Items exported:");
         foreach (var row in rows)

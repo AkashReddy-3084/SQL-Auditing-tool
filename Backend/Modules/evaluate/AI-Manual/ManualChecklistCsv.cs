@@ -285,6 +285,47 @@ public static class ManualChecklistCsv
         PreviousEvaluationStore.RecordManualCsv(runDirectory, RunFileName);
     }
 
+    /// <summary>
+    /// Marks every manual/AI-Manual item still awaiting a decision (Outcome "NeedsReview") as
+    /// Skipped in the persisted results, so it is excluded from scoring. This mirrors the desktop
+    /// app's "Export Manual CSV + Generate" step, letting a report be produced before the filled
+    /// CSV is imported; a later import overwrites the Skipped placeholder with the real decision.
+    /// Returns the number of items skipped. The caller regenerates the reports afterwards.
+    /// </summary>
+    public static int SkipPendingManual(string exportedCsvFileName, string? runDirectory = null)
+    {
+        var dir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
+        var path = Path.Combine(dir, "checklist_results.json");
+        if (!File.Exists(path)) return 0;
+
+        var skipped = 0;
+        lock (Auditor.ResultsFileLockFor(dir))
+        {
+            var list = JsonSerializer.Deserialize<List<ChecklistResult>>(File.ReadAllText(path))
+                       ?? new List<ChecklistResult>();
+
+            for (var i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (!HistoricalManualResultsStore.IsManualTechnique(r.Technique)) continue;
+                if (!string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var evidence = $"Manual evaluation was skipped for this report. Verification steps were exported to {exportedCsvFileName} for offline completion.";
+                list[i] = ChecklistResultEnricher.Enrich(new ChecklistResult(
+                    r.Id, r.Description, r.Verification, SkippedEvaluation.Outcome, evidence, r.ScriptFile, "AI-Manual"));
+                skipped++;
+            }
+
+            if (skipped > 0)
+            {
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(path, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+            }
+        }
+
+        return skipped;
+    }
+
     private static List<ChecklistResult> LoadPersistedResults()
     {
         var path = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
