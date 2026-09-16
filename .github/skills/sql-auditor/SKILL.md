@@ -24,9 +24,11 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 > cannot run because the MCP tools are unavailable; run the commands below instead.
 
 > **Manual review is CSV-based.** After running `evaluate`, do NOT dump the verification steps into
-> the chat. Run `export_manual_csv` and hand the user the file path: the steps are already in the
-> CSV's `Manual Steps` column and the user fills the `Decision` and `Evidence` columns there. Show a
-> single item's steps in chat only if the user explicitly asks for that item.
+> the chat. First ask the user whether they want to **import an existing filled CSV** (e.g. one from a
+> previous run) or **export a fresh CSV** to fill now. Only for a fresh CSV, run `export_manual_csv`
+> and hand the user the file path: the steps are already in the CSV's `Manual Steps` column and the
+> user fills the `Decision` and `Evidence` columns there. Show a single item's steps in chat only if
+> the user explicitly asks for that item.
 
 > **There is no standalone script-generation command.** Audit scripts are authored **only** by
 > `configure_checklist`, and only for the ONE new custom checklist item it reserves. Existing and
@@ -142,16 +144,22 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    passing `--evidence-file` so the quotes it contains survive. When the command replies that the
    item moved to Outcome `Not Applicable`, that item is excluded from every score and is listed on
    the workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
-4. Read the `=== COPILOT REVIEW REQUIRED ===` block, then run **export_manual_csv**. It writes
-   every manual item — with its area, description, verification and the verification steps already in
-   the **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give
-   the user **only that path** and a one-line instruction — do **not** paste the steps, a Pass/Fail
-   rubric or any per-item guidance into chat; the steps live in the CSV. For each row the user fills
-   the **`Decision`** column with `Pass` or `Fail` and the **`Evidence`** column with what they
-   inspected and found, leaving **`Checklist ID`** unchanged. The verdict is the reviewer's to make:
-   never infer it, assume it, announce it, or challenge it. Do **not** ask for these decisions one
-   item at a time. Show a single item's steps in chat — in the format below — **only if the user
-   explicitly asks** for that item:
+4. Read the `=== COPILOT REVIEW REQUIRED ===` block, then **first ask the user which they want** —
+   do not export or import anything until they answer:
+   - **(a) Import an already-filled CSV** they have (for example one they filled during a previous
+     run). Ask for its path and run **import_manual_csv** with `--file <path>`. A CSV from an earlier
+     run works because rows are matched by `Checklist ID`; rows for items not in this run are ignored.
+     Do **not** export a new CSV in this case.
+   - **(b) Export a fresh CSV to fill now.** Run **export_manual_csv**. It writes every manual item —
+     with its area, description, verification and the verification steps already in the
+     **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give
+     the user **only that path** and a one-line instruction — do **not** paste the steps, a Pass/Fail
+     rubric or any per-item guidance into chat; the steps live in the CSV. For each row the user fills
+     the **`Decision`** column with `Pass` or `Fail` and the **`Evidence`** column with what they
+     inspected and found, leaving **`Checklist ID`** unchanged. The verdict is the reviewer's to make:
+     never infer it, assume it, announce it, or challenge it. Do **not** ask for these decisions one
+     item at a time. Show a single item's steps in chat — in the format below — **only if the user
+     explicitly asks** for that item:
 
    ```
    Checklist: <title>
@@ -169,10 +177,11 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    ## Recommended Actions (if failed)
    - ...
    ```
-6. When the user says the file is ready, run **import_manual_csv** with `--file <path>`. Accept their
-   entries as given — do not judge whether the evidence is sufficient and do not ask for more detail.
-   Report back only the rows the import listed as ignored or needing correction, and let the user fix
-   the CSV and re-import; re-importing overwrites decisions that were already recorded.
+6. When the user gives you a filled CSV (whether an existing one or the one just exported), run
+   **import_manual_csv** with `--file <path>`. Accept their entries as given — do not judge whether
+   the evidence is sufficient and do not ask for more detail. Report back only the rows the import
+   listed as ignored or needing correction, and let the user fix the CSV and re-import; re-importing
+   overwrites decisions that were already recorded.
 7. Run **enrich_result** for each applied item with wording *you* derive from their evidence — finding,
    evidence, riskImpact and recommendation, using only facts they stated. The reviewer's raw words
    must never be left as the report Finding.

@@ -129,18 +129,24 @@ Manual items are decided through a **CSV export/import**, the same workflow the 
 Do **not** ask for these decisions one item at a time, and do **not** paste the verification steps
 into the chat — the CSV already carries them.
 
-1. Call `export_manual_csv()`. It writes every manual item — with its area, description, verification
-   and the verification steps already in the **`Manual Steps`** column — to a timestamped
-   `manual_checks_*.csv` in the run directory. Give the user **only the path** and a one-line
-   instruction: for each row, fill the **`Decision`** column with `Pass` or `Fail` and the
-   **`Evidence`** column with what they inspected and found, leaving **`Checklist ID`** unchanged.
-   The verdict is theirs — never infer it, assume it, announce it, or argue for a different one.
-   Show a single item's steps in chat **only if the user explicitly asks** for that item.
-2. When the user says the file is ready, call `import_manual_csv(path="<that path>")`. Rows are
-   matched by `Checklist ID`, so each row records a new decision **or overwrites an existing one** —
-   the CSV is the source of truth. Accept the entries as given: do not judge whether the evidence
-   is sufficient and do not ask for extra detail. Report back only the rows the import flagged as
-   ignored or needing correction, and let the user fix and re-import.
+1. **First ask the user which they want** — do not export or import anything until they answer:
+   - **(a) Import an already-filled CSV** they have (for example one they filled during a previous
+     run). Ask for its path and call `import_manual_csv(path="<that path>")`. A CSV from an earlier
+     run works because rows are matched by `Checklist ID`; rows for items not in this run are
+     ignored. Do **not** export a new CSV in this case.
+   - **(b) Export a fresh CSV to fill now.** Call `export_manual_csv()`. It writes every manual item —
+     with its area, description, verification and the verification steps already in the
+     **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give the
+     user **only the path** and a one-line instruction: for each row, fill the **`Decision`** column
+     with `Pass` or `Fail` and the **`Evidence`** column with what they inspected and found, leaving
+     **`Checklist ID`** unchanged. The verdict is theirs — never infer it, assume it, announce it, or
+     argue for a different one. Show a single item's steps in chat **only if the user explicitly asks**.
+2. When the user gives you a filled CSV (whether an existing one or the one just exported), call
+   `import_manual_csv(path="<that path>")`. Rows are matched by `Checklist ID`, so each row records a
+   new decision **or overwrites an existing one** — the CSV is the source of truth. Accept the entries
+   as given: do not judge whether the evidence is sufficient and do not ask for extra detail. Report
+   back only the rows the import flagged as ignored or needing correction, and let the user fix and
+   re-import.
 3. Use `resolve_review(id, decision, notes)` only to correct a single item afterwards, or to record
    `decision="notapplicable"` when what the user reports shows the control does not exist on this
    server at all — every value absent, empty, zero or irrelevant, so there is nothing to assess.
