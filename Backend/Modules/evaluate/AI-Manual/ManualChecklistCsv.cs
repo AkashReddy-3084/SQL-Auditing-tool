@@ -268,9 +268,16 @@ public static class ManualChecklistCsv
     }
 
     /// <summary>Stores the filled CSV next to the run's reports so the run records what was imported.</summary>
-    public static void StoreInRunDirectory(string sourcePath)
+    public static void StoreInRunDirectory(string sourcePath) =>
+        StoreInRunDirectory(sourcePath, AuditOutputPaths.CurrentRunDirectory);
+
+    /// <summary>
+    /// Stores the filled CSV in a specific run directory. The desktop app passes its per-instance
+    /// run directory here so the copy lands in the right run during a multi-server session, rather
+    /// than in whichever run is currently active globally.
+    /// </summary>
+    public static void StoreInRunDirectory(string sourcePath, string runDirectory)
     {
-        var runDirectory = AuditOutputPaths.CurrentRunDirectory;
         Directory.CreateDirectory(runDirectory);
         var target = Path.Combine(runDirectory, RunFileName);
         if (!string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
