@@ -125,6 +125,7 @@ namespace SQLAuditor.Lib
         private ManualStepsGenerator? _manualStepsGenerator;
         private ScriptResultAiEnricher? _scriptEnricher;
         private ManualResultAiEnricher? _manualResultEnricher;
+        private EvidenceAiAnalyzer? _evidenceAnalyzer;
 
         /// <summary>The normalized connection string this auditor runs against.</summary>
         public string ConnectionString => _connectionString;
@@ -162,6 +163,7 @@ namespace SQLAuditor.Lib
             try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
             try { _scriptEnricher ??= ScriptResultAiEnricher.CreateFromEnvironment(); } catch { }
             try { _manualResultEnricher ??= ManualResultAiEnricher.CreateFromEnvironment(); } catch { }
+            try { _evidenceAnalyzer ??= EvidenceAiAnalyzer.CreateFromEnvironment(); } catch { }
         }
 
         // When set, the auditor never creates LLM evaluators (even if .env or env vars
@@ -886,6 +888,11 @@ WHERE d.name = DB_NAME();";
         /// User databases on which DATABASE-scope SQL scripts run. Null means all currently
         /// accessible online user databases; an explicit empty selection is rejected.
         /// </param>
+        /// <param name="evidenceContext">
+        /// Repository, pipeline and documentation artefacts attached to the run. When supplied and
+        /// the provider is configured, documentation items are decided from it before falling back
+        /// to reviewer input. Ignored when LLM evaluators are disabled (MCP and CLI hosts).
+        /// </param>
         public async Task<ChecklistResult[]> RunChecklistAsync(
             IProgress<ChecklistResult>? progress,
             Func<ChecklistItem, string, Task<string?>>? requestUserInput,
@@ -894,7 +901,8 @@ WHERE d.name = DB_NAME();";
             bool useHistoricalManualResults,
             bool generateReports,
             System.Collections.Generic.IEnumerable<string>? targetDatabases,
-            bool reuseActiveRunDirectory = false)
+            bool reuseActiveRunDirectory = false,
+            EvidenceContext? evidenceContext = null)
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
@@ -1379,7 +1387,12 @@ WHERE d.name = DB_NAME();";
                 var auditScript = IsAdminCheck(it) && !IsDocumentationCheck(it) ? ReadMappedScript(it) : null;
 
                 // Only reached once MCP has declined or failed, so the guidance is never wasted work.
-                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, cancellationToken);
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, IsDocumentationCheck(it), cancellationToken);
+
+                // Attached artefacts are tried before the reviewer is asked, so a documentation or
+                // process item a repository or pipeline can settle never reaches the review queue.
+                var evidenceResult = await TryEvaluateFromEvidenceAsync(it, manualPlan.Instructions, evidenceContext, cancellationToken);
+                if (evidenceResult != null) return evidenceResult;
 
                 if (requestUserInput != null && nonBlockingManualFallback)
                 {
@@ -1415,32 +1428,15 @@ WHERE d.name = DB_NAME();";
                         var userEvidence = await requestUserInput(it, instructions);
                         if (!string.IsNullOrWhiteSpace(userEvidence))
                         {
-                            if (string.Equals(userEvidence, "PASS", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
-                            if (string.Equals(userEvidence, "FAIL", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
+                            // A bare verdict word is a decision; otherwise the reviewer must lead their
+                            // evidence with one, so wording alone can never flip the outcome.
+                            var outcome = ManualVerdict.Normalize(userEvidence)
+                                ?? EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
 
-                            var outcome = EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
-                            if (string.Equals(outcome, "Fail", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
-
-                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
-                            // {
-                            //     RawOutput = manualPlan.RawOutput,
-                            //     SlmTokensUsed = manualPlan.TotalTokens
-                            // };
+                            var result = new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                            return NotApplicableEvidence.IsNotApplicableOutcome(outcome)
+                                ? result with { NotApplicable = true, NotApplicableJustification = userEvidence.Trim() }
+                                : result;
                         }
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1450,11 +1446,7 @@ WHERE d.name = DB_NAME();";
                     catch { }
                 }
 
-                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual");
-                // {
-                //     RawOutput = manualPlan.RawOutput,
-                //     SlmTokensUsed = manualPlan.TotalTokens
-                // };
+                return new ChecklistResult(it.Id, it.Description, it.Verification, ManualVerdict.NeedsReview, instructions, it.ScriptFile, "AI-Manual");
             }
 
             // One aborted command (a timeout, or a continuation starved while the host was busy)
@@ -1713,6 +1705,7 @@ WHERE d.name = DB_NAME();";
                         .Select(id => id.Trim())
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList(),
+                    EvidenceSources = evidenceContext?.Sources.ToList(),
                 };
                 PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now, runInputs);
             }
@@ -1813,16 +1806,7 @@ WHERE d.name = DB_NAME();";
         public bool ResolveReview(string id, string decision, string? notes, out string newOutcome)
         {
             newOutcome = string.Empty;
-            var norm = decision?.Trim().ToLowerInvariant();
-            var outcome = norm switch
-            {
-                "pass" or "p" or "yes" or "y" => "Pass",
-                "fail" or "f" or "no" or "n" => "Fail",
-                "needsreview" or "review" or "r" => "NeedsReview",
-                "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a"
-                    => NotApplicableEvidence.Outcome,
-                _ => string.Empty
-            };
+            var outcome = ManualVerdict.Normalize(decision) ?? string.Empty;
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
 
             var resultsDir = AuditOutputPaths.CurrentRunDirectory;
@@ -2134,8 +2118,68 @@ WHERE d.name = DB_NAME();";
 
         public async Task<string> GenerateManualInstructionsAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
         {
-            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, cancellationToken);
+            var isDocumentationCheck = ChecklistItemClassification.IsDocumentationCheck(item.Id, FindRepoRoot());
+            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, isDocumentationCheck, cancellationToken);
             return result.Instructions;
+        }
+
+        /// <summary>
+        /// Decides a manual item from the artefacts attached to the run. Returns null whenever the
+        /// evidence cannot settle it - no evidence attached, no provider (MCP/CLI hosts), no
+        /// relevant file, or an 'insufficient' verdict - so the caller falls back to human review.
+        /// </summary>
+        private async Task<ChecklistResult?> TryEvaluateFromEvidenceAsync(
+            ChecklistItem item,
+            string manualInstructions,
+            EvidenceContext? evidenceContext,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (evidenceContext == null || !evidenceContext.HasUsableEvidence) return null;
+            if (_evidenceAnalyzer == null) return null;
+
+            EvidenceAiAnalyzer.EvidenceVerdict? verdict;
+            try
+            {
+                verdict = await _evidenceAnalyzer.AnalyzeAsync(item, manualInstructions, evidenceContext, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogDiagnostic($"Evidence review failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+
+            if (verdict == null || !verdict.IsDecisive) return null;
+
+            var sourceLabel = evidenceContext.Manifest.Files
+                .FirstOrDefault(f => string.Equals(f.Path, verdict.CitedFiles[0], StringComparison.OrdinalIgnoreCase))?.SourceLabel
+                ?? evidenceContext.Sources.FirstOrDefault(s => s.IsResolved)?.Label;
+
+            var evidenceText = new System.Text.StringBuilder();
+            evidenceText.AppendLine(verdict.Evidence?.Trim());
+            evidenceText.AppendLine();
+            evidenceText.Append(EvidenceAttribution.EvidencePrefix).Append(' ')
+                        .AppendLine(EvidenceAttribution.Describe(sourceLabel, string.Join(", ", verdict.CitedFiles)));
+            if (!string.IsNullOrWhiteSpace(verdict.RequiredArtefact))
+                evidenceText.Append("Required artefact: ").AppendLine(verdict.RequiredArtefact.Trim());
+            if (!string.IsNullOrWhiteSpace(verdict.Confidence))
+                evidenceText.Append("Confidence: ").AppendLine(verdict.Confidence);
+
+            var result = new ChecklistResult(
+                item.Id, item.Description, item.Verification, verdict.Outcome,
+                evidenceText.ToString().TrimEnd(), item.ScriptFile, "AI-Manual")
+            {
+                Finding = verdict.Finding ?? string.Empty,
+                RiskImpact = verdict.RiskImpact,
+                Recommendation = verdict.Recommendation,
+                Severity = verdict.Severity ?? string.Empty,
+            };
+
+            LogDiagnostic($"Evidence review decided {item.Id} as {verdict.Outcome} ({verdict.Confidence}) from: {string.Join(", ", verdict.CitedFiles)}");
+            return result;
         }
 
         // Builds the persisted result for a manual item the reviewer has decided, turning
@@ -2207,13 +2251,13 @@ WHERE d.name = DB_NAME();";
             return $"Manual Steps:\n{manualSteps ?? string.Empty}\n\nOperator Remarks:\n{remarks}\n\nSelected Outcome:\n{outcome}";
         }
 
-        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)
+        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, bool isDocumentationCheck = false, System.Threading.CancellationToken cancellationToken = default)
         {
             try
             {
                 if (_manualStepsGenerator != null)
                 {
-                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, cancellationToken);
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, isDocumentationCheck, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
                         return slm;
@@ -2231,7 +2275,7 @@ WHERE d.name = DB_NAME();";
                 LogDiagnostic($"Manual steps LLM call failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
             }
 
-            var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item);
+            var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item, isDocumentationCheck);
             if (!string.IsNullOrWhiteSpace(auditScript))
             {
                 fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";

@@ -306,6 +306,9 @@ public static class AuditTools
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
             sb.AppendLine();
+            sb.Append(BuildEvidenceReviewRequest(manualPending.Select(r => r.Id)));
+
+            sb.AppendLine();
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
             sb.AppendLine($"{manualPending.Count} item(s) were not decided by the deterministic scripts and need review.");
             sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. For EACH item below you MUST:");
@@ -982,28 +985,50 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass, fail, notapplicable (or needsreview). Requires the reviewer's own observation/evidence text for pass, fail and notapplicable decisions. 'notapplicable' records that the control does not exist on this server to be assessed, so the item is excluded from every score and reported as Not Applicable. Updates checklist_results.json and regenerates the five-file report suite in the current run directory. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a decision of pass, fail, notapplicable (or needsreview). Requires the reviewer's own observation/evidence text, or - when the verdict was derived from an attached repository, pipeline or document - the cited file paths in 'evidenceFiles'. 'notapplicable' records that the control does not exist here to be assessed, so the item is excluded from every score. Updates checklist_results.json and regenerates the five-file report suite in the current run directory.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
-        [Description("The decision: 'pass', 'fail', 'notapplicable', or 'needsreview'. Use 'notapplicable' only when every value the reviewer reports is absent, empty, zero or irrelevant, so there is nothing to assess; a zero that itself proves compliance is a Pass.")] string decision,
-        [Description("The reviewer's observation/evidence in their own words: what they inspected and what they found (document names, settings, values, counts). Required for 'pass', 'fail' and 'notapplicable'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null)
+        [Description("The decision: 'pass', 'fail', 'notapplicable', or 'needsreview'. Use 'notapplicable' only when every value reported is absent, empty, zero or irrelevant, so there is nothing to assess; a zero that itself proves compliance is a Pass.")] string decision,
+        [Description("The observation/evidence in plain words: what was inspected and what was found (file paths, document names, settings, values, counts). Required for 'pass', 'fail' and 'notapplicable'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null,
+        [Description("Set ONLY when the verdict came from attached evidence rather than from the user: the label of the evidence source, as shown by set_evidence_sources.")] string? evidenceSource = null,
+        [Description("Set ONLY when the verdict came from attached evidence: a comma-separated list of the evidence file paths you actually read to reach it, exactly as they appear in the manifest. Required whenever evidenceSource is set.")] string? evidenceFiles = null)
     {
         if (string.IsNullOrWhiteSpace(id))
             return Task.FromResult("Error: 'id' is required.");
         if (string.IsNullOrWhiteSpace(decision))
             return Task.FromResult("Error: 'decision' is required (pass, fail, notapplicable, or needsreview).");
 
+        var isDecision = ManualVerdict.IsDecided(decision);
+        var isEvidenceDerived = !string.IsNullOrWhiteSpace(evidenceSource) || !string.IsNullOrWhiteSpace(evidenceFiles);
+
+        // An evidence-derived verdict has to name the files it was read from, otherwise it is
+        // indistinguishable from a guess when the report is reviewed later.
+        if (isEvidenceDerived && string.IsNullOrWhiteSpace(evidenceFiles))
+            return Task.FromResult(
+                $"Error: 'evidenceFiles' is required for [{id}] when the verdict comes from attached evidence. "
+                + "List the manifest paths of the files you actually read.");
+
+        // Deciding that a control has nothing to assess is a human judgement, so it cannot be
+        // filed from artefacts alone.
+        if (isEvidenceDerived && NotApplicableEvidence.IsNotApplicableOutcome(ManualVerdict.Normalize(decision)))
+            return Task.FromResult(
+                $"Error: 'notapplicable' cannot be recorded from attached evidence for [{id}]. "
+                + "Whether a control has nothing to assess on this platform is the user's call, not yours. "
+                + "Leave the item as NeedsReview, and tell the user what the evidence suggests and why you think it may not apply.");
+
         // The reviewer's own words are the evidence of record, so a decision cannot be
         // filed without them.
-        var isDecision = decision.Trim().ToLowerInvariant() is "pass" or "p" or "yes" or "y" or "fail" or "f" or "no" or "n"
-            or "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a";
         if (isDecision && !IsUsableEvidence(notes))
             return Task.FromResult(
-                $"Error: 'notes' must contain the reviewer's actual observation for [{id}] — what they checked and what they found. "
-                + "Ask the user for the evidence behind their decision and call resolve_review again with it.");
+                $"Error: 'notes' must contain the actual observation for [{id}] — what was checked and what was found. "
+                + "Ask the user for the evidence behind their decision, or quote what the attached evidence showed, and call resolve_review again with it.");
+
+        var annotatedNotes = isEvidenceDerived
+            ? $"{notes?.Trim()}\n\n{EvidenceAttribution.EvidencePrefix} {EvidenceAttribution.Describe(evidenceSource, evidenceFiles)}"
+            : notes;
 
         var auditor = new Auditor(string.Empty);
-        if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
+        if (auditor.ResolveReview(id, decision, annotatedNotes, out var newOutcome))
         {
             if (NotApplicableEvidence.IsNotApplicableOutcome(newOutcome))
                 return Task.FromResult(
@@ -1013,7 +1038,7 @@ public static class AuditTools
 
             return Task.FromResult(
                 $"Updated [{id}] -> {newOutcome}. Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}. "
-                + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the reviewer's evidence above — finding, evidence, riskImpact and recommendation — using only facts the reviewer stated.");
+                + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the evidence above — finding, evidence, riskImpact and recommendation — using only facts that evidence states.");
         }
 
         return Task.FromResult(
@@ -1027,6 +1052,117 @@ public static class AuditTools
         var trimmed = notes.Trim().Trim('.', '!', ' ').ToLowerInvariant();
         return trimmed is not ("pass" or "passed" or "fail" or "failed" or "p" or "f"
             or "yes" or "no" or "y" or "n" or "ok" or "okay" or "good" or "bad" or "n/a");
+    }
+
+    private static string BuildEvidenceReviewRequest(IEnumerable<string> pendingItemIds)
+        => EvidenceAttribution.BuildReviewRequest(pendingItemIds, EvidenceStore.Load());
+
+    [McpServerTool(Name = "set_evidence_sources")]
+    [Description("Attach a Git repository, CI/CD pipeline definitions, a documentation folder or individual policy files to the current evaluation run as EVIDENCE, so documentation and process checklist items can be decided from real artefacts instead of being handed to the user as manual review. Resolves and indexes the sources, writes evidence-manifest.json into the run directory, and returns the resolved paths plus a manifest summary. This server makes NO LLM calls: you read the files yourself with your own file tools under the resolved paths, then record each verdict with resolve_review(..., evidenceSource=..., evidenceFiles=...). Private HTTPS repositories authenticate from the SQLAUDITOR_GIT_TOKEN session environment variable; never ask for a token in chat.")]
+    public static async Task<string> SetEvidenceSourcesAsync(
+        [Description("Comma-separated local folder paths to read as evidence, e.g. a cloned repository or a docs folder.")] string? localPaths = null,
+        [Description("An https:// Git URL to clone (shallow) and index. SSH remotes and file:// paths are rejected.")] string? gitUrl = null,
+        [Description("Optional branch or tag to clone when gitUrl is set. Defaults to the repository's default branch.")] string? gitRef = null,
+        [Description("Comma-separated individual file paths to attach, e.g. a policy document or an exported pipeline definition.")] string? files = null,
+        CancellationToken cancellationToken = default)
+    {
+        var paths = SplitList(localPaths);
+        var fileList = SplitList(files);
+
+        if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+            return "EVIDENCE SOURCE REQUIRED.\n"
+                 + "Ask the user: \"Where is the evidence? Give me a local folder path (a cloned repository or a docs folder), "
+                 + "a file path, or an https Git URL.\"\n"
+                 + "Then call set_evidence_sources again with 'localPaths', 'files' or 'gitUrl' set.";
+
+        if (!string.IsNullOrWhiteSpace(gitUrl) && !EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+        {
+            if (EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                return EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                     + $"\n\nCall set_evidence_sources again with gitUrl=\"{browse.CloneUrl}\" and gitRef=\"{browse.Branch}\".";
+
+            return $"Error: '{gitUrl}' is not a supported evidence repository URL. Only https:// Git clone URLs are accepted — "
+                 + "SSH remotes, file:// paths and git transport helpers are rejected. "
+                 + "Ask the user for the https clone URL, or for a local path to an already-cloned copy.";
+        }
+
+        EvidenceContext context;
+        try
+        {
+            context = await EvidenceStore.AttachAsync(paths, gitUrl, gitRef, fileList, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            return $"Failed to attach evidence: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine(EvidenceStore.Describe(context));
+
+        var failed = context.Sources.Where(s => !s.IsResolved).ToList();
+        if (failed.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Tell the user which source(s) could not be resolved and ask for a corrected location before relying on the rest.");
+        }
+
+        if (!context.HasUsableEvidence)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Nothing was indexed, so no item can be decided from evidence. Continue with the manual review.");
+            return sb.ToString();
+        }
+
+        var pending = LoadPendingReviewIds();
+        sb.AppendLine();
+        sb.AppendLine("NEXT: read the relevant files yourself under the resolved paths above. For every item you can settle, call");
+        sb.AppendLine("  resolve_review(id=\"...\", decision=\"pass|fail|notapplicable\", notes=\"<what the files show>\", evidenceSource=\"<label>\", evidenceFiles=\"<paths you read>\")");
+        sb.AppendLine("then enrich_result for the same item. Cite only files you actually opened.");
+        sb.AppendLine("If the evidence is silent, partial or ambiguous for an item, leave it as NeedsReview and say so — never guess.");
+        if (pending.Count > 0)
+            sb.AppendLine("Items currently awaiting review: " + string.Join(", ", pending));
+        else
+            sb.AppendLine("No item is currently awaiting review in this run. Run 'evaluate' first, or attach evidence before the next run.");
+
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "evidence_manifest")]
+    [Description("Show the evidence currently attached to the active evaluation run: the resolved sources, the indexed file inventory by category, the key files, and the git signals read from any attached repository. Use to recover context in a later turn without re-cloning. Returns nothing useful until set_evidence_sources has been called for this run.")]
+    public static Task<string> EvidenceManifestAsync()
+    {
+        var context = EvidenceStore.Load();
+        if (context == null)
+            return Task.FromResult(
+                $"No evidence is attached to the run in {AuditOutputPaths.CurrentRunDirectory}. "
+                + "Call set_evidence_sources with a local folder path, a file path or an https Git URL first.");
+
+        return Task.FromResult(EvidenceStore.Describe(context));
+    }
+
+    private static List<string> SplitList(string? value)
+        => (value ?? string.Empty)
+            .Split(new[] { ',', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(v => v.Trim().Trim('"'))
+            .Where(v => v.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static List<string> LoadPendingReviewIds()
+    {
+        try
+        {
+            var path = Path.Combine(AuditOutputPaths.CurrentRunDirectory, "checklist_results.json");
+            if (!File.Exists(path)) return new List<string>();
+
+            var results = JsonSerializer.Deserialize<List<ChecklistResult>>(File.ReadAllText(path));
+            return results?
+                .Where(r => string.Equals(r.Outcome, ManualVerdict.NeedsReview, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r.Id)
+                .OrderBy(i => i, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+        }
+        catch { return new List<string>(); }
     }
 
     [McpServerTool(Name = "enrich_result")]

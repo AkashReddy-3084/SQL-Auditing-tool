@@ -9,20 +9,25 @@ internal static class EvaluationDecisionService
 {
     public static string EvaluateEvidenceOutcome(string evidence)
     {
-        if (string.IsNullOrWhiteSpace(evidence)) return "NeedsReview";
-        if (Regex.IsMatch(evidence, "\\b(Passed|Pass)\\b", RegexOptions.IgnoreCase)) return "Pass";
-        if (Regex.IsMatch(evidence, "\\b(Failed|Fail)\\b", RegexOptions.IgnoreCase)) return "Fail";
-        if (evidence.IndexOf("SQL ERROR", System.StringComparison.OrdinalIgnoreCase) >= 0) return "Fail";
-        return "NeedsReview";
+        if (string.IsNullOrWhiteSpace(evidence)) return ManualVerdict.NeedsReview;
+        if (evidence.IndexOf("SQL ERROR", System.StringComparison.OrdinalIgnoreCase) >= 0) return ManualVerdict.Fail;
+        return ManualVerdict.Parse(evidence);
     }
 
-    public static Task<string> BuildManualInstructionsAsync(ChecklistItem item)
-        => Task.FromResult(BuildManualInstructions(item));
+    public static Task<string> BuildManualInstructionsAsync(ChecklistItem item, bool isDocumentationCheck = false)
+        => Task.FromResult(BuildManualInstructions(item, isDocumentationCheck));
 
     // Builds manual verification steps tailored to a single checklist item from its
     // Id, Description and Category. No LLM/network call is made, so each item
     // deterministically gets its own item-specific guidance, not a shared template.
-    public static string BuildManualInstructions(ChecklistItem item)
+    public static string BuildManualInstructions(ChecklistItem item, bool isDocumentationCheck = false)
+    {
+        return isDocumentationCheck || IsDocumentationTopic(item)
+            ? BuildDocumentationInstructions(item)
+            : BuildInstanceInstructions(item);
+    }
+
+    private static string BuildInstanceInstructions(ChecklistItem item)
     {
         var description = (item.Description ?? string.Empty).Trim();
         var category = (item.Category ?? string.Empty).Trim();
@@ -88,6 +93,382 @@ internal static class EvaluationDecisionService
         sb.AppendLine("- Raise the gap with the team that owns this instance and re-run this checklist item once the change has been deployed.");
 
         return sb.ToString().TrimEnd();
+    }
+
+    // Documentation and process controls live in repositories, pipelines and documents, never on the
+    // instance, so they get artefact-oriented guidance instead of SSMS/T-SQL steps.
+    private static string BuildDocumentationInstructions(ChecklistItem item)
+    {
+        var description = (item.Description ?? string.Empty).Trim();
+        var category = (item.Category ?? string.Empty).Trim();
+        var artefact = ClassifyArtefact(description, category);
+        var control = string.IsNullOrWhiteSpace(description) ? "this control" : $"\"{description}\"";
+
+        var sb = new StringBuilder();
+        sb.Append("Checklist: ").Append(item.Id).Append(" - ").AppendLine(description);
+        if (!string.IsNullOrWhiteSpace(category))
+            sb.Append("Audit area: ").AppendLine(category);
+        sb.Append("Objective: Confirm that ").Append(control)
+          .AppendLine(" is evidenced by a real artefact - a repository, pipeline definition, document or record - that is current and matches what is actually in use.");
+        sb.AppendLine("This control cannot be judged from the SQL Server instance; do not attempt to verify it with T-SQL.");
+        sb.AppendLine();
+
+        sb.AppendLine("## Evidence to Obtain");
+        foreach (var source in artefact.Sources)
+            sb.Append("- ").AppendLine(source);
+        sb.AppendLine("- The name and owner of the team responsible for this artefact, so gaps can be routed to them.");
+        sb.AppendLine();
+
+        sb.AppendLine("## Manual Verification Steps:");
+        var step = 1;
+        sb.Append(step++).Append(". ").AppendLine(artefact.Focus);
+        foreach (var s in artefact.Steps)
+            sb.Append(step++).Append(". ").AppendLine(s);
+        sb.Append(step++).AppendLine(". Confirm the artefact is current - check its last-modified date, version or commit history against the most recent change to the platform it describes.");
+        sb.Append(step++).AppendLine(". Confirm it reflects the environment actually being audited, not a template, a draft or a superseded design.");
+        sb.Append(step++).AppendLine(". Record exactly what you inspected: file paths, repository and branch or commit, document titles and versions, dates, and the people who confirmed it.");
+        sb.AppendLine();
+
+        sb.AppendLine("## Evidence to Capture");
+        sb.AppendLine("- The identifier of each artefact you relied on (repository URL and commit, pipeline file path, document title and version, ticket or record ID).");
+        sb.AppendLine("- The specific section, file or setting inside it that evidences the control.");
+        sb.AppendLine("- Its last review/modification date, so currency can be judged.");
+        sb.AppendLine();
+
+        sb.AppendLine("## What indicates a PASS, a FAIL and NOT APPLICABLE");
+        sb.AppendLine("Pass:");
+        sb.Append("- ").AppendLine(artefact.PassHint);
+        sb.AppendLine("- The artefact is current, accessible to the people who need it, and consistent with the environment being audited.");
+        sb.AppendLine("Fail:");
+        sb.Append("- ").AppendLine(artefact.FailHint);
+        sb.AppendLine("- The artefact exists but is stale, incomplete, or contradicts the deployed environment.");
+        sb.AppendLine("Not Applicable:");
+        sb.Append("- ").AppendLine(artefact.NotApplicableHint);
+        sb.AppendLine();
+        sb.AppendLine("Start your response with the verdict word - Pass, Fail or Not Applicable - followed by what you inspected and what you found.");
+        sb.AppendLine("If no artefact was produced and you cannot confirm whether one exists, leave the item as Needs Review rather than guessing.");
+        sb.AppendLine();
+
+        sb.AppendLine("## Recommended Actions (if failed)");
+        sb.Append("- ").AppendLine(artefact.Remediation);
+        sb.AppendLine("- Assign a named owner and a review cadence so the artefact does not drift out of date again.");
+        sb.AppendLine("- Store it where the team that operates this platform can find it, and link it from the platform's entry-point documentation.");
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private sealed record ArtefactGuidance(
+        string Focus,
+        string[] Sources,
+        string[] Steps,
+        string PassHint,
+        string FailHint,
+        string NotApplicableHint,
+        string Remediation);
+
+    private static ArtefactGuidance ClassifyArtefact(string description, string category)
+    {
+        var text = (description + " " + category).ToLowerInvariant();
+        bool Has(params string[] keys) => keys.Any(k => text.Contains(k));
+        var control = string.IsNullOrWhiteSpace(description) ? "this control" : $"\"{description}\"";
+
+        if (Has("source-control", "source control", "branching", "pull request", "commit message", "secret-scanning", "secret scanning", "repository"))
+            return new ArtefactGuidance(
+                "Open the repository that holds the database schema, code and ETL assets for this platform.",
+                new[]
+                {
+                    "The repository URL (Azure DevOps, GitHub or equivalent) and the branch that represents production.",
+                    "Repository settings: branch policies/protection rules, required reviewers, and security/secret-scanning configuration.",
+                    "Recent commit and pull-request history for the production branch.",
+                },
+                new[]
+                {
+                    "Confirm the assets this item names are actually in the repository (SQL project/DACPAC, migration scripts, ETL package or pipeline definitions) and not only on a server or a share.",
+                    "Inspect the branch policy on the production branch: whether reviews are required, how many approvers, and whether the policy is enforced rather than advisory.",
+                    "Sample the last 20-30 commits or pull requests and check they follow the stated convention (descriptive messages, linked work items, reviewed before merge).",
+                    "Check repository security settings for secret scanning / push protection, and confirm no credentials are committed in configuration files.",
+                },
+                $"The repository contains the assets {control} requires, and the repository settings enforce the practice rather than relying on convention.",
+                $"The assets are outside source control, or the policy that would enforce {control} is absent, disabled, or routinely bypassed.",
+                "There is no application or database codebase for this platform to place under source control - record what is deployed and how, so the exclusion is justified.",
+                "Bring the missing assets into the repository and enforce the practice through branch policies rather than team convention.");
+
+        if (Has("pipeline", "automated build", "automated deployment", "dacpac", "rollback", "pre/post-deployment", "pre-deployment", "post-deployment", "ci/cd", "deploy"))
+            return new ArtefactGuidance(
+                "Open the CI/CD pipeline definitions that build and deploy this database, and the record of their recent runs.",
+                new[]
+                {
+                    "Pipeline definition files (for example azure-pipelines.yml, .github/workflows/*.yml, a Jenkinsfile, or a classic pipeline export).",
+                    "The run history for those pipelines, showing which environments were deployed and when.",
+                    "Any documented rollback or recovery procedure, and evidence it has been exercised.",
+                },
+                new[]
+                {
+                    "Read the pipeline definition and identify each stage, the environment it targets, and what it actually deploys.",
+                    "Confirm the promotion path this item requires exists in the definition (for example Dev then Test then Prod) and that later stages are gated by approvals rather than run ad hoc.",
+                    "Check whether the deployment step is automated from the repository, or whether a human still runs scripts by hand.",
+                    "For rollback and pre/post-deployment scripts, confirm the procedure is in the definition or a linked runbook, and look for a run or a test that proves it works.",
+                },
+                $"A pipeline definition implements {control}, and its run history shows it is the route changes actually take.",
+                $"No pipeline implements {control}, or one exists but is bypassed, disabled, or has never successfully run for this database.",
+                "This platform has no deployable database artefacts and no release process to automate - record how changes reach the instance instead.",
+                "Add the missing stage, gate or script to the pipeline definition and prove it end to end in a non-production environment.");
+
+        if (Has("environment", "dev / test / prod", "dev/test/prod", "parity", "representative"))
+            return new ArtefactGuidance(
+                "Compare the environments this platform uses and the configuration that defines them.",
+                new[]
+                {
+                    "The inventory of environments (names, servers/instances, subscriptions or resource groups).",
+                    "Environment configuration: variable groups, parameter files, IaC templates, or the settings held per environment in the pipeline.",
+                    "Any documented statement of how non-production data is sized, refreshed or masked.",
+                },
+                new[]
+                {
+                    "List the environments that exist and confirm they are genuinely separate instances/databases, not schemas or naming conventions inside one server.",
+                    "Diff the configuration held for each environment and note every setting that differs without a stated reason.",
+                    "Where the item concerns representativeness, compare data volume, schema version and workload shape between non-production and production.",
+                },
+                $"Distinct environments exist and their configuration evidences {control}.",
+                $"Environments are shared, missing, or their configuration diverges in ways that invalidate {control}.",
+                "Only a single environment exists by design (for example a standalone analytical sandbox) and no promotion path is intended.",
+                "Separate the environments or align their configuration, and hold the differences in source-controlled, per-environment configuration.");
+
+        if (Has("architecture", "topology", "diagram", "deployment model", "capacity", "scale approach"))
+            return new ArtefactGuidance(
+                "Obtain the architecture documentation for this platform and compare it against what is actually deployed.",
+                new[]
+                {
+                    "The architecture overview document or diagram, with its version and date.",
+                    "Any design decision record or rationale explaining why this deployment model/tier/topology was chosen.",
+                    "A current inventory of the instances, databases, pools and dependencies in scope.",
+                },
+                new[]
+                {
+                    "Read the document and write down what it claims: the deployment model, the instances and databases, and the components they depend on.",
+                    "Compare each claim against the audited environment and note every difference.",
+                    "Confirm the rationale is recorded - a diagram with no stated reasoning does not evidence a deliberate decision.",
+                },
+                $"A current document evidences {control} and matches the deployed environment.",
+                $"No such document exists, it has no recorded rationale, or it no longer matches what is deployed.",
+                "The item describes a platform construct that does not exist in this deployment (for example an Azure service tier on an on-premises instance).",
+                "Produce or refresh the document, record the decision rationale, and put it under the same review cadence as the platform itself.");
+
+        if (Has("runbook", "procedure", "escalation", "on-call", "on call", "onboarding", "glossary", "terminology", "self-documenting", "maintainable", "bus factor", "knowledge"))
+            return new ArtefactGuidance(
+                "Obtain the operational documentation for this platform and judge whether someone outside the build team could use it.",
+                new[]
+                {
+                    "The runbook, operations manual or wiki space covering this platform.",
+                    "Escalation and on-call definitions, including named roles or rotas.",
+                    "Onboarding material, glossaries and any recorded handover notes.",
+                },
+                new[]
+                {
+                    "Locate the document this item names and read the section that would actually be used in the scenario it covers.",
+                    "Judge whether the steps are executable by a competent engineer who did not build the system - concrete commands, paths and thresholds rather than intent.",
+                    "Check when it was last reviewed and whether it still matches the current schema, jobs and endpoints.",
+                    "Confirm the people named in it are current and that the team can reach the document without asking the original author.",
+                },
+                $"The documentation exists, is current, and is specific enough that {control} genuinely holds.",
+                $"The documentation is missing, is a stub or template, is out of date, or depends on one person's knowledge.",
+                "The activity this documentation would cover does not exist for this platform, so there is nothing to document.",
+                "Write or update the document with concrete, executable detail, name its owner, and set a review cadence tied to schema and process changes.");
+
+        if (Has("rto", "rpo", "disaster", "failover", "dr ", " dr", "restore", "retention", "backup", "freshness"))
+            return new ArtefactGuidance(
+                "Obtain the recovery and continuity documentation, plus the records of any test that exercised it.",
+                new[]
+                {
+                    "The documented RTO/RPO targets and the DR runbook or continuity plan.",
+                    "Records of the most recent failover or restore test: date, scope, outcome, and who ran it.",
+                    "Retention and data-freshness commitments agreed with the business.",
+                },
+                new[]
+                {
+                    "Confirm the target or commitment this item names is written down and signed off, not assumed.",
+                    "Find the evidence that it has been tested or measured - a test report, ticket, or monitoring record - and check the date.",
+                    "Compare the documented target against the platform's actual configuration and note any gap.",
+                },
+                $"The target is documented, agreed, and there is dated evidence that {control} has been verified.",
+                $"The target is undocumented or untested, or the last test is older than the stated cadence.",
+                "The platform is explicitly out of scope for recovery commitments (for example a disposable sandbox with no restore obligation).",
+                "Document and agree the target, schedule the test at the required cadence, and retain the test report as evidence.");
+
+        if (Has("compliance", "regulat", "gdpr", "personal data", "residency", "agreement", "dpa", "breach", "consent", "segregation of duties", "retention polic", "cross-border"))
+            return new ArtefactGuidance(
+                "Obtain the compliance documentation that governs this platform and the records that evidence it is followed.",
+                new[]
+                {
+                    "The compliance matrix, data inventory or register that covers this platform.",
+                    "Signed agreements, policies or approvals relevant to the obligation (for example a DPA, a retention policy, an incident-notification process).",
+                    "Evidence the obligation is operated: approvals, review records, or the control mapped to a system setting.",
+                },
+                new[]
+                {
+                    "Confirm the obligation this item names is identified and recorded against this platform specifically, not only at organisation level.",
+                    "Read the controlling document and confirm it is approved and in force, with a date and an owner.",
+                    "Look for evidence the obligation is operated in practice, not only stated on paper.",
+                },
+                $"The obligation is documented, approved and evidenced in operation for this platform, satisfying {control}.",
+                $"The obligation is unidentified, undocumented, expired, or documented but demonstrably not operated.",
+                "The regulated data category or regime this item concerns is not present in this platform - record the basis for that conclusion.",
+                "Identify and document the obligation against this platform, secure the required approval, and record how it is evidenced on an ongoing basis.");
+
+        if (Has("lineage", "catalog", "steward", "ownership", "metadata", "business definition", "source-to-target", "source to target", "mapping"))
+            return new ArtefactGuidance(
+                "Obtain the governance artefacts that describe what the data means, where it comes from and who owns it.",
+                new[]
+                {
+                    "Source-to-target mappings or lineage documentation for the in-scope tables and loads.",
+                    "The data catalog or glossary, and whether this platform's assets are registered in it.",
+                    "The ownership/stewardship register naming who is accountable for each domain.",
+                },
+                new[]
+                {
+                    "Sample a few in-scope tables and confirm the artefact actually covers them, rather than covering the platform in the abstract.",
+                    "Check the named owners or stewards are current people in current roles.",
+                    "Confirm consumers can reach the artefact themselves - discoverability is part of the control.",
+                },
+                $"The artefact covers the in-scope assets, names current owners, and is reachable by its consumers, satisfying {control}.",
+                $"The artefact is absent, covers only part of the estate, names people who have left, or is held privately by one team.",
+                "The data domain this item governs is not present in this platform.",
+                "Complete the artefact for the in-scope assets, assign current named owners, and publish it where consumers can find it.");
+
+        if (Has("secret", "key vault", "connection string", "credential"))
+            return new ArtefactGuidance(
+                "Inspect where this platform's connection strings and credentials are actually held.",
+                new[]
+                {
+                    "Application and ETL configuration files, pipeline variable definitions, and any IaC templates.",
+                    "The secret store in use (for example Key Vault) and which of this platform's secrets it holds.",
+                    "Repository secret-scanning results, if available.",
+                },
+                new[]
+                {
+                    "Search the repository and pipeline definitions for embedded passwords, connection strings and keys.",
+                    "For each credential the platform needs, confirm it resolves from a secret store at runtime rather than from a checked-in file.",
+                    "Confirm access to the secret store is itself restricted, and note anything still held in plain configuration.",
+                },
+                $"Credentials resolve from a managed secret store and no secret is present in code or configuration, satisfying {control}.",
+                $"One or more credentials are held in configuration files, pipeline plain text, or committed source.",
+                "The platform uses only integrated/managed identity authentication and holds no credentials to store.",
+                "Move the exposed secrets into the secret store, rotate anything that was committed, and reference them from configuration at runtime.");
+
+        if (Has("cost", "sizing", "reserved", "savings", "growth projection", "auto-scal", "scaled down", "serverless", "tier"))
+            return new ArtefactGuidance(
+                "Obtain the sizing and cost analysis that justifies how this platform is provisioned.",
+                new[]
+                {
+                    "The workload analysis or sizing calculation behind the current tier/compute choice.",
+                    "Cost reports, reservation or savings-plan evaluations, and any growth projection.",
+                    "The policy or schedule governing non-production environments.",
+                },
+                new[]
+                {
+                    "Confirm the decision this item concerns is backed by recorded analysis rather than by a default or a guess.",
+                    "Check the analysis is recent enough to still be valid against current usage.",
+                    "Compare what the analysis recommends against how the platform is actually provisioned today.",
+                },
+                $"Recorded, current analysis evidences {control} and matches how the platform is provisioned.",
+                $"No analysis exists, it is stale, or the provisioning no longer follows it.",
+                "The platform runs on fixed infrastructure with no sizing or purchasing decision to make.",
+                "Produce the analysis, act on its recommendation, and re-run it on a set cadence as the workload grows.");
+
+        if (Has("data quality", " dq", "dq ", "remediation workflow", "sla"))
+            return new ArtefactGuidance(
+                "Obtain the data quality framework documentation and the records of it operating.",
+                new[]
+                {
+                    "The data quality framework: the defined rules, their owners, and how quality is scored.",
+                    "The remediation workflow - how an alert becomes an investigation, a fix and a verification.",
+                    "Agreed data quality or freshness SLAs per data product or mart.",
+                },
+                new[]
+                {
+                    "Confirm the rules, ownership and scoring this item names are written down and agreed, not implicit in ETL code.",
+                    "Trace one recent data quality issue end to end and confirm it followed the documented workflow.",
+                    "Check the SLA is agreed with the consuming business area and is measured.",
+                },
+                $"The framework is documented, owned and demonstrably operated, satisfying {control}.",
+                $"Quality rules live only inside code, no workflow is defined, or the documented process is not followed in practice.",
+                "No data products or marts are served from this platform, so there is no quality commitment to define.",
+                "Formalise the rules, owners, scoring and workflow in a single document, and measure against the agreed SLA.");
+
+        if (Has("dashboard", "alert", "baseline", "monitor", "observab"))
+            return new ArtefactGuidance(
+                "Obtain the monitoring artefacts and confirm the people who need them can use them.",
+                new[]
+                {
+                    "The dashboard or workbook covering this platform, and who has access to it.",
+                    "The alert rule definitions and their thresholds.",
+                    "Captured baselines and any documented escalation path for critical alerts.",
+                },
+                new[]
+                {
+                    "Open the dashboard as a non-DBA operations user would, and confirm it is reachable and legible to them.",
+                    "Review the alert rules and thresholds, and check the recent alert volume for evidence of tuning or fatigue.",
+                    "Confirm the escalation path names current roles and has been used at least once.",
+                },
+                $"The artefact exists, is accessible to its intended audience, and evidences {control}.",
+                $"The artefact is missing, restricted to the team that built it, untuned, or has no defined escalation.",
+                "This platform has no monitoring obligation defined for the audience the item names.",
+                "Publish the dashboard to the operations audience, tune the thresholds against observed behaviour, and document the escalation path.");
+
+        if (Has("test", "validation", "regression", "performance test"))
+            return new ArtefactGuidance(
+                "Obtain the test assets for this database and the record of them running.",
+                new[]
+                {
+                    "Test projects, scripts or notebooks held alongside the database code.",
+                    "The pipeline stage that executes them, and its recent run results.",
+                    "Any documented acceptance criteria the tests assert against.",
+                },
+                new[]
+                {
+                    "Confirm the tests this item names exist as assets, not as a manual checklist someone works through.",
+                    "Confirm they run automatically as part of the release, and check the last few results.",
+                    "Read a sample and judge whether they would actually catch the failure the control is meant to prevent.",
+                },
+                $"Automated tests exist, run as part of the release, and meaningfully assert {control}.",
+                $"No tests exist, they are run manually and inconsistently, or they pass without asserting anything meaningful.",
+                "No schema or load changes are made to this platform, so there is no release to test.",
+                "Add the missing tests to the repository, wire them into the release pipeline, and fail the release when they fail.");
+
+        // Default: still item-specific because it references this item's own description and area.
+        var areaHint = string.IsNullOrWhiteSpace(category)
+            ? "the documentation set for this platform"
+            : $"the documentation, records or repository assets covering '{category}'";
+        return new ArtefactGuidance(
+            $"Identify the document, record, repository asset or pipeline definition that would evidence {control}, and obtain it.",
+            new[]
+            {
+                $"Locate {areaHint}.",
+                "The owner of that artefact, and the date it was last reviewed.",
+            },
+            new[]
+            {
+                $"Read the artefact and find the specific statement, setting or section that evidences {control}.",
+                "Confirm it describes the environment being audited, and that the people it names are current.",
+            },
+            $"A current, owned artefact evidences {control} for this platform.",
+            $"No artefact evidences {control}, or the one that exists is stale, generic, or contradicted by the deployed environment.",
+            $"The activity or construct {control} concerns does not exist in this platform, so there is nothing to evidence.",
+            $"Produce the artefact that evidences {control}, assign it an owner, and review it on a set cadence.");
+    }
+
+    // Safety net for callers that cannot supply the mapping's IsDocumentationCheck flag.
+    private static bool IsDocumentationTopic(ChecklistItem item)
+    {
+        var text = ((item.Description ?? string.Empty) + " " + (item.Category ?? string.Empty)).ToLowerInvariant();
+        string[] markers =
+        {
+            "documented", "documentation", "document exists", "runbook", "diagram", "glossary",
+            "source-controlled", "source control", "branching strategy", "pull request",
+            "commit message", "pipeline", "onboarding", "escalation path", "steward",
+            "agreement", "policies defined", "policy defined", "strategy defined",
+        };
+        return markers.Any(m => text.Contains(m));
     }
 
     private sealed record TopicGuidance(

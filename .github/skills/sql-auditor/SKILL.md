@@ -70,8 +70,18 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```
 - **resolve_review** — record a decision for one Needs Review item:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview> --notes "<rationale>"
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> --notes "<rationale>"
   ```
+  When the verdict came from attached evidence rather than from the user, add
+  `--evidence-source "<label>"` and `--evidence-files "<manifest paths you read>"`.
+- **evidence** — attach or show the artefacts that decide documentation and process items:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evidence add --path <folder> | --git <https url> | --file <path> [--ref <branch>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evidence show
+  ```
+  Resolves and indexes the sources and writes `evidence-manifest.json` into the run directory.
+  Private HTTPS repositories authenticate from `SQLAUDITOR_GIT_TOKEN` — **never ask for a token in
+  chat** and never accept one inside the URL. The CLI makes no AI calls: **you** read the files.
 - **enrich_result** — record the audit wording you authored for one script-evaluated item:
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence-file "<path>" --risk "<riskImpact>" --recommendation "<recommendation>"
@@ -139,7 +149,33 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    passing `--evidence-file` so the quotes it contains survive. When the command replies that the
    item moved to Outcome `Not Applicable`, that item is excluded from every score and is listed on
    the workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
-4. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
+4. Read the `=== EVIDENCE REVIEW AVAILABLE ===` / `=== ACTION REQUIRED: EVIDENCE REVIEW ===` block.
+   Many review items are **documentation or process controls** (source control, pipelines, runbooks,
+   architecture docs, environment separation, secrets handling, compliance records). They cannot be
+   answered from the SQL Server instance, and interviewing the user about each one is slow and
+   imprecise.
+   - **If no evidence is attached, ask once:** "Do you have a Git repository, deployment pipeline or
+     documentation folder I can read as evidence? Give me a local folder path, a file path, or an
+     https Git URL — or say 'no' to review these manually." If they provide one, run
+     `evidence add`. If they decline, go straight to step 5.
+   - **Read the files yourself** under the resolved paths the command printed. For each item, first
+     identify **the artefact the control requires**, then check whether it is actually in the
+     attached evidence.
+   - **Record each verdict you can justify** with `resolve_review --id <id> --decision <pass|fail>
+     --notes-file <file with what the files show> --evidence-source "<label>" --evidence-files
+     "<paths you read>"`, then `enrich_result` for the same item.
+   - **Rules you must not break:** if the required artefact is **not** in the attached evidence,
+     leave the item as NeedsReview — the evidence set is a partial view, so its absence is not proof
+     the control is missing and is **not** grounds for `fail`; cite only files you actually opened;
+     `fail` requires you to hold the artefact and for it to evidence a gap; **never record
+     `notapplicable` from evidence** (the CLI rejects it when `--evidence-source` or
+     `--evidence-files` is set) — whether a control has nothing to assess is the user's call, so
+     leave it as NeedsReview and explain why you think it may not apply; and if the evidence is
+     **silent, partial or ambiguous, do not decide**. Items needing an interview, a live instance
+     setting, or proof that an event happened (a failover test was run, an approval was given) are
+     almost never answerable from a repository.
+   - Afterwards, report which items you resolved from evidence and which still need the user.
+5. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item still listed there
    (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
    Manual Verification Steps for every item automatically, in your very first reply after
    running evaluate — before asking anything.** Never ask the user for a decision, and
@@ -164,13 +200,18 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    ## Recommended Actions (if failed)
    - ...
    ```
-5. Only **after** the full steps for all items have been shown, ask the user for their
-   **Pass/Fail decision first** — one item at a time or all at once. The verdict is the
+
+   For a **documentation or process item** the baseline guidance is artefact-oriented — which
+   document, repository or record to obtain — and it also states what Not Applicable means. Render
+   it as it stands; do **not** turn it into SSMS or T-SQL steps, and keep its Not Applicable
+   criteria in the Pass/Fail section.
+6. Only **after** the full steps for all items have been shown, ask the user for their
+   **Pass / Fail / Not Applicable decision** — one item at a time or all at once. The verdict is the
    reviewer's to make: never infer it, assume it, announce it, or challenge it.
-6. Ask **one** follow-up question: what they inspected and what they found. Accept the
+7. Ask **one** follow-up question: what they inspected and what they found. Accept the
    answer as given — do not judge whether it is sufficient, do not ask for more detail, and
    do not argue for a different outcome. Re-ask only if they gave no observation at all.
-7. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
+8. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
    (`pass`, `fail` or `notapplicable`), and `--notes` containing the user's own words. Then run
    **enrich_result** for the same item with wording *you* derive from their evidence — finding,
    evidence, riskImpact and recommendation, using only facts they stated. The reviewer's raw words
@@ -180,10 +221,10 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
      nothing to assess. The item is then excluded from every score, listed on the workbook's
      "Not Applicable Items" sheet and reported as **Not Applicable**, never as Pass or Fail, and it
      needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
-8. Do not write a final summary until every review item is resolved and every script item
+9. Do not write a final summary until every review item is resolved and every script item
    is enriched. The full report suite is generated automatically by `evaluate` in the run
    directory (but `results/historical_last_run.json` is **not** refreshed there).
-9. **Once every item is resolved and enriched, ASK the user whether to generate the final
+10. **Once every item is resolved and enriched, ASK the user whether to generate the final
    report** — e.g. "All items are complete. Shall I generate the final report now?" Wait for
    their answer; never generate it silently.
    - When the user confirms, run **generate_report**. This is the step that refreshes

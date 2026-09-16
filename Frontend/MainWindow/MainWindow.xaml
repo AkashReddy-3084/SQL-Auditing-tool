@@ -330,7 +330,37 @@
                                                 </Popup>
                                             </Grid>
                                         </StackPanel>
+
                                         <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
+
+                                        <!-- Evidence stays collapsed behind one button so the login card is not crowded. -->
+                                        <Button x:Name="ToggleEvidenceBtn" Content="Attach Evidence (optional)" Style="{StaticResource SecondaryButton}" Width="220" Margin="0,12,0,0" HorizontalAlignment="Left" Click="ToggleEvidenceBtn_Click"
+                                                ToolTip="Attach a repository, pipeline definitions or documentation so documentation and process checklist items are decided from artefacts instead of being queued for manual review." />
+
+                                        <Border x:Name="EvidencePanel" Visibility="Collapsed" Margin="0,12,0,0" Padding="16"
+                                                Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="12">
+                                            <StackPanel>
+                                                <TextBlock Text="Folders and files" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                                <UniformGrid Columns="3" Margin="0,0,0,14">
+                                                    <Button x:Name="AddEvidenceFolderBtn" Content="Add Folder" Style="{StaticResource SecondaryButton}" Height="38" Margin="0,0,6,0" Click="AddEvidenceFolderBtn_Click" />
+                                                    <Button x:Name="AddEvidenceFileBtn" Content="Add File(s)" Style="{StaticResource SecondaryButton}" Height="38" Margin="3,0,3,0" Click="AddEvidenceFileBtn_Click" />
+                                                    <Button x:Name="ClearEvidenceBtn" Content="Clear" Style="{StaticResource SecondaryButton}" Height="38" Margin="6,0,0,0" Click="ClearEvidenceBtn_Click" />
+                                                </UniformGrid>
+
+                                                <TextBlock Text="Git repository URL" FontWeight="SemiBold" Margin="0,0,0,2" />
+                                                <TextBlock Text="The clone URL, for example https://github.com/contoso/data-warehouse.git — https only, not the page URL from your browser. Private repositories authenticate from SQLAUDITOR_GIT_TOKEN; never paste a token here."
+                                                           TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6" />
+                                                <TextBox x:Name="EvidenceGitUrlBox" Height="34" TextChanged="EvidenceInput_Changed" />
+
+                                                <TextBlock Text="Branch or tag" FontWeight="SemiBold" Margin="0,12,0,2" />
+                                                <TextBlock Text="Example: main. Leave empty to use the repository default branch."
+                                                           TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6" />
+                                                <TextBox x:Name="EvidenceGitRefBox" Height="34" TextChanged="EvidenceInput_Changed" />
+
+                                                <Button x:Name="IndexEvidenceBtn" Content="Validate / Index Evidence" Style="{StaticResource ModernButton}" Height="38" Margin="0,16,0,0" HorizontalAlignment="Stretch" Click="IndexEvidenceBtn_Click" />
+                                                <TextBlock x:Name="EvidenceSummaryText" Text="No evidence attached." TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" />
+                                            </StackPanel>
+                                        </Border>
                                     </StackPanel>
                                 </Border>
 
@@ -587,6 +617,8 @@
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
                                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button x:Name="OverrideEvidenceBtn" Content="Override" Style="{StaticResource SecondaryButton}" Width="120" Margin="0,0,10,0" Visibility="Collapsed" Click="OverrideEvidenceBtn_Click"
+                                                    ToolTip="Discard the AI verdict for this item and review it yourself." />
                                             <Button x:Name="SubmitBtn" Content="Submit" Style="{StaticResource ModernButton}" Width="120" Click="SubmitBtn_Click" />
                                         </StackPanel>
                                     </Grid>

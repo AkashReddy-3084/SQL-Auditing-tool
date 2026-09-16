@@ -17,6 +17,7 @@ internal static class PromptTemplateStore
         Path.Combine("Backend", "Modules", "evaluate", "AI-MCP", "prompts"),
         Path.Combine("Backend", "Modules", "evaluate", "AI-Manual", "prompts"),
         Path.Combine("Backend", "Modules", "evaluate", "Script", "prompts"),
+        Path.Combine("Backend", "Modules", "evaluate", "Evidence", "prompts"),
         Path.Combine("Backend", "Modules", "generate_scripts", "prompts"),
         Path.Combine("Backend", "Modules", "configure_checklist", "prompts"),
     };

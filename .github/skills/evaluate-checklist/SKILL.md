@@ -46,7 +46,9 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
 | `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
-| `resolve_review` | Records the user's Pass/Fail decision for one review item |
+| `resolve_review` | Records the Pass/Fail decision for one review item |
+| `set_evidence_sources` | Attaches a Git repo, pipeline definitions, docs folder or policy files to the run as evidence |
+| `evidence_manifest` | Shows the evidence already attached to the active run |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
 | `show_reports` | The final report and the authoritative outcome counts |
 | `load_checklist` | Look up valid IDs when the user's input cannot be resolved |
@@ -120,16 +122,61 @@ proves compliance ("0 unauthorised logins" on a Pass) is real evidence, not "Not
 Call `enrich_result` per item and keep going. Work through the list in batches rather than
 pausing after each one, and do not write a summary until every listed item is recorded.
 
-### 3. Review the items the scripts could not decide
+### 3. Evidence review — settle what artefacts can answer, before asking the user
 
-For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer:
+Many review items are **documentation or process controls** (source control, pipelines, runbooks,
+architecture docs, environment separation, secrets handling, compliance records). They cannot be
+answered from the SQL Server instance at all, and interviewing the user about them one at a time is
+slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
+`=== EVIDENCE REVIEW AVAILABLE ===` block.
+
+1. **If no evidence is attached yet, ask once:** "Do you have a Git repository, deployment pipeline
+   or documentation folder I can read as evidence? Give me a local folder path, a file path, or an
+   https Git URL — or say 'no' to review these manually."
+   - If they provide one, call
+     `set_evidence_sources(localPaths="...", gitUrl="...", gitRef="...", files="...")`.
+   - Private repositories authenticate from the `SQLAUDITOR_GIT_TOKEN` session environment
+     variable. **Never ask for a token in chat** and never accept one inside the URL.
+   - If they decline, skip straight to step 4.
+2. **Read the files yourself** with your own file tools, under the resolved paths the tool printed.
+   The server makes no LLM calls — you are the analyst. For each item, first identify **the artefact
+   the control requires**, then check whether that artefact is actually in the attached evidence.
+3. **Record each verdict you can justify:**
+   `resolve_review(id="...", decision="pass|fail", notes="<what the files actually show, quoting the
+   values and sections you relied on>", evidenceSource="<source label>",
+   evidenceFiles="<the manifest paths you read>")`, then `enrich_result` for the same item.
+
+**Rules you must not break:**
+- **If the required artefact is not in the attached evidence, leave the item as NeedsReview.** The
+  evidence set is a partial view of the organisation — an artefact you were not given may still
+  exist. Its absence here is not proof the control is missing and is **not** grounds for `fail`.
+- Cite only files you **actually opened**. Never cite a path you inferred from the manifest listing.
+- `pass` requires the artefact to be present **and** to show the control in place.
+- `fail` requires you to **hold** the artefact and for it to evidence a gap — an unapproved draft, an
+  unowned document, or one stating outright that the control does not exist.
+- **Never record `notapplicable` from evidence.** Whether a control has nothing to assess on this
+  platform is the user's judgement, not yours. `resolve_review` rejects it when `evidenceSource` or
+  `evidenceFiles` is set. Leave the item as NeedsReview and tell the user what the evidence suggests
+  and why you think it may not apply, so they can make the call in step 4.
+- If the evidence is **silent, partial or ambiguous, do not decide.** Leave the item for step 4 and
+  tell the user which items the evidence could not settle. A wrong Pass or Fail is far worse than
+  an item that stays for human review.
+- Items needing an interview, a live instance setting, or proof that an event actually happened
+  (a failover test was run, an approval was given) are almost never answerable from a repository.
+
+After the pass, report which items you resolved from evidence and which still need the user.
+
+### 4. Review the items neither the scripts nor the evidence could decide
+
+For **every** remaining entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer:
 
 1. Present the full verification guidance first, in the exact output format the tool prints
    (Checklist / Objective / Manual Verification Steps / What indicates a PASS and a FAIL /
-   Recommended Actions), filled with item-specific content and real T-SQL. Do this for every
-   item before asking anything.
-2. Ask for the user's **Pass/Fail decision**. The verdict is theirs — never infer it, assume it,
-   announce it, or argue for a different one.
+   Recommended Actions), filled with item-specific content. For a documentation or process item the
+   guidance is artefact-oriented — which document, repository or record to obtain — so do **not**
+   turn it into SSMS or T-SQL steps. Do this for every item before asking anything.
+2. Ask for the user's **Pass / Fail / Not Applicable decision**. The verdict is theirs — never infer
+   it, assume it, announce it, or argue for a different one.
 3. Ask **one** follow-up: what they inspected and what they found. Accept the answer as given.
 4. Call `resolve_review(id, decision, notes=<their own words>)`. Use `decision="notapplicable"`
    when what they report shows the control does not exist on this server at all — every value
@@ -140,7 +187,7 @@ For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the r
 5. Call `enrich_result` for the same item with wording **you** derive from their evidence. Their
    raw words must never be left as the report Finding.
 
-### 4. Report
+### 5. Report
 
 `evaluate` generates the full report suite automatically in the run directory, but it does **not**
 refresh `results/historical_last_run.json`.
@@ -158,8 +205,9 @@ e.g. "All items are complete. Shall I generate the final report now?" Never gene
 | Path | Content |
 |------|---------|
 | `results/checklist_results.json` | Per-item outcome, score, severity and your wording |
+| `results/evidence-manifest.json` | The evidence sources attached to the run and the indexed file inventory |
 | `results/historical_last_run.json` | Manual/AI-Manual results keyed by checklist ID, reusable by later runs (refreshed only by `generate_report`) |
-| `Audit Report.md` | Scored Markdown audit report |
+| `Audit Report.md` | Scored Markdown audit report, including an "Evidence-Derived Verdicts" section |
 | `Audit Checklist.md` | Per-item checklist rendering |
 | `Risk Register.md` | Risk register derived from the failed items |
 | `OT Server SQL Assessment Readout 3.html` | HTML readout |

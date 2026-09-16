@@ -36,11 +36,11 @@ internal sealed class ManualStepsGenerator
 
     public async Task<string> GenerateAsync(ChecklistItem item, CancellationToken cancellationToken = default)
     {
-        var result = await GenerateWithMetadataAsync(item, null, cancellationToken);
+        var result = await GenerateWithMetadataAsync(item, null, false, cancellationToken);
         return result.Instructions;
     }
 
-    public async Task<ManualStepsGenerationResult> GenerateWithMetadataAsync(ChecklistItem item, string? auditScript = null, CancellationToken cancellationToken = default)
+    public async Task<ManualStepsGenerationResult> GenerateWithMetadataAsync(ChecklistItem item, string? auditScript = null, bool isDocumentationCheck = false, CancellationToken cancellationToken = default)
     {
         var systemPrompt = PromptTemplateStore.Render(
             "manual_steps_prompt.txt",
@@ -56,7 +56,7 @@ internal sealed class ManualStepsGenerator
             messages = new[]
             {
                 new { role = "system", content = systemPrompt },
-                new { role = "user", content = BuildChecklistItemPrompt(item, auditScript) }
+                new { role = "user", content = BuildChecklistItemPrompt(item, auditScript, isDocumentationCheck) }
             }
         };
 
@@ -90,7 +90,7 @@ internal sealed class ManualStepsGenerator
         return new ManualStepsGenerationResult(instructions, txt, totalTokens);
     }
 
-    private static string BuildChecklistItemPrompt(ChecklistItem item, string? auditScript)
+    private static string BuildChecklistItemPrompt(ChecklistItem item, string? auditScript, bool isDocumentationCheck)
     {
         var sb = new StringBuilder();
         sb.Append("ID: ").AppendLine(item.Id);
@@ -102,6 +102,15 @@ internal sealed class ManualStepsGenerator
         if (!string.IsNullOrWhiteSpace(item.Verification))
         {
             sb.Append("Verification: ").AppendLine(item.Verification);
+        }
+
+        if (isDocumentationCheck)
+        {
+            sb.AppendLine();
+            sb.AppendLine("ITEM KIND: Documentation / process control. Compliance is evidenced by artefacts - a Git repository, a CI/CD pipeline definition, a runbook, an architecture document, a policy or an approval record - not by the SQL Server instance.");
+            sb.AppendLine("Do NOT produce SSMS, Azure Data Studio or T-SQL steps, and do not reference server permissions or catalog views.");
+            sb.AppendLine("Write the steps around obtaining the artefact, locating the section that evidences the control, confirming it is current, and confirming it matches the environment being audited.");
+            sb.AppendLine("Include explicit Pass, Fail and Not Applicable criteria, where Not Applicable means the activity the control concerns does not exist in this platform.");
         }
 
         if (!string.IsNullOrWhiteSpace(auditScript))

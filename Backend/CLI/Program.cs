@@ -38,6 +38,12 @@ namespace SQLAuditor
                 return RunResolveReviewCommand(args);
             }
 
+            // Attach or show the Git repository / pipeline / documentation evidence for the run.
+            if (args.Length > 0 && string.Equals(args[0], "evidence", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunEvidenceCommandAsync(args);
+            }
+
             // Record Copilot-authored audit wording for a script-evaluated item.
             if (args.Length > 0 && string.Equals(args[0], "enrich_result", StringComparison.OrdinalIgnoreCase))
             {
@@ -730,6 +736,18 @@ namespace SQLAuditor
                     results,
                     id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence-file \"<file holding the evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
 
+                if (manualReviewItems.Count > 0)
+                {
+                    // Attached after the run so the manifest lands in this run's directory.
+                    var evidenceContext = await AttachEvaluateEvidenceAsync(opts);
+
+                    Console.WriteLine();
+                    Console.Write(SQLAuditor.Lib.EvidenceAttribution.BuildReviewRequest(
+                        manualReviewItems.Select(r => r.Id), evidenceContext));
+                    Console.WriteLine();
+                    Console.WriteLine("Attach evidence with: sql-auditor evidence add --path <folder> | --git <https url> | --file <path>");
+                }
+
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
 
@@ -849,6 +867,17 @@ namespace SQLAuditor
             Console.WriteLine("                      Omit for Windows Integrated authentication.");
             Console.WriteLine("  --password <pw>     SQL login password. Or set SQLAUDITOR_SQL_PASSWORD.");
             Console.WriteLine("  --json <path>       Also copy results JSON to this path.");
+            Console.WriteLine("  --evidence-path <folders>");
+            Console.WriteLine("                      Comma-separated local folders (a cloned repo, a docs folder) to");
+            Console.WriteLine("                      attach as evidence so documentation and process items can be");
+            Console.WriteLine("                      decided from artefacts instead of by interview.");
+            Console.WriteLine("  --evidence-git <url>");
+            Console.WriteLine("                      An https:// Git URL to shallow-clone and index as evidence.");
+            Console.WriteLine("                      Private repos authenticate from SQLAUDITOR_GIT_TOKEN.");
+            Console.WriteLine("  --evidence-ref <branch|tag>");
+            Console.WriteLine("                      Branch or tag to clone when --evidence-git is used.");
+            Console.WriteLine("  --evidence-file <paths>");
+            Console.WriteLine("                      Comma-separated individual files to attach as evidence.");
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
             Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
@@ -862,6 +891,8 @@ namespace SQLAuditor
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
             Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --databases Sales --fresh");
+            Console.WriteLine("  sqlauditor evaluate --items 11.1.1-11.4.5 --server localhost --databases all --copilot \\");
+            Console.WriteLine("      --fresh --evidence-path C:\\src\\datawarehouse");
         }
 
         // ---------------------------------------------------------------------
@@ -1107,6 +1138,158 @@ namespace SQLAuditor
         }
 
         // ---------------------------------------------------------------------
+        // Non-interactive CLI: `evidence` subcommand. Attaches a Git repository,
+        // pipeline definitions, docs folders or policy files to the active run so
+        // documentation items can be decided from artefacts instead of by interview.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunEvidenceCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            var action = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)
+                ? args[1].Trim().ToLowerInvariant()
+                : "show";
+
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                PrintEvidenceUsage();
+                return 0;
+            }
+
+            if (string.Equals(action, "show", StringComparison.Ordinal))
+            {
+                var existing = SQLAuditor.Lib.EvidenceStore.Load();
+                if (existing == null)
+                {
+                    Console.WriteLine($"No evidence is attached to the run in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
+                    Console.WriteLine("Attach some with: sql-auditor evidence add --path <folder> | --git <https url> | --file <path>");
+                    return 0;
+                }
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(existing));
+                return 0;
+            }
+
+            if (!string.Equals(action, "add", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine($"Error: unknown evidence action '{action}'. Use 'add' or 'show'.");
+                PrintEvidenceUsage();
+                return 2;
+            }
+
+            var paths = SplitEvidenceList(GetOption(opts, "path") ?? GetOption(opts, "paths"));
+            var fileList = SplitEvidenceList(GetOption(opts, "file") ?? GetOption(opts, "files"));
+            var gitUrl = GetOption(opts, "git") ?? GetOption(opts, "git-url");
+            var gitRef = GetOption(opts, "ref") ?? GetOption(opts, "git-ref");
+
+            if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+            {
+                Console.Error.WriteLine("Error: provide at least one of --path, --file or --git.");
+                PrintEvidenceUsage();
+                return 2;
+            }
+
+            if (!string.IsNullOrWhiteSpace(gitUrl) && !SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+            {
+                if (SQLAuditor.Lib.EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                    Console.Error.WriteLine(SQLAuditor.Lib.EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                        + $"\n  sql-auditor evidence add --git \"{browse.CloneUrl}\" --ref \"{browse.Branch}\"");
+                else
+                    Console.Error.WriteLine($"Error: '{gitUrl}' is not a supported evidence repository URL. Only https:// Git clone URLs are accepted.");
+                return 2;
+            }
+
+            try
+            {
+                var context = await SQLAuditor.Lib.EvidenceStore.AttachAsync(
+                    paths, gitUrl, gitRef, fileList, System.Threading.CancellationToken.None);
+
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(context));
+
+                if (!context.HasUsableEvidence)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Nothing was indexed, so no item can be decided from evidence.");
+                    return 2;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine("NEXT: read the relevant files yourself under the resolved paths above. For every item you can settle, run:");
+                Console.WriteLine("  sql-auditor resolve_review --id <id> --decision <pass|fail|notapplicable> --notes \"<what the files show>\" \\");
+                Console.WriteLine("      --evidence-source \"<label>\" --evidence-files \"<paths you read>\"");
+                Console.WriteLine("then 'enrich_result' for the same item. Cite only files you actually opened.");
+                Console.WriteLine("If the evidence is silent, partial or ambiguous for an item, leave it as NeedsReview and say so - never guess.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to attach evidence: {ex.GetType().Name}: {ex.Message}");
+                return 3;
+            }
+        }
+
+        static void PrintEvidenceUsage()
+        {
+            Console.WriteLine("Usage: sqlauditor evidence add [options]");
+            Console.WriteLine("       sqlauditor evidence show");
+            Console.WriteLine();
+            Console.WriteLine("Attaches Git repositories, CI/CD pipeline definitions, documentation folders and policy");
+            Console.WriteLine("files to the active run so documentation and process checklist items can be decided from");
+            Console.WriteLine("real artefacts. The CLI makes NO AI calls: it resolves and indexes the sources, and Copilot");
+            Console.WriteLine("CLI reads the files and records each verdict with resolve_review.");
+            Console.WriteLine();
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --path <folders>    Comma-separated local folder paths (a cloned repo, a docs folder).");
+            Console.WriteLine("  --file <paths>      Comma-separated individual file paths (a policy doc, a pipeline export).");
+            Console.WriteLine("  --git <url>         An https:// Git URL to shallow-clone and index.");
+            Console.WriteLine("                      Private repos authenticate from SQLAUDITOR_GIT_TOKEN; never pass a token here.");
+            Console.WriteLine("  --ref <branch|tag>  Branch or tag to clone when --git is used.");
+            Console.WriteLine("  --help              Show this help.");
+            Console.WriteLine();
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  sqlauditor evidence add --path C:\\src\\datawarehouse");
+            Console.WriteLine("  sqlauditor evidence add --git https://github.com/contoso/dw --ref main");
+            Console.WriteLine("  sqlauditor evidence show");
+        }
+
+        static System.Collections.Generic.List<string> SplitEvidenceList(string? value)
+            => (value ?? string.Empty)
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(v => v.Trim().Trim('"'))
+                .Where(v => v.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+        // Honours the --evidence-* flags on `evaluate`; falls back to whatever is already
+        // attached to the run so a second call does not re-clone.
+        static async Task<SQLAuditor.Lib.EvidenceContext?> AttachEvaluateEvidenceAsync(
+            System.Collections.Generic.Dictionary<string, string> opts)
+        {
+            var paths = SplitEvidenceList(GetOption(opts, "evidence-path"));
+            var fileList = SplitEvidenceList(GetOption(opts, "evidence-file"));
+            var gitUrl = GetOption(opts, "evidence-git");
+            var gitRef = GetOption(opts, "evidence-ref");
+
+            if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+                return SQLAuditor.Lib.EvidenceStore.Load();
+
+            if (!string.IsNullOrWhiteSpace(gitUrl) && !SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+            {
+                Console.Error.WriteLine($"Warning: '{gitUrl}' is not a supported evidence repository URL and was ignored. Only https:// Git URLs are accepted.");
+                gitUrl = null;
+            }
+
+            try
+            {
+                return await SQLAuditor.Lib.EvidenceStore.AttachAsync(
+                    paths, gitUrl, gitRef, fileList, System.Threading.CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Warning: could not attach evidence ({ex.GetType().Name}: {ex.Message}). Continuing with manual review.");
+                return null;
+            }
+        }
+
+        // ---------------------------------------------------------------------
         // Non-interactive CLI: `resolve_review` subcommand
         // Reuses Auditor.ResolveReview to patch results/checklist_results.json and
         // regenerate the report suite. Used by the Copilot CLI skill to record
@@ -1118,12 +1301,20 @@ namespace SQLAuditor
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
                 Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> [--notes <text> | --notes-file <path>]");
+                Console.WriteLine("                                [--evidence-source <label>] [--evidence-files <paths>]");
+                Console.WriteLine();
+                Console.WriteLine("  --evidence-source   Set ONLY when the verdict came from attached evidence: the source label");
+                Console.WriteLine("                      shown by 'sql-auditor evidence show'.");
+                Console.WriteLine("  --evidence-files    Comma-separated manifest paths of the files you actually read.");
+                Console.WriteLine("                      Required whenever --evidence-source is set.");
                 return 0;
             }
 
             var id = GetOption(opts, "id");
             var decision = GetOption(opts, "decision");
             var notes = ReadValueOption(opts, "notes");
+            var evidenceSource = GetOption(opts, "evidence-source");
+            var evidenceFiles = ReadValueOption(opts, "evidence-files");
 
             if (string.IsNullOrWhiteSpace(id))
             {
@@ -1134,6 +1325,31 @@ namespace SQLAuditor
             {
                 Console.Error.WriteLine("Error: --decision is required (pass, fail, needsreview, or notapplicable).");
                 return 2;
+            }
+
+            var isEvidenceDerived = !string.IsNullOrWhiteSpace(evidenceSource) || !string.IsNullOrWhiteSpace(evidenceFiles);
+            if (isEvidenceDerived && string.IsNullOrWhiteSpace(evidenceFiles))
+            {
+                Console.Error.WriteLine($"Error: --evidence-files is required for [{id}] when the verdict comes from attached evidence. "
+                    + "List the manifest paths of the files you actually read.");
+                return 2;
+            }
+
+            // Deciding that a control has nothing to assess is a human judgement, so it cannot be
+            // filed from artefacts alone.
+            if (isEvidenceDerived
+                && SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(SQLAuditor.Lib.ManualVerdict.Normalize(decision)))
+            {
+                Console.Error.WriteLine($"Error: 'notapplicable' cannot be recorded from attached evidence for [{id}]. "
+                    + "Whether a control has nothing to assess on this platform is the user's call. Leave the item as "
+                    + "NeedsReview and tell the user what the evidence suggests and why you think it may not apply.");
+                return 2;
+            }
+
+            if (isEvidenceDerived)
+            {
+                notes = $"{notes?.Trim()}\n\n{SQLAuditor.Lib.EvidenceAttribution.EvidencePrefix} "
+                      + SQLAuditor.Lib.EvidenceAttribution.Describe(evidenceSource, evidenceFiles);
             }
 
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);

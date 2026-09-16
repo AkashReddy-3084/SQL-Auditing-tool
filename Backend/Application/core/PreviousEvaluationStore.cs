@@ -31,6 +31,9 @@ public sealed record EvaluationRunMetadata
     public string? LlmModel { get; init; }
     public string? ManualCsvFileName { get; init; }
 
+    /// <summary>Evidence artefacts attached to the run. Never carries a Git token.</summary>
+    public IReadOnlyList<EvidenceSourceRecord>? EvidenceSources { get; init; }
+
     [JsonIgnore]
     public TimeSpan? Duration =>
         DurationSeconds is null ? null : TimeSpan.FromSeconds(DurationSeconds.Value);
@@ -50,6 +53,7 @@ public sealed record RunInputs
     public string? LlmBaseUrl { get; init; }
     public string? LlmModel { get; init; }
     public string? ManualCsvFileName { get; init; }
+    public IReadOnlyList<EvidenceSourceRecord>? EvidenceSources { get; init; }
 }
 
 /// <summary>A previous run offered back to the user, together with the directory that holds it.</summary>
@@ -125,6 +129,7 @@ public static class PreviousEvaluationStore
             LlmBaseUrl = inputs?.LlmBaseUrl ?? existing?.LlmBaseUrl,
             LlmModel = inputs?.LlmModel ?? existing?.LlmModel,
             ManualCsvFileName = inputs?.ManualCsvFileName ?? existing?.ManualCsvFileName,
+            EvidenceSources = inputs?.EvidenceSources ?? existing?.EvidenceSources,
         };
 
         Write(runDirectory, metadata);
