@@ -2187,6 +2187,12 @@ WHERE d.name = DB_NAME();";
 
         private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)
         {
+            if (ManualMigrationStepsStore.TryGet(item.Id, out var storedSteps))
+            {
+                LogDiagnostic($"Reused stored manual migration steps for {item.Id}; skipped LLM generation.");
+                return new ManualStepsGenerationResult(storedSteps, storedSteps, 0);
+            }
+
             try
             {
                 if (_manualStepsGenerator != null)
@@ -2194,6 +2200,7 @@ WHERE d.name = DB_NAME();";
                     var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
+                        ManualMigrationStepsStore.Store(item.Id, slm.Instructions);
                         return slm;
                     }
 
@@ -2214,6 +2221,7 @@ WHERE d.name = DB_NAME();";
             {
                 fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
             }
+            ManualMigrationStepsStore.Store(item.Id, fallback);
             return new ManualStepsGenerationResult(fallback, fallback, 0);
         }
 
