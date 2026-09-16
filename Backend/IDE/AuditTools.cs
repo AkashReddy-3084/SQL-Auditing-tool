@@ -18,24 +18,8 @@ namespace SQLAuditor.Mcp;
 [McpServerToolType]
 public static class AuditTools
 {
-    private const string SaveWithVerdictHint =
-        "call save_generated_script(checklistId=\"<id>\", response=\"<same full raw generator output>\", "
-        + "validationVerdict=\"<your VERDICT block>\")";
-
-    /// <summary>
-    /// Items per generation batch. Matches <c>ScriptGeneratorAgent.RunAsync</c> (WPF flow),
-    /// which generates 10 items concurrently and only then persists the batch.
-    /// </summary>
-    private const int GenerationBatchSize = 10;
-
-    /// <summary>
-    /// Agent that owns the full per-item loop in subagent mode, defined in
-    /// .github/agents/sql-script-generator.agent.md.
-    /// </summary>
-    private const string GeneratorAgentName = "sql-script-generator";
-
-    // Subagents save concurrently, and the mapping and execution-results files are
-    // read-modify-write, so persistence is serialised across every caller of this server.
+    // Custom-checklist writes are read-modify-write across several files, so persistence is
+    // serialised across every caller of this server.
     private static readonly SemaphoreSlim SaveGate = new(1, 1);
 
     /// <summary>
@@ -209,8 +193,8 @@ public static class AuditTools
             }
         }
 
-        // Resolve the item spec the same way generate_scripts does, so a range or 'all'
-        // works here too and the run follows master-checklist order.
+        // Resolve the item spec so a range or 'all' works here too and the run follows
+        // master-checklist order.
         var structure = await auditor.GetChecklistStructureAsync();
         var orderedIds = structure
             .SelectMany(s => s.Items)
@@ -391,38 +375,32 @@ public static class AuditTools
             sb.AppendLine();
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
             sb.AppendLine($"{manualPending.Count} item(s) were not decided by the deterministic scripts and need review.");
-            sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. For EACH item below you MUST:");
-            sb.AppendLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content — exact T-SQL to run, settings/objects to inspect in SSMS):");
-            sb.AppendLine("       Checklist: <checklist title>");
-            sb.AppendLine("       Objective: <one sentence explaining what is being verified>");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## Manual Verification Steps:");
-            sb.AppendLine("       1. ...");
-            sb.AppendLine("       2. ... (include SQL queries in ```sql code blocks whenever required)");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## What indicates a PASS and a FAIL");
-            sb.AppendLine("       Pass:");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("       Fail:");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## Recommended Actions (if failed)");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("     Do NOT add extra sections or headings outside this format.");
-            sb.AppendLine("  2. Ask the user for their DECISION: Pass or Fail. The verdict is the reviewer's to make — never infer,");
-            sb.AppendLine("     assume, announce, question or challenge it, and never propose a different outcome.");
-            sb.AppendLine("  3. Ask ONE follow-up question: what they inspected and what they found. Accept their answer as given.");
-            sb.AppendLine("     Do NOT assess whether the evidence is sufficient, do NOT ask for extra detail, and do NOT argue that");
-            sb.AppendLine("     the item should stay NeedsReview. Re-ask ONLY if they supplied no observation at all.");
-            sb.AppendLine("  4. Immediately call 'resolve_review' with the user's decision and their exact words in 'notes'.");
-            sb.AppendLine("     If what they report shows the control does not exist on this server at all — every value absent, empty,");
-            sb.AppendLine("     zero or irrelevant to the item — it is not assessable: call resolve_review with decision='notapplicable'");
-            sb.AppendLine("     and the reason in 'notes'. It is then excluded from every score and reported as Not Applicable, never as");
-            sb.AppendLine("     Pass or Fail, and needs no enrich_result call. A zero that itself proves compliance is a Pass, not this.");
-            sb.AppendLine("  5. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
+            sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. The manual review is CSV-based:");
+            sb.AppendLine("  1. FIRST ask the user which they want — do NOT export or import anything until they answer:");
+            sb.AppendLine("       (a) IMPORT an already-filled CSV they have (for example one they filled during a previous run), or");
+            sb.AppendLine("       (b) EXPORT a fresh CSV to fill in now.");
+            sb.AppendLine("     If they choose (a): ask for the file path and call 'import_manual_csv' with it. A CSV from an earlier run");
+            sb.AppendLine("     works because rows are matched by 'Checklist ID'; rows for items not in this run are simply ignored. Do");
+            sb.AppendLine("     NOT export a new CSV in this case.");
+            sb.AppendLine("     If they choose (b): call 'export_manual_csv'. It writes EVERY manual item, with its verification steps");
+            sb.AppendLine("     already in the 'Manual Steps' column, to one CSV. Give the user ONLY the file path and a one-line");
+            sb.AppendLine("     instruction — do NOT paste the steps, a Pass/Fail rubric or any per-item guidance into the chat; the steps");
+            sb.AppendLine("     live in the CSV. Tell the user to open it and, for each row, enter Pass or Fail in the 'Decision' column");
+            sb.AppendLine("     and what they inspected and found in the 'Evidence' column, leaving 'Checklist ID' unchanged. The verdict is");
+            sb.AppendLine("     the reviewer's to make — never infer, assume, announce, question or challenge it, or propose a different outcome.");
+            sb.AppendLine("  2. When they give you a filled CSV (whether an existing one or the one just exported), call 'import_manual_csv'");
+            sb.AppendLine("     with its path to apply every decision at once. Accept their entries as given: do NOT assess whether the");
+            sb.AppendLine("     evidence is sufficient, do NOT ask for extra detail, and do NOT argue that an item should stay NeedsReview.");
+            sb.AppendLine("     Report back only the rows the import flagged. Do NOT ask for these decisions one item at a time, and do NOT");
+            sb.AppendLine("     call resolve_review for them — the CSV is the manual workflow. Use resolve_review only to correct a single");
+            sb.AppendLine("     item afterwards, or to record 'notapplicable' when the user reports a control does not exist on this server");
+            sb.AppendLine("     at all (excluded from every score, and it needs no enrich_result call). A zero that itself proves compliance is a Pass, not this.");
+            sb.AppendLine("  3. Then call 'enrich_result' for each applied item with audit wording YOU derive from the user's evidence:");
             sb.AppendLine("     finding (the actual state they observed), evidence (why it supports the outcome), riskImpact (the specific");
             sb.AppendLine("     consequence) and recommendation (targeted remediation). Use ONLY facts the user stated — invent nothing.");
-            sb.AppendLine("Two questions per item — decision, then evidence. Do NOT write a final summary until every item is resolved.");
+            sb.AppendLine("Only if the user explicitly asks to see a specific item's steps, show that one item using this format");
+            sb.AppendLine("(Checklist / Objective / Manual Verification Steps / What indicates a PASS and a FAIL / Recommended Actions).");
+            sb.AppendLine("Do NOT write a final summary until the CSV has been imported and every applied item is enriched.");
             foreach (var r in manualPending)
             {
                 sb.AppendLine();
@@ -432,13 +410,8 @@ public static class AuditTools
                     if (!string.IsNullOrWhiteSpace(it.Category)) sb.AppendLine($"Area/Category: {it.Category}");
                     if (!string.IsNullOrWhiteSpace(it.Verification)) sb.AppendLine($"Verification objective: {it.Verification}");
                 }
-                if (!string.IsNullOrWhiteSpace(r.Evidence))
-                {
-                    sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
-                    sb.AppendLine(r.Evidence.Trim());
-                }
-                sb.AppendLine($"Ask for the Pass/Fail decision first, then the evidence, then call: resolve_review(id=\"{r.Id}\", decision=\"pass\", \"fail\" or \"notapplicable\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
-                sb.AppendLine($"Then call: enrich_result(id=\"{r.Id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\") derived from that evidence.");
+                sb.AppendLine("This item is a row in the manual CSV; its verification steps are in the CSV's 'Manual Steps' column.");
+                sb.AppendLine("Do NOT paste those steps into the chat and do NOT collect its decision through a per-item resolve_review call.");
             }
         }
 
@@ -612,165 +585,6 @@ public static class AuditTools
         return string.IsNullOrWhiteSpace(text) ? "No checklist items matched." : text;
     }
 
-    [McpServerTool(Name = "generate_scripts")]
-    [Description("GENERATE deterministic audit SCRIPTS for checklist items — this is NOT evaluation and needs no SQL Server or credentials. Use this whenever the user asks to 'generate scripts', 'create scripts', or 'write audit scripts' for one or more checklist IDs (including the /generateScript command). 'items' accepts a single ID ('1.1.2'), a comma-separated list ('1.1.2,3.1.1') or an inclusive range in checklist order ('1.1.1 - 2.1.4'). Items are served ONE BATCH OF 10 AT A TIME, exactly like the WPF app: this call returns only the current batch, and you call it again with the SAME 'items' and batch+1 once every item in the batch is finished. In the default mode='subagent' it returns a dispatch manifest and you launch one 'sql-script-generator' subagent per item, each owning its full generate/validate/save loop in its own session — the closest match to the WPF app's 10 independent LLM sessions. mode='inline' instead returns the generator prompt plus every per-item request for you to author in this conversation. Existing scripts and mapping entries for the same ID are overwritten. Never call 'evaluate' for a script-generation request.")]
-    public static async Task<string> GenerateScriptsAsync(
-        [Description("Checklist IDs to generate scripts for: a single ID ('1.1.2'), a comma-separated list ('1.1.2,3.1.1'), or an inclusive range in checklist order ('1.1.1 - 2.1.4'). Pass the SAME value unchanged on every batch call. If missing, ask the user which checklist IDs to generate scripts for.")] string? items = null,
-        [Description("1-based batch number. One batch of 10 items is processed at a time, mirroring the WPF flow. Omit or pass 1 for the first batch, then call again with batch=2, 3, ... after every item in the previous batch has finished.")] int batch = 1,
-        [Description("'subagent' (default) returns a fan-out manifest: launch one 'sql-script-generator' subagent per item, each owning the full loop in its own session. 'inline' returns the generator prompt and every per-item request so the calling conversation writes the scripts itself — use it as a fallback when subagents are unavailable, or for a very small batch you want to watch.")] string? mode = null,
-        CancellationToken cancellationToken = default)
-    {
-        var spec = (items ?? string.Empty).Trim();
-
-        if (spec.Length == 0)
-            return "SCRIPT GENERATION — CHECKLIST IDS REQUIRED.\n"
-                 + "Ask the user which checklist item IDs to generate scripts for. Accepted forms: a single ID "
-                 + "('1.1.2'), a list ('1.1.2,3.1.1') or an inclusive range ('1.1.1 - 2.1.4'). "
-                 + "This is script generation, not evaluation — do not ask for a SQL Server or credentials.";
-
-        // Ranges resolve against the checklist's own ordering, so '1.1.1 - 2.1.4' means
-        // "every item between these two in master-checklist.json", not a numeric interval.
-        var auditor = new Auditor(string.Empty);
-        var structure = await auditor.GetChecklistStructureAsync();
-        var orderedIds = structure
-            .SelectMany(s => s.Items)
-            .Select(i => i.Id)
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .ToList();
-
-        var (requestedIds, unresolved) = ExpandChecklistIdSpec(spec, orderedIds);
-
-        if (requestedIds.Count == 0)
-            return $"Error: no checklist IDs could be resolved from '{spec}'."
-                 + (unresolved.Count > 0 ? " Unresolved: " + string.Join(", ", unresolved) + "." : string.Empty)
-                 + " Use 'load_checklist' to discover valid IDs, then call generate_scripts again.";
-
-        var totalBatches = (requestedIds.Count + GenerationBatchSize - 1) / GenerationBatchSize;
-        if (batch < 1) batch = 1;
-
-        if (batch > totalBatches)
-        {
-            var done = new StringBuilder();
-            done.AppendLine($"ALL BATCHES COMPLETE for '{spec}'. {requestedIds.Count} item(s) fit into "
-                          + $"{totalBatches} batch(es) of {GenerationBatchSize}; batch {batch} does not exist.");
-            done.AppendLine();
-            done.Append(DescribeGenerationStatus(requestedIds, "Recorded outcome for every requested item"));
-            done.AppendLine();
-            done.AppendLine("Report these totals to the user (generated / not feasible / not recorded) and stop — "
-                          + "do not call generate_scripts again. Any item shown as NOT RECORDED never reached "
-                          + "save_generated_script: re-run just that ID before reporting success.");
-            return done.ToString();
-        }
-
-        var batchIds = requestedIds
-            .Skip((batch - 1) * GenerationBatchSize)
-            .Take(GenerationBatchSize)
-            .ToList();
-
-        var (checklistItems, unknown) = await ScriptGenerationSkill.LoadItemsAsync(batchIds);
-        if (checklistItems.Count == 0)
-            return "Error: none of the checklist IDs in this batch exist. Unknown: " + string.Join(", ", unknown);
-
-        var inline = string.Equals(mode?.Trim(), "inline", StringComparison.OrdinalIgnoreCase);
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"=== SCRIPT GENERATION — BATCH {batch} OF {totalBatches} ({checklistItems.Count} item(s)) "
-                    + $"— {(inline ? "INLINE" : "SUBAGENT")} MODE ===");
-        sb.AppendLine($"Requested: {spec}");
-        sb.AppendLine($"Resolved {requestedIds.Count} checklist item(s) in checklist order: {string.Join(", ", requestedIds)}");
-        if (unresolved.Count > 0)
-            sb.AppendLine("Not found in the checklist and skipped: " + string.Join(", ", unresolved));
-
-        // Each batch reports the previous one, so a silently dropped item surfaces immediately.
-        if (batch > 1)
-        {
-            var previousIds = requestedIds
-                .Skip((batch - 2) * GenerationBatchSize)
-                .Take(GenerationBatchSize)
-                .ToList();
-
-            sb.AppendLine();
-            sb.Append(DescribeGenerationStatus(previousIds, $"Outcome of batch {batch - 1}"));
-            sb.AppendLine("Any item above shown as NOT RECORDED was never saved — re-run that single ID before "
-                        + "continuing with this batch.");
-        }
-
-        var alreadyGenerated = DescribeExistingScripts(batchIds);
-        if (alreadyGenerated.Length > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine($"Already generated and WILL BE OVERWRITTEN on save: {alreadyGenerated}. "
-                        + "Generate them again from scratch — do not skip them and do not reuse the old content.");
-        }
-
-        sb.AppendLine();
-        if (inline)
-        {
-            sb.AppendLine($"Generate ONLY the {checklistItems.Count} item(s) in this batch yourself. "
-                        + "Do not start the next batch until every item here has been saved.");
-            sb.AppendLine();
-            sb.Append(ScriptGenerationSkill.BuildGenerationInstructions(
-                checklistItems,
-                unknown,
-                "call save_generated_script(checklistId=\"<id>\", response=\"<full raw generator output>\")"));
-        }
-        else
-        {
-            sb.Append(BuildSubagentDispatch(batchIds));
-        }
-
-        sb.AppendLine();
-        sb.AppendLine($"=== END OF BATCH {batch} OF {totalBatches} ===");
-        if (batch < totalBatches)
-        {
-            var nextCount = Math.Min(GenerationBatchSize, requestedIds.Count - (batch * GenerationBatchSize));
-            sb.AppendLine($"After ALL {checklistItems.Count} item(s) above are finished (saved, recorded as NOT "
-                        + $"FEASIBLE, or failed), continue with the next {nextCount} item(s) by calling:");
-            sb.AppendLine($"    generate_scripts(items=\"{spec}\", batch={batch + 1}{(inline ? ", mode=\"inline\"" : "")})");
-            sb.AppendLine("Pass 'items' unchanged so the batches stay aligned. Do not stop or summarise before the last batch.");
-        }
-        else
-        {
-            sb.AppendLine("This is the FINAL batch. Once every item here is finished, confirm the recorded outcomes "
-                        + $"by calling generate_scripts(items=\"{spec}\", batch={batch + 1}), then report the totals and stop.");
-        }
-
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Fan-out instructions for one batch: one <c>sql-script-generator</c> subagent per item,
-    /// each owning the full generate/validate/save loop in its own session. This is the IDE
-    /// equivalent of the concurrent, independent <c>ProcessItemAsync</c> tasks in the WPF flow.
-    /// </summary>
-    private static string BuildSubagentDispatch(IReadOnlyList<string> batchIds)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("## HOW TO PROCESS THIS BATCH — SUBAGENT FAN-OUT");
-        sb.AppendLine($"Do NOT write these {batchIds.Count} scripts yourself and do NOT read the generator prompt.");
-        sb.AppendLine($"Launch ONE '{GeneratorAgentName}' subagent per item, ALL IN A SINGLE MESSAGE so they run");
-        sb.AppendLine("concurrently in independent sessions — the IDE equivalent of the WPF app generating the 10");
-        sb.AppendLine("items of a batch in 10 separate LLM sessions.");
-        sb.AppendLine();
-        sb.AppendLine("Each subagent owns the FULL loop for its ONE item and reports back a single status line:");
-        sb.AppendLine("  get_item_generation_prompt -> author the raw response -> save_generated_script (format gate)");
-        sb.AppendLine("  -> C1-C7 review -> save_generated_script with the verdict -> retry up to 3 times.");
-        sb.AppendLine();
-        sb.AppendLine("Dispatch exactly these calls, together, now:");
-        foreach (var id in batchIds)
-        {
-            sb.AppendLine($"  runSubagent(agentName=\"{GeneratorAgentName}\", description=\"Generate script {id}\", "
-                        + $"prompt=\"Generate and save the SQL Auditor audit script for checklist item {id}. "
-                        + $"Follow your agent contract exactly: start by calling get_item_generation_prompt(checklistId=\\\"{id}\\\").\")");
-        }
-        sb.AppendLine();
-        sb.AppendLine("While in this mode you must NOT call get_item_generation_prompt, validate_generated_script or");
-        sb.AppendLine("save_generated_script yourself — the subagents do. Your only jobs are dispatching the batch,");
-        sb.AppendLine("collecting the status lines, and advancing to the next batch.");
-        sb.AppendLine("If the subagents cannot be launched at all, fall back to this same batch with mode=\"inline\".");
-        return sb.ToString();
-    }
-
     /// <summary>
     /// Expands an ID specification into concrete checklist IDs, sorted in checklist order.
     /// Ranges are resolved by position in <paramref name="orderedIds"/>, so they follow the
@@ -819,175 +633,6 @@ public static class AuditTools
 
         resolved.Sort((a, b) => position[a].CompareTo(position[b]));
         return (resolved, unresolved);
-    }
-
-    /// <summary>
-    /// Lists the IDs in the batch that already have a script on disk. Saving overwrites them,
-    /// so this is reported rather than treated as a reason to skip.
-    /// </summary>
-    private static string DescribeExistingScripts(IEnumerable<string> ids)
-    {
-        try
-        {
-            var basePath = ScriptGenerationSkill.ResolveBasePath();
-            var existing = new List<string>();
-
-            foreach (var id in ids)
-            {
-                var safeId = Regex.Replace(id, @"[^a-zA-Z0-9_.-]+", "_").Trim('_');
-                if (string.IsNullOrWhiteSpace(safeId)) continue;
-
-                foreach (var type in new[] { "sql", "ps1" })
-                {
-                    var path = Path.Combine(basePath, "checklists", "Scripts", type, $"{safeId}.{type}");
-                    if (File.Exists(path)) existing.Add($"{id} ({type})");
-                }
-            }
-
-            return string.Join(", ", existing);
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
-
-    /// <summary>
-    /// Reports what execution-results.json actually recorded for the given IDs. Subagent
-    /// transcripts are not visible to the orchestrator, so this is how a batch is verified:
-    /// an item that never reached save_generated_script shows as NOT RECORDED.
-    /// </summary>
-    private static string DescribeGenerationStatus(IReadOnlyList<string> ids, string heading)
-    {
-        var recorded = ReadGenerationStatus();
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"## {heading}");
-        foreach (var id in ids)
-            sb.AppendLine($"  {id} — {(recorded.TryGetValue(id, out var s) ? s : "NOT RECORDED")}");
-
-        return sb.ToString();
-    }
-
-    private static Dictionary<string, string> ReadGenerationStatus()
-    {
-        var recorded = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        try
-        {
-            var path = Path.Combine(ScriptGenerationSkill.ResolveBasePath(), "results", "execution-results.json");
-            if (!File.Exists(path)) return recorded;
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (!doc.RootElement.TryGetProperty("results", out var results)
-                || results.ValueKind != JsonValueKind.Array)
-                return recorded;
-
-            foreach (var entry in results.EnumerateArray())
-            {
-                var id = Text(entry, "ChecklistId");
-                if (string.IsNullOrWhiteSpace(id)) continue;
-
-                var status = Text(entry, "Status");
-                var scriptPath = Text(entry, "ScriptPath");
-                var reason = Text(entry, "Reason");
-
-                var detail = scriptPath.Length > 0
-                    ? $" ({scriptPath})"
-                    : reason.Length > 0
-                        ? $" ({(reason.Length > 120 ? reason[..120] + "…" : reason)})"
-                        : string.Empty;
-
-                recorded[id] = (status.Length > 0 ? status : "Recorded") + detail;
-            }
-        }
-        catch
-        {
-            // A missing or malformed results file just means nothing can be confirmed.
-        }
-
-        return recorded;
-
-        static string Text(JsonElement element, string property) =>
-            element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString() ?? string.Empty
-                : string.Empty;
-    }
-
-    [McpServerTool(Name = "get_item_generation_prompt")]
-    [Description("Return the generator system prompt plus the filled request for ONE checklist item, built from Backend/Modules/generate_scripts/prompts/script_generator_system.txt and script_generator_user.txt. This is the entry point for the 'sql-script-generator' subagent: it fetches its own item's prompt here instead of receiving it second-hand, so the canonical templates are never paraphrased. Author the raw response from what this returns, then save it with 'save_generated_script'. Needs no SQL Server and no credentials.")]
-    public static async Task<string> GetItemGenerationPromptAsync(
-        [Description("The single checklist item ID to generate a script for, e.g. '1.1.2'.")] string checklistId,
-        CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(checklistId))
-            return "Error: 'checklistId' is required.";
-
-        var (checklistItems, unknown) = await ScriptGenerationSkill.LoadItemsAsync(new[] { checklistId });
-        if (checklistItems.Count == 0)
-            return $"Error: checklist ID '{checklistId.Trim()}' does not exist. "
-                 + "Use 'load_checklist' to discover valid IDs. Do not invent a checklist item.";
-
-        var item = checklistItems[0];
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"=== SINGLE-ITEM SCRIPT GENERATION — [{item.ChecklistId}] ===");
-        sb.AppendLine("This request contains EXACTLY ONE item. Ignore any batching guidance in the text below —");
-        sb.AppendLine("batching is handled by the orchestrator, not by you.");
-
-        var alreadyGenerated = DescribeExistingScripts(new[] { item.ChecklistId });
-        if (alreadyGenerated.Length > 0)
-            sb.AppendLine($"A script already exists for this item ({alreadyGenerated}) and WILL BE OVERWRITTEN when "
-                        + "you save. Generate it again from scratch — do not read or reuse the old content.");
-
-        sb.AppendLine();
-        sb.Append(ScriptGenerationSkill.BuildGenerationInstructions(
-            checklistItems,
-            unknown,
-            $"call save_generated_script(checklistId=\"{item.ChecklistId}\", response=\"<full raw generator output>\")"));
-
-        return sb.ToString();
-    }
-
-    [McpServerTool(Name = "validate_generated_script")]
-    [Description("Return the standard C1-C7 review request for one script YOU generated, built from Backend/Modules/generate_scripts/prompts/script_validation_system.txt and script_validation_user.txt. Provide the checklist ID and the COMPLETE raw generator response. Review the script using ONLY the checks in the returned prompt, then call 'save_generated_script' with the resulting verdict. 'save_generated_script' returns this same prompt if called without a verdict, so nothing is saved until the review is done.")]
-    public static async Task<string> ValidateGeneratedScriptAsync(
-        [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
-        [Description("The COMPLETE raw generator output for this item, exactly as produced from the generator prompt.")] string response,
-        CancellationToken cancellationToken = default)
-    {
-        return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
-            checklistId,
-            response,
-            validationVerdict: null,
-            saveInvocationHint: SaveWithVerdictHint,
-            cancellationToken);
-    }
-
-    [McpServerTool(Name = "save_generated_script")]
-    [Description("Save one script YOU generated for a checklist item (used after 'generate_scripts' or 'get_item_generation_prompt'). Provide the checklist ID and the COMPLETE raw generator response (all fields plus the script between ---SCRIPT_START--- and ---SCRIPT_END---). Called without 'validationVerdict' it runs the format gate and returns the standard C1-C7 validation prompt instead of saving. Perform that review, then call again passing the verdict ('VERDICT: VALID', or 'VERDICT: INVALID' with ISSUES and the corrected script between ---CORRECTED_SCRIPT_START--- and ---CORRECTED_SCRIPT_END---). On success it writes the script file and updates Backend/checklists/deterministic-script-mapping.json and Backend/results/execution-results.json. Writes are serialised, so parallel subagents can each call this safely. If it returns a validation error, correct the script and call again (retry up to 3 times).")]
-    public static async Task<string> SaveGeneratedScriptAsync(
-        [Description("The checklist item ID this script belongs to, e.g. '1.1.2'.")] string checklistId,
-        [Description("The COMPLETE raw generator output for this item: the FEASIBLE/SCRIPT_TYPE/SCOPE/SCRIPT_NAME/SCORING_LOGIC fields and the script between ---SCRIPT_START--- and ---SCRIPT_END--- markers.")] string response,
-        [Description("The verdict from the C1-C7 review, in the validation template's response format. Omit on the first call to receive the validation prompt.")] string? validationVerdict = null,
-        CancellationToken cancellationToken = default)
-    {
-        // Serialised because the mapping and execution-results files are read-modify-write and
-        // subagent mode has up to 10 items saving at once.
-        await SaveGate.WaitAsync(cancellationToken);
-        try
-        {
-            return await ScriptGenerationSkill.SaveGeneratedScriptAsync(
-                checklistId,
-                response,
-                validationVerdict,
-                SaveWithVerdictHint,
-                cancellationToken);
-        }
-        finally
-        {
-            SaveGate.Release();
-        }
     }
 
     [McpServerTool(Name = "configure_checklist")]
@@ -1248,6 +893,123 @@ public static class AuditTools
         catch { return new List<string>(); }
     }
 
+    [McpServerTool(Name = "export_manual_csv")]
+    [Description("Export every manual/AI-Manual checklist item of the current run — with its area, description, verification and generated manual steps — to a CSV the user fills in offline. This is the manual review workflow: the user enters Pass/Fail in the 'Decision' column and their observation in the 'Evidence' column, then 'import_manual_csv' applies the whole file. Identical CSV contract to the desktop app and the CLI. Set generateReport=true to also mark every still-undecided manual item as Skipped and regenerate the report suite now (the same as the desktop 'Export Manual CSV + Generate' button), so a report is available before the filled CSV is imported. Use after 'evaluate' reports manual items.")]
+    public static async Task<string> ExportManualCsvAsync(
+        [Description("Optional full path for the CSV. Defaults to a timestamped manual_checks_*.csv inside the current run directory.")] string? path = null,
+        [Description("When true, mark every still-undecided manual item as Skipped (excluded from scoring) and regenerate the five-file report suite immediately. A later import_manual_csv overwrites the Skipped items with the user's real decisions. Defaults to false.")] bool generateReport = false)
+    {
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+        if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            return "No evaluation results were found. Run 'evaluate' first.";
+
+        var auditor = new Auditor(string.Empty);
+        var rows = await ManualChecklistCsv.BuildExportRowsAsync(auditor);
+        if (rows.Count == 0)
+            return "The current evaluation contains no manual checklist items to export.";
+
+        var target = string.IsNullOrWhiteSpace(path)
+            ? Path.Combine(resultsDir, ManualChecklistCsv.BuildExportFileName(DateTime.Now))
+            : Path.GetFullPath(path);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            ManualChecklistCsv.Write(target, rows);
+        }
+        catch (Exception ex)
+        {
+            return $"The manual checklist CSV could not be written to {target}: {ex.Message}";
+        }
+
+        var undecided = rows.Count(r => string.IsNullOrWhiteSpace(r.Decision));
+        var sb = new StringBuilder();
+        sb.AppendLine($"Exported {rows.Count} manual checklist item(s) ({undecided} undecided) to:");
+        sb.AppendLine($"  {target}");
+        sb.AppendLine();
+
+        if (generateReport)
+        {
+            var skipped = ManualChecklistCsv.SkipPendingManual(Path.GetFileName(target), resultsDir);
+            Auditor.GenerateReports(runDirectory: resultsDir);
+            sb.AppendLine($"{skipped} undecided manual item(s) were marked Skipped (excluded from scoring) and the five-file report");
+            sb.AppendLine($"suite was regenerated in {resultsDir}.");
+            sb.AppendLine("Give the user the CSV path and ask them to fill the 'Decision' and 'Evidence' columns (leaving 'Checklist ID'");
+            sb.AppendLine("unchanged), then call import_manual_csv with the path to replace the Skipped items with their real decisions.");
+            sb.AppendLine("Do NOT paste the steps into chat; they are in the CSV's 'Manual Steps' column. Do NOT ask for decisions one item at a time.");
+            return sb.ToString();
+        }
+
+        sb.AppendLine("Tell the user to open that CSV and, for each row, enter 'Pass' or 'Fail' in the 'Decision' column and");
+        sb.AppendLine("what they inspected and found in the 'Evidence' column, leaving 'Checklist ID' unchanged. The 'Manual Steps'");
+        sb.AppendLine("column already holds the verification guidance for each item. Then call");
+        sb.AppendLine($"  import_manual_csv(path=\"{target}\")");
+        sb.AppendLine("to apply every decision at once. Rows left blank stay NeedsReview; re-importing an edited CSV overwrites");
+        sb.AppendLine("decisions that were already recorded. Do NOT ask the user for these decisions one item at a time.");
+        sb.AppendLine("To produce a report now without waiting for the filled CSV, call export_manual_csv(generateReport=true), which");
+        sb.AppendLine("marks the undecided items Skipped and regenerates the report suite.");
+        sb.AppendLine();
+        sb.AppendLine("Items exported:");
+        foreach (var row in rows)
+            sb.AppendLine($"- [{row.Id}] {row.Status} - {row.Description}");
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "import_manual_csv")]
+    [Description("Apply the Pass/Fail decisions from a filled manual checklist CSV to the current run. Rows are matched to checklist items by 'Checklist ID', so a row records a new decision or overwrites an existing one; the CSV is the source of truth. Rows whose ID is not a manual item in this run are ignored. Updates checklist_results.json and regenerates the five-file report suite. Use after 'export_manual_csv' once the user has filled the file.")]
+    public static Task<string> ImportManualCsvAsync(
+        [Description("Full path to the filled CSV produced by 'export_manual_csv' (or by the desktop app / CLI).")] string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return Task.FromResult("Error: 'path' is required (the filled manual checklist CSV).");
+        if (!File.Exists(path))
+            return Task.FromResult($"File not found: {path}. Ask the user for the saved location of the filled CSV.");
+
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+        if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            return Task.FromResult("No evaluation results were found. Run 'evaluate' first.");
+
+        ManualCheckImportFile importFile;
+        try
+        {
+            importFile = ManualChecklistCsv.Read(path);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult($"The manual CSV could not be read: {ex.Message}");
+        }
+
+        var auditor = new Auditor(string.Empty);
+        var applied = ManualChecklistCsv.Apply(auditor, importFile.Rows);
+
+        try { ManualChecklistCsv.StoreInRunDirectory(path); }
+        catch { }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Applied {applied.Applied.Count} manual decision(s); outputs regenerated in {resultsDir}.");
+        foreach (var entry in applied.Applied) sb.AppendLine($"  [{entry}]");
+        if (applied.Ignored.Count > 0)
+            sb.AppendLine($"Ignored {applied.Ignored.Count} row(s) that are not manual items in this run: {string.Join(", ", applied.Ignored)}");
+        if (applied.Failed.Count > 0)
+            sb.AppendLine($"Could not update {applied.Failed.Count} row(s): {string.Join(", ", applied.Failed)}");
+        if (importFile.Issues.Count > 0)
+        {
+            sb.AppendLine($"{importFile.Issues.Count} row(s) need correction before they can be applied:");
+            foreach (var issue in importFile.Issues.Take(20)) sb.AppendLine($"  {issue}");
+            if (importFile.Issues.Count > 20) sb.AppendLine($"  ...and {importFile.Issues.Count - 20} more.");
+            sb.AppendLine("Report these to the user so they can correct the CSV and call import_manual_csv again.");
+        }
+
+        if (applied.Applied.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("NEXT: for each applied item call enrich_result(id=\"<id>\", ...) with audit wording you derive from the");
+            sb.AppendLine("reviewer's Evidence text — finding, evidence, riskImpact and recommendation — using only facts they stated.");
+        }
+
+        return Task.FromResult(sb.ToString());
+    }
+
     [McpServerTool(Name = "enrich_result")]
     [Description("Record the audit wording YOU authored for a script-evaluated checklist item, using only the facts the script returned. Sets Finding, Evidence, RiskImpact and Recommendation in checklist_results.json and regenerates the five-file report suite in the current run directory. Outcome, Score, Severity and Databases Verified are script-derived and cannot be changed here, with one exception: when the script result held no supporting artefact at all and your evidence therefore starts with 'Not Applicable.', the item is re-stamped Outcome 'Not Applicable' and excluded from every score. Use after 'evaluate' lists items in its COPILOT ENRICHMENT REQUIRED block.")]
     public static Task<string> EnrichResultAsync(
@@ -1295,27 +1057,6 @@ public static class AuditPrompts
       + "The counts 'evaluate' prints are provisional — Not Applicable is decided during enrichment — so when "
       + "everything is resolved, show the final summary with 'show_reports' and report ITS counts. "
       + "Do not perform the evaluation yourself or duplicate its logic — always use the tools.";
-
-    [McpServerPrompt(Name = "generate_scripts")]
-    [Description("Generate deterministic audit scripts for checklist items using the sql-auditor MCP tools (not evaluation).")]
-    public static string GenerateScripts() =>
-        "Generate audit scripts (do NOT evaluate) using the sql-auditor MCP tools. "
-      + "Ask me which checklist item IDs to generate scripts for — a single ID ('1.1.2'), a list "
-      + "('1.1.2,3.1.1') or an inclusive range ('1.1.1 - 2.1.4') — then call the 'generate_scripts' tool "
-      + "with that value as 'items' and batch=1. "
-      + "This is script generation only — do not call 'evaluate', do not connect to a SQL Server, and do not ask "
-      + "for a server name or credentials. "
-      + "The tool serves ONE BATCH OF 10 ITEMS AT A TIME and defaults to subagent mode: for each batch it returns "
-      + "a dispatch manifest, and you launch one 'sql-script-generator' subagent per item, all in a single message "
-      + "so they run in independent sessions. Each subagent owns its item's whole loop — fetching the prompt, "
-      + "writing the script, running the C1-C7 review, saving, and retrying up to 3 times — and reports one status "
-      + "line back. Do not write the scripts yourself in that mode. Only after every subagent in the batch has "
-      + "returned, call 'generate_scripts' again with the SAME 'items' and the next batch number, until the tool "
-      + "reports the final batch; then call it once more to confirm the recorded outcomes. "
-      + "If subagents cannot be launched, re-request the same batch with mode=\"inline\" and generate the scripts "
-      + "yourself, following the generator system prompt the tool returns. "
-      + "Scripts and mapping entries for IDs that already have one are overwritten, so never skip an item because "
-      + "a script already exists.";
 
     [McpServerPrompt(Name = "configure_checklist")]
     [Description("Add a custom checklist item under an existing Area/Sub-area using the sql-auditor MCP tools (not evaluation).")]

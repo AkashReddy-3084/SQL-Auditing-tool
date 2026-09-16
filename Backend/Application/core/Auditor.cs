@@ -152,12 +152,14 @@ namespace SQLAuditor.Lib
         /// <summary>Run directory created by the most recent run on this instance.</summary>
         public string? RunDirectory { get; private set; }
 
-        // A multi-server batch pre-creates the run directory and enters its scope; a standalone
-        // run creates its own.
-        private string BeginRunDirectory()
+        // A multi-server batch pre-creates the run directory and enters its scope; a rerun/edit
+        // reuses the already-resumed directory so reports overwrite the same timestamp folder;
+        // a standalone run creates its own.
+        private string BeginRunDirectory(bool reuseActiveRunDirectory = false)
         {
-            var directory = AuditOutputPaths.AmbientRunDirectory
-                ?? AuditOutputPaths.BeginRun(_connectionString);
+            var directory = reuseActiveRunDirectory
+                ? AuditOutputPaths.CurrentRunDirectory
+                : AuditOutputPaths.AmbientRunDirectory ?? AuditOutputPaths.BeginRun(_connectionString);
             RunDirectory = directory;
             return directory;
         }
@@ -803,53 +805,6 @@ WHERE d.name = DB_NAME();";
             else Console.WriteLine("Mapping file not found.");
         }
 
-        // Save a generated script and update deterministic-script-mapping.json to track it.
-        // IMPORTANT: This API is reserved for the UI "Generate Scripts" operator action only.
-        // The Generate Scripts button in the checklist UI is currently disabled; do NOT call
-        // this method from any automated runtime paths. Keep this method as the single
-        // intentional writer for scripts under Backend/checklists/Scripts/sql and for the
-        // deterministic mapping. Any other code that modifies files under scripts/sql
-        // must be removed or refactored to call this method only via the operator-driven UI.
-        // This method intentionally performs file writes (script + mapping) and is best
-        // executed only with operator consent.
-        // This method is currently retained but the UI button that invokes it is disabled/commented.
-        public async Task<string> SaveGeneratedScriptAsync(string checklistId, string scriptText, string? suggestedFileName = null)
-        {
-            var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-            var scriptsDir = Path.Combine(repoRoot, "Backend", "checklists", "Scripts", "sql");
-            Directory.CreateDirectory(scriptsDir);
-            var safeId = System.Text.RegularExpressions.Regex.Replace(checklistId ?? "unknown", "[^a-zA-Z0-9_.-]", "_");
-            var fileName = string.IsNullOrWhiteSpace(suggestedFileName)? $"{safeId}.sql" : suggestedFileName;
-            var fullPath = Path.Combine(scriptsDir, fileName);
-            await File.WriteAllTextAsync(fullPath, scriptText ?? string.Empty);
-
-            // Update deterministic mapping
-            try
-            {
-                var mapPath = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
-                var mappingDict = new System.Collections.Generic.Dictionary<string, JsonElement>();
-                if (File.Exists(mapPath))
-                {
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(File.ReadAllText(mapPath));
-                        foreach (var prop in doc.RootElement.EnumerateObject())
-                            mappingDict[prop.Name] = prop.Value.Clone();
-                    }
-                    catch { mappingDict = new(); }
-                }
-
-                var rel = Path.Combine("Backend", "checklists", "Scripts", "sql", fileName).Replace(Path.DirectorySeparatorChar, '/');
-                var scope = GetDeclaredScriptScope(scriptText);
-                var newEntry = JsonSerializer.SerializeToElement(new { script_file = rel, scope, IsAdminCheck = false, IsDocumentationCheck = false, MCP_Feasibility = true });
-                mappingDict[checklistId] = newEntry;
-                await File.WriteAllTextAsync(mapPath, JsonSerializer.Serialize(mappingDict, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch { /* best-effort only */ }
-
-            return fullPath;
-        }
-
         /// <param name="useHistoricalManualResults">
         /// When true, manual/AI-Manual items that already have a completed result in
         /// results/historical_last_run.json are copied forward and skip manual-step generation and
@@ -941,13 +896,7 @@ WHERE d.name = DB_NAME();";
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
             var runStartedAt = DateTime.Now;
-            // Rerun/edit reuses the already-resumed run directory so reports overwrite the same
-            // timestamp folder; otherwise BeginRunDirectory joins a multi-server batch's ambient
-            // directory or creates a fresh one.
-            var resultsDir = reuseActiveRunDirectory
-                ? AuditOutputPaths.CurrentRunDirectory
-                : BeginRunDirectory();
-            RunDirectory = resultsDir;
+            var resultsDir = BeginRunDirectory(reuseActiveRunDirectory);
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
@@ -1975,16 +1924,8 @@ WHERE d.name = DB_NAME();";
         // supply Finding/Evidence/RiskImpact/Recommendation in the flows where this engine
         // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
         // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
-        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation)
-            => ApplyEnrichment(id, finding, evidence, riskImpact, recommendation, out _);
-
-        // <paramref name="markedNotApplicable"/> reports whether this enrichment moved the
-        // item to Outcome Not Applicable. It is always false now that Not Applicable is settled
-        // deterministically upstream; the parameter stays so multi-server callers keep compiling.
-        // <paramref name="runDirectory"/> targets one server's directory during a fleet run.
-        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, out bool markedNotApplicable, string? runDirectory = null)
+        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, string? runDirectory = null)
         {
-            markedNotApplicable = false;
             if (string.IsNullOrWhiteSpace(id)) return false;
             if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
                 && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
@@ -2306,6 +2247,12 @@ WHERE d.name = DB_NAME();";
 
         private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, bool isDocumentationCheck = false, System.Threading.CancellationToken cancellationToken = default)
         {
+            if (ManualMigrationStepsStore.TryGet(item.Id, out var storedSteps))
+            {
+                LogDiagnostic($"Reused stored manual migration steps for {item.Id}; skipped LLM generation.");
+                return new ManualStepsGenerationResult(storedSteps, storedSteps, 0);
+            }
+
             try
             {
                 if (_manualStepsGenerator != null)
@@ -2313,6 +2260,7 @@ WHERE d.name = DB_NAME();";
                     var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, isDocumentationCheck, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
+                        ManualMigrationStepsStore.Store(item.Id, slm.Instructions);
                         return slm;
                     }
 
@@ -2333,6 +2281,7 @@ WHERE d.name = DB_NAME();";
             {
                 fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
             }
+            ManualMigrationStepsStore.Store(item.Id, fallback);
             return new ManualStepsGenerationResult(fallback, fallback, 0);
         }
 

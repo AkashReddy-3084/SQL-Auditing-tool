@@ -44,24 +44,23 @@ namespace SQLAuditor
                 return await RunEvidenceCommandAsync(args);
             }
 
+            // Export every manual checklist item, with its verification steps, to the shared CSV
+            // so the reviewer can decide them offline - the same workflow as the desktop app.
+            if (args.Length > 0 && string.Equals(args[0], "export_manual_csv", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunExportManualCsvCommandAsync(args);
+            }
+
+            // Apply the Pass/Fail decisions from a filled manual CSV back onto the current run.
+            if (args.Length > 0 && string.Equals(args[0], "import_manual_csv", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunImportManualCsvCommand(args);
+            }
+
             // Record Copilot-authored audit wording for a script-evaluated item.
             if (args.Length > 0 && string.Equals(args[0], "enrich_result", StringComparison.OrdinalIgnoreCase))
             {
                 return RunEnrichResultCommand(args);
-            }
-
-            // Generate deterministic audit scripts for checklist items (NOT evaluation).
-            // Copilot CLI is the AI: this surfaces the generator prompt so Copilot can author
-            // each script, then 'save_generated_script' validates and saves it.
-            if (args.Length > 0 && string.Equals(args[0], "generate_scripts", StringComparison.OrdinalIgnoreCase))
-            {
-                return await RunGenerateScriptsCommandAsync(args);
-            }
-
-            // Save one Copilot-generated script for a checklist item (used after generate_scripts).
-            if (args.Length > 0 && string.Equals(args[0], "save_generated_script", StringComparison.OrdinalIgnoreCase))
-            {
-                return await RunSaveGeneratedScriptCommandAsync(args);
             }
 
             // Add a CUSTOM checklist item under an existing Area/Sub-area (NOT evaluation).
@@ -769,59 +768,40 @@ namespace SQLAuditor
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
 
-            // Optional: let the operator mark manual-review items as pass/fail inline.
-            // Enabled explicitly with --interactive, or automatically when running in a
-            // real terminal (stdin not redirected) so a hands-on session is always asked.
-            // Scripted/CI runs (redirected stdin) stay non-blocking unless --interactive.
+            // Manual items are decided through the shared CSV workflow, exactly as the desktop app
+            // does: every manual item and its verification steps are exported in one file, the
+            // reviewer fills Decision/Evidence offline, and 'import_manual_csv' applies the lot.
             bool interactive = !copilotMode
                 && (opts.ContainsKey("interactive") || opts.ContainsKey("i") || !Console.IsInputRedirected);
             if (interactive && !cts.IsCancellationRequested)
             {
-                var manualPending = results
-                    .Where(r => string.Equals(r.Outcome, "NeedsReview", StringComparison.OrdinalIgnoreCase)
-                             && (r.Technique?.Contains("Manual", StringComparison.OrdinalIgnoreCase) ?? false))
-                    .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                if (manualPending.Count > 0)
+                var manualAuditor = new SQLAuditor.Lib.Auditor(string.Empty);
+                var manualRows = await SQLAuditor.Lib.ManualChecklistCsv.BuildExportRowsAsync(manualAuditor);
+                if (manualRows.Count > 0)
                 {
-                    Console.WriteLine();
-                    Console.WriteLine($"{manualPending.Count} item(s) need manual review. Mark each as pass/fail/not-applicable, or skip to keep NeedsReview.");
-                    Console.WriteLine("(Manual verification steps are listed above.)");
-                    var updated = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var r in manualPending)
+                    var csvPath = Path.Combine(
+                        SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory,
+                        SQLAuditor.Lib.ManualChecklistCsv.BuildExportFileName(DateTime.Now));
+                    try
+                    {
+                        SQLAuditor.Lib.ManualChecklistCsv.Write(csvPath, manualRows);
+                        var undecided = manualRows.Count(r => string.IsNullOrWhiteSpace(r.Decision));
+                        Console.WriteLine();
+                        Console.WriteLine($"{manualRows.Count} manual checklist item(s) ({undecided} undecided) were exported for offline review:");
+                        Console.WriteLine($"  {csvPath}");
+                        Console.WriteLine("Fill the 'Decision' column with Pass or Fail and the 'Evidence' column with what you");
+                        Console.WriteLine("inspected and found, leaving 'Checklist ID' unchanged, then apply the decisions with:");
+                        Console.WriteLine($"  sqlauditor import_manual_csv --file \"{csvPath}\"");
+                        Console.WriteLine("Items left undecided stay NeedsReview. Re-importing an edited CSV overwrites earlier decisions.");
+                        Console.WriteLine("To produce a report now without waiting for the filled CSV, run 'sqlauditor export_manual_csv --generate',");
+                        Console.WriteLine("which marks the undecided manual items Skipped and regenerates the report suite.");
+                    }
+                    catch (Exception ex)
                     {
                         Console.WriteLine();
-                        Console.WriteLine($"--- {r.Id}: {r.Description} ---");
-                        var ans = Prompt("Mark item (p=Pass, f=Fail, na=Not Applicable, s=Skip) [s]:").Trim().ToLowerInvariant();
-                        string decision = ans switch
-                        {
-                            "p" or "pass" => "Pass",
-                            "f" or "fail" => "Fail",
-                            "na" or "n/a" or "notapplicable" or "not applicable" => SQLAuditor.Lib.NotApplicableEvidence.Outcome,
-                            _ => string.Empty
-                        };
-                        if (decision.Length == 0)
-                        {
-                            Console.WriteLine("Skipped (kept NeedsReview).");
-                            continue;
-                        }
-                        var notes = Prompt("Optional notes (Enter to skip):");
-                        if (auditor.ResolveReview(r.Id, decision, notes, out var newOutcome))
-                        {
-                            updated[r.Id] = newOutcome;
-                            Console.WriteLine($"  [{r.Id}] -> {newOutcome}");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"  Could not update {r.Id}.");
-                        }
+                        Console.WriteLine("The manual checklist CSV could not be exported: " + ex.Message);
+                        Console.WriteLine("Run 'sqlauditor export_manual_csv' to try again.");
                     }
-
-                    // Reflect the operator's decisions in the in-memory results so the
-                    // summary and exit code below match the persisted report.
-                    if (updated.Count > 0)
-                        results = results.Select(r => updated.TryGetValue(r.Id, out var o) ? r with { Outcome = o } : r).ToArray();
                 }
             }
 
@@ -1453,6 +1433,138 @@ namespace SQLAuditor
         }
 
         // ---------------------------------------------------------------------
+        // Non-interactive CLI: `export_manual_csv` / `import_manual_csv` subcommands
+        // The manual review workflow is CSV-based on every surface. Both commands go
+        // through SQLAuditor.Lib.ManualChecklistCsv, the same component the desktop app
+        // and the IDE (MCP) host use, so the three produce and consume one CSV contract.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunExportManualCsvCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor export_manual_csv [--out <path>] [--generate]");
+                Console.WriteLine("       Exports every manual checklist item of the current run, with its verification steps,");
+                Console.WriteLine("       to a CSV. Fill the Decision (Pass/Fail) and Evidence columns, then apply it with");
+                Console.WriteLine("       'sqlauditor import_manual_csv --file <path>'.");
+                Console.WriteLine("       --generate: also mark every still-undecided manual item as Skipped (excluded from");
+                Console.WriteLine("       scoring) and regenerate the report suite now, so a report is available before the");
+                Console.WriteLine("       filled CSV is imported. Importing the CSV later overwrites those Skipped items.");
+                return 0;
+            }
+
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
+            if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            {
+                Console.Error.WriteLine("Error: no evaluation results were found. Run 'sqlauditor evaluate' first.");
+                return 2;
+            }
+
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            var rows = await SQLAuditor.Lib.ManualChecklistCsv.BuildExportRowsAsync(auditor);
+            if (rows.Count == 0)
+            {
+                Console.WriteLine("The current evaluation contains no manual checklist items to export.");
+                return 0;
+            }
+
+            var outPath = GetOption(opts, "out");
+            if (string.IsNullOrWhiteSpace(outPath))
+                outPath = Path.Combine(resultsDir, SQLAuditor.Lib.ManualChecklistCsv.BuildExportFileName(DateTime.Now));
+            outPath = Path.GetFullPath(outPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+
+            SQLAuditor.Lib.ManualChecklistCsv.Write(outPath, rows);
+
+            var pending = rows.Count(r => string.IsNullOrWhiteSpace(r.Decision));
+            Console.WriteLine($"Exported {rows.Count} manual checklist item(s) ({pending} still undecided) to:");
+            Console.WriteLine($"  {outPath}");
+
+            if (opts.ContainsKey("generate") || opts.ContainsKey("g"))
+            {
+                var skipped = SQLAuditor.Lib.ManualChecklistCsv.SkipPendingManual(Path.GetFileName(outPath), resultsDir);
+                SQLAuditor.Lib.Auditor.GenerateReports(runDirectory: resultsDir);
+                Console.WriteLine();
+                Console.WriteLine($"{skipped} undecided manual item(s) were marked Skipped and excluded from scoring; the report suite was regenerated in:");
+                Console.WriteLine($"  {resultsDir}");
+                Console.WriteLine("Fill the CSV and run 'sqlauditor import_manual_csv --file ...' to replace the Skipped items with real decisions.");
+                return 0;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Fill the 'Decision' column with Pass or Fail and the 'Evidence' column with what you inspected");
+            Console.WriteLine("and found. Rows are matched back by 'Checklist ID', so keep that column unchanged. Then run:");
+            Console.WriteLine($"  sqlauditor import_manual_csv --file \"{outPath}\"");
+            Console.WriteLine("Or run 'sqlauditor export_manual_csv --generate' to skip undecided items and generate a report now.");
+            return 0;
+        }
+
+        static int RunImportManualCsvCommand(string[] args)
+        {
+            var opts = ParseOptions(args);
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                Console.WriteLine("Usage: sqlauditor import_manual_csv --file <path>");
+                Console.WriteLine("       Applies the Pass/Fail decisions from a filled manual CSV to the current run,");
+                Console.WriteLine("       matching rows to checklist items by 'Checklist ID'. Items that already carry a");
+                Console.WriteLine("       decision are overwritten, so the CSV is always the source of truth.");
+                return 0;
+            }
+
+            var file = GetOption(opts, "file") ?? GetOption(opts, "csv") ?? GetOption(opts, "in");
+            if (string.IsNullOrWhiteSpace(file))
+            {
+                Console.Error.WriteLine("Error: --file is required (the filled manual CSV).");
+                return 2;
+            }
+            if (!File.Exists(file))
+            {
+                Console.Error.WriteLine($"Error: file not found: {file}");
+                return 2;
+            }
+
+            var resultsDir = SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory;
+            if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            {
+                Console.Error.WriteLine("Error: no evaluation results were found. Run 'sqlauditor evaluate' first.");
+                return 2;
+            }
+
+            SQLAuditor.Lib.ManualCheckImportFile importFile;
+            try
+            {
+                importFile = SQLAuditor.Lib.ManualChecklistCsv.Read(file);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Error: the manual CSV could not be read. " + ex.Message);
+                return 2;
+            }
+
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            var applied = SQLAuditor.Lib.ManualChecklistCsv.Apply(auditor, importFile.Rows);
+
+            try { SQLAuditor.Lib.ManualChecklistCsv.StoreInRunDirectory(file); }
+            catch (Exception ex) { Console.WriteLine("Note: the CSV could not be stored in the run folder. " + ex.Message); }
+
+            Console.WriteLine($"Applied {applied.Applied.Count} manual decision(s) to {resultsDir}.");
+            foreach (var entry in applied.Applied) Console.WriteLine($"  [{entry}]");
+            if (applied.Ignored.Count > 0)
+                Console.WriteLine($"Ignored {applied.Ignored.Count} row(s) that are not manual items in this run: {string.Join(", ", applied.Ignored)}");
+            if (applied.Failed.Count > 0)
+                Console.WriteLine($"Could not update {applied.Failed.Count} row(s): {string.Join(", ", applied.Failed)}");
+            if (importFile.Issues.Count > 0)
+            {
+                Console.WriteLine($"{importFile.Issues.Count} row(s) need correction in the CSV:");
+                foreach (var issue in importFile.Issues.Take(20)) Console.WriteLine($"  {issue}");
+                if (importFile.Issues.Count > 20) Console.WriteLine($"  ...and {importFile.Issues.Count - 20} more.");
+            }
+
+            Console.WriteLine("Reports were regenerated for every applied decision.");
+            return applied.Applied.Count > 0 || importFile.Rows.Count == 0 ? 0 : 2;
+        }
+
+        // ---------------------------------------------------------------------
         // Non-interactive CLI: `enrich_result` subcommand
         // Writes the audit wording Copilot authored for a script-evaluated item into
         // results/checklist_results.json and regenerates the report. Outcome, Score,
@@ -1491,136 +1603,6 @@ namespace SQLAuditor
 
             Console.Error.WriteLine($"Could not enrich '{id}'. Ensure 'evaluate' has run (results file exists), the ID is present, and at least one field was supplied.");
             return 2;
-        }
-
-        // ---------------------------------------------------------------------
-        // Non-interactive CLI: `generate_scripts` subcommand
-        // Copilot CLI is the AI: this prints the generator system prompt plus a per-item
-        // request so Copilot can author each read-only script, then save it with
-        // `save_generated_script`. It never calls an LLM and needs no SQL Server.
-        // ---------------------------------------------------------------------
-        static async Task<int> RunGenerateScriptsCommandAsync(string[] args)
-        {
-            var opts = ParseOptions(args);
-            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
-            {
-                Console.WriteLine("Usage: sqlauditor generate_scripts --items <ids>");
-                Console.WriteLine("  Example: sqlauditor generate_scripts --items 1.1.2,3.1.1");
-                return 0;
-            }
-
-            var itemsCsv = GetOption(opts, "items");
-            if (string.IsNullOrWhiteSpace(itemsCsv))
-            {
-                Console.Error.WriteLine("Error: --items is required (comma-separated checklist IDs, e.g. 1.1.2,3.1.1).");
-                return 2;
-            }
-
-            var ids = itemsCsv
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            try
-            {
-                var (checklistItems, unknown) = await SQLAuditor.Lib.ScriptGenerationSkill.LoadItemsAsync(ids);
-                if (checklistItems.Count == 0)
-                {
-                    Console.Error.WriteLine("Error: none of the requested checklist IDs exist. Unknown: " + string.Join(", ", unknown));
-                    return 2;
-                }
-
-                var text = SQLAuditor.Lib.ScriptGenerationSkill.BuildGenerationInstructions(
-                    checklistItems,
-                    unknown,
-                    "run: sqlauditor save_generated_script --id <id> --response-file <path-to-raw-response-file>");
-                Console.WriteLine(text);
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error: {ex.Message}");
-                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
-                return 3;
-            }
-        }
-
-        // ---------------------------------------------------------------------
-        // Non-interactive CLI: `save_generated_script` subcommand
-        // Validates and saves one Copilot-generated script (used after generate_scripts).
-        // The raw response can be supplied via --response-file <path> (preferred for large
-        // scripts) or inline via --response "<text>". Called without a verdict it returns the
-        // standard C1-C7 validation prompt; pass the review back via --validation-file/--validation.
-        // ---------------------------------------------------------------------
-        static async Task<int> RunSaveGeneratedScriptCommandAsync(string[] args)
-        {
-            var opts = ParseOptions(args);
-            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
-            {
-                Console.WriteLine("Usage: sqlauditor save_generated_script --id <id> (--response-file <path> | --response \"<raw response>\")");
-                Console.WriteLine("                                       [--validation-file <path> | --validation \"<verdict>\"]");
-                Console.WriteLine("  Without a verdict it prints the C1-C7 validation prompt and saves nothing.");
-                return 0;
-            }
-
-            var id = GetOption(opts, "id");
-            if (string.IsNullOrWhiteSpace(id))
-            {
-                Console.Error.WriteLine("Error: --id is required.");
-                return 2;
-            }
-
-            var response = GetOption(opts, "response");
-            var responseFile = GetOption(opts, "response-file") ?? GetOption(opts, "responsefile");
-            if (string.IsNullOrWhiteSpace(response) && !string.IsNullOrWhiteSpace(responseFile))
-            {
-                if (!File.Exists(responseFile))
-                {
-                    Console.Error.WriteLine($"Error: --response-file not found: {responseFile}");
-                    return 2;
-                }
-                response = await File.ReadAllTextAsync(responseFile);
-            }
-
-            if (string.IsNullOrWhiteSpace(response))
-            {
-                Console.Error.WriteLine("Error: supply the generated script via --response-file <path> or --response \"<text>\".");
-                return 2;
-            }
-
-            var verdict = GetOption(opts, "validation");
-            var verdictFile = GetOption(opts, "validation-file") ?? GetOption(opts, "validationfile");
-            if (string.IsNullOrWhiteSpace(verdict) && !string.IsNullOrWhiteSpace(verdictFile))
-            {
-                if (!File.Exists(verdictFile))
-                {
-                    Console.Error.WriteLine($"Error: --validation-file not found: {verdictFile}");
-                    return 2;
-                }
-                verdict = await File.ReadAllTextAsync(verdictFile);
-            }
-
-            try
-            {
-                var result = await SQLAuditor.Lib.ScriptGenerationSkill.SaveGeneratedScriptAsync(
-                    id,
-                    response,
-                    verdict,
-                    "run: sqlauditor save_generated_script --id <id> --response-file <path> --validation-file <path-to-verdict-file>");
-                Console.WriteLine(result);
-                // A validation failure is surfaced to Copilot as a non-zero exit so it retries.
-                return result.StartsWith("VALIDATION FAILED", StringComparison.OrdinalIgnoreCase)
-                    || result.StartsWith("VALIDATION REJECTED", StringComparison.OrdinalIgnoreCase)
-                    || result.StartsWith("VALIDATION VERDICT NOT RECOGNISED", StringComparison.OrdinalIgnoreCase)
-                    || result.StartsWith("CORRECTED SCRIPT STILL INVALID", StringComparison.OrdinalIgnoreCase)
-                    || result.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error: {ex.Message}");
-                Console.Error.WriteLine("Hint: run this command from the 'SQL-Auditing-tool' folder so the checklist can be located.");
-                return 3;
-            }
         }
 
         // ---------------------------------------------------------------------

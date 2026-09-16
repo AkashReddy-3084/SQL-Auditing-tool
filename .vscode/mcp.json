@@ -8,9 +8,6 @@
   // VS Code, so it never lives in this file, in chat, in source, in logs, or in
   // result files:
   //   $env:SQLAUDITOR_SQL_PASSWORD = '...'   # SQL Authentication only
-  //   $env:PROVIDER_BASE_URL = '...'         # 'generate_scripts' only:
-  //   $env:MODEL             = '...'         #   it runs the ScriptGeneratorAgent
-  //   $env:PROVIDER_API_KEY  = '...'         #   pipeline against your provider
   // Then start VS Code from that same session (`code .`).
   // Reload/Restart the server from the MCP view after editing this file.
   "servers": {

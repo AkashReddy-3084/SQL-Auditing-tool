@@ -50,41 +50,13 @@ namespace SQLAuditor.Wpf
             public string? EnrichedKey { get; set; }
         }
 
-        private sealed class ManualCheckExportRow
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Area { get; init; } = string.Empty;
-            public string Description { get; init; } = string.Empty;
-            public string Verification { get; init; } = string.Empty;
-            public string ManualSteps { get; init; } = string.Empty;
-            public string Status { get; init; } = string.Empty;
-            public string Decision { get; init; } = string.Empty;
-            public string Evidence { get; init; } = string.Empty;
-        }
-
-        private sealed class ManualCheckImportRow
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Decision { get; init; } = string.Empty;
-            public string Evidence { get; init; } = string.Empty;
-            public string ManualSteps { get; init; } = string.Empty;
-        }
-
-        private sealed class ManualCheckImportFile
-        {
-            public System.Collections.Generic.List<ManualCheckImportRow> Rows { get; } = new();
-            public System.Collections.Generic.List<string> Issues { get; } = new();
-        }
-
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
         private long _progressStreamPos = 0;
         private bool _isVerified = false;
         private bool _isLlmVerified = false;
         private Auditor? _auditor;
         private System.Threading.CancellationTokenSource? _evaluationCts;
-        private System.Threading.CancellationTokenSource? _scriptGenerationCts;
         private bool _isEvaluating = false;
-        private bool _isGeneratingScripts = false;
         private bool _allowTabChange = false;
         private System.Threading.Tasks.TaskCompletionSource<string?>? _pendingUserInput;
         private System.Collections.Generic.List<SQLAuditor.Lib.ChecklistItem>? _loadedItems;
@@ -222,8 +194,6 @@ namespace SQLAuditor.Wpf
                                 if (mb == MessageBoxResult.No)
                                 {
                                     Log("Generation cancelled by user due to agent unavailability.");
-                                    // Keep Generate Scripts disabled while feature is inactive
-                                    GenerateScriptsBtn.IsEnabled = false;
                                     return;
                                 }
                             else
@@ -575,7 +545,6 @@ namespace SQLAuditor.Wpf
                 // mark that user has explicitly loaded the checklist so UI actions become available
                 _checklistLoaded = true;
                 StartEvalBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
-                GenerateScriptsBtn.IsEnabled = (_loadedItems != null && _loadedItems.Count > 0);
                 Log("Checklist loaded.");
             }
             catch (Exception ex)
@@ -1759,128 +1728,6 @@ namespace SQLAuditor.Wpf
             return unresolved;
         }
 
-        private static void WriteManualChecksCsv(string path, System.Collections.Generic.IEnumerable<ManualCheckExportRow> rows)
-        {
-            var csv = new System.Text.StringBuilder();
-            csv.AppendLine(string.Join(",", new[]
-            {
-                "Checklist ID", "Area", "Description", "Verification", "Manual Steps",
-                "Current Status", "Decision", "Evidence",
-            }.Select(ToCsvField)));
-
-            foreach (var row in rows)
-            {
-                csv.AppendLine(string.Join(",", new[]
-                {
-                    row.Id, row.Area, row.Description, row.Verification, row.ManualSteps,
-                    row.Status, row.Decision, row.Evidence,
-                }.Select(ToCsvField)));
-            }
-
-            System.IO.File.WriteAllText(path, csv.ToString(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        }
-
-        private static string ToCsvField(string? value) =>
-            $"\"{(value ?? string.Empty).Replace("\"", "\"\"")}\"";
-
-        private static ManualCheckImportFile ReadManualChecksCsv(string path)
-        {
-            var result = new ManualCheckImportFile();
-            using var parser = new Microsoft.VisualBasic.FileIO.TextFieldParser(path, System.Text.Encoding.UTF8)
-            {
-                TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited,
-                HasFieldsEnclosedInQuotes = true,
-                TrimWhiteSpace = false,
-            };
-            parser.SetDelimiters(",");
-
-            var headers = parser.ReadFields();
-            if (headers == null || headers.Length == 0)
-                throw new InvalidDataException("The CSV is empty or has no header row.");
-
-            var headerIndexes = headers
-                .Select((header, index) => new { Header = (header ?? string.Empty).Trim().TrimStart('\uFEFF'), Index = index })
-                .GroupBy(entry => entry.Header, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(group => group.Key, group => group.First().Index, StringComparer.OrdinalIgnoreCase);
-
-            var requiredHeaders = new[] { "Checklist ID", "Decision", "Evidence" };
-            var missingHeaders = requiredHeaders.Where(header => !headerIndexes.ContainsKey(header)).ToArray();
-            if (missingHeaders.Length > 0)
-                throw new InvalidDataException("Missing required CSV column(s): " + string.Join(", ", missingHeaders));
-
-            var seenIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            while (!parser.EndOfData)
-            {
-                var lineNumber = parser.LineNumber;
-                string[]? fields;
-                try
-                {
-                    fields = parser.ReadFields();
-                }
-                catch (Microsoft.VisualBasic.FileIO.MalformedLineException ex)
-                {
-                    result.Issues.Add($"Line {lineNumber}: malformed CSV ({ex.Message}).");
-                    continue;
-                }
-
-                if (fields == null || fields.All(string.IsNullOrWhiteSpace)) continue;
-
-                string Field(string header)
-                {
-                    if (!headerIndexes.TryGetValue(header, out var index) || index >= fields.Length) return string.Empty;
-                    return fields[index]?.Trim() ?? string.Empty;
-                }
-
-                var id = Field("Checklist ID");
-                if (string.IsNullOrWhiteSpace(id))
-                {
-                    result.Issues.Add($"Line {lineNumber}: Checklist ID is empty.");
-                    continue;
-                }
-
-                if (!seenIds.Add(id))
-                {
-                    result.Issues.Add($"Line {lineNumber}: duplicate Checklist ID '{id}'.");
-                    continue;
-                }
-
-                var decision = Field("Decision").ToLowerInvariant() switch
-                {
-                    "pass" or "passed" or "p" => "Pass",
-                    "fail" or "failed" or "f" => "Fail",
-                    "" => string.Empty,
-                    _ => "Invalid",
-                };
-                if (decision.Length == 0)
-                {
-                    result.Issues.Add($"{id}: Decision is empty; enter Pass or Fail.");
-                    continue;
-                }
-                if (decision == "Invalid")
-                {
-                    result.Issues.Add($"{id}: Decision must be Pass or Fail.");
-                    continue;
-                }
-
-                var evidence = Field("Evidence");
-                if (string.IsNullOrWhiteSpace(evidence))
-                {
-                    result.Issues.Add($"{id}: Evidence is empty.");
-                    continue;
-                }
-
-                result.Rows.Add(new ManualCheckImportRow
-                {
-                    Id = id,
-                    Decision = decision,
-                    Evidence = evidence,
-                    ManualSteps = Field("Manual Steps"),
-                });
-            }
-
-            return result;
-        }
-
         private async Task<(int Applied, int Ignored)> ApplyImportedManualChecksAsync(
             System.Collections.Generic.IEnumerable<ManualCheckImportRow> importedRows)
         {
@@ -2730,7 +2577,7 @@ namespace SQLAuditor.Wpf
 
         private bool HasActiveOperationInProgress()
         {
-            return _isEvaluating || _isGeneratingScripts;
+            return _isEvaluating;
         }
 
         private void ResetChecklistSessionStateForExit()
@@ -2772,8 +2619,6 @@ namespace SQLAuditor.Wpf
             }
 
             CancelActiveEvaluationIfNeeded();
-            _scriptGenerationCts?.Cancel();
-            _isGeneratingScripts = false;
 
             if (MainTabs.SelectedIndex == 1)
             {
@@ -2858,6 +2703,20 @@ namespace SQLAuditor.Wpf
             FqdnText.IsEnabled = !locked;
             AuthMethodCombo.IsEnabled = !locked;
             SqlUserBox.IsEnabled = !locked;
+
+            // A rerun/edit targets one historical run folder, so a fleet run is not available
+            // while it is armed.
+            if (locked && MultiServerToggle.IsChecked == true)
+            {
+                _suppressMultiServerToggle = true;
+                MultiServerToggle.IsChecked = false;
+                _suppressMultiServerToggle = false;
+                _servers.Clear();
+                ServerListSection.Visibility = Visibility.Collapsed;
+                ServersRow.Height = GridLength.Auto;
+                Log("Multi-server mode turned off: rerun/edit applies to the single server of the stored run.");
+            }
+            MultiServerToggle.IsEnabled = !locked;
         }
 
         // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
@@ -3779,146 +3638,6 @@ namespace SQLAuditor.Wpf
             }
         }
 
-        private async void GenerateScriptsBtn_Click(object sender, RoutedEventArgs e)
-        {
-            GenerateScriptsBtn.IsEnabled = false;
-            _isGeneratingScripts = true;
-            _scriptGenerationCts = new System.Threading.CancellationTokenSource();
-
-            try
-            {
-                // Resolve the Backend base path (the ScriptGeneratorAgent expects it)
-                var repoRoot = FindRepoRootFromCwd();
-                if (repoRoot == null)
-                {
-                    MessageBox.Show(this, "Cannot locate the repository root (Backend/checklists not found).", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-                var basePath = System.IO.Path.Combine(repoRoot, "Backend");
-
-                // Use the same LLM provider config as the rest of the app
-                string llmBaseUrl, llmApiKey, llmModel;
-                int llmTimeout;
-                try
-                {
-                    llmBaseUrl = ProviderConfig.BaseUrl;
-                    llmApiKey = ProviderConfig.ApiKey;
-                    llmModel = ProviderConfig.Model;
-                    llmTimeout = (int)ProviderConfig.Timeout.TotalSeconds;
-                }
-                catch (Exception exCfg)
-                {
-                    MessageBox.Show(this, $"LLM configuration error: {exCfg.Message}\n\nEnsure .env is configured.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                var promptsDir = System.IO.Path.Combine(basePath, "agents", "prompts");
-                if (!System.IO.Directory.Exists(promptsDir))
-                {
-                    MessageBox.Show(this, $"Prompts directory not found: {promptsDir}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                // Gather selected checklist items and convert to ScriptGenChecklistItem
-                var selectedItems = new System.Collections.Generic.List<SQLAuditor.Agents.ScriptGenChecklistItem>();
-                if (_loadedStructure != null && _selectedIds != null && _selectedIds.Count > 0)
-                {
-                    foreach (var id in _selectedIds)
-                    {
-                        var match = _loadedStructure.FirstOrDefault(x => x.Item.Id == id);
-                        if (match.Item != null)
-                        {
-                            selectedItems.Add(new SQLAuditor.Agents.ScriptGenChecklistItem
-                            {
-                                ChecklistId = match.Item.Id,
-                                Category = match.Item.Category ?? "",
-                                CheckName = match.Item.Description,
-                                Scope = "",
-                                Description = match.Item.Description,
-                                ExpectedOutcome = match.Item.Description
-                            });
-                        }
-                    }
-                }
-
-                if (selectedItems.Count == 0)
-                {
-                    MessageBox.Show(this, "No checklist items selected. Please select items first.", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
-
-                var confirm = MessageBox.Show(this,
-                    $"Generate scripts for {selectedItems.Count} selected checklist item(s)?\n\nThis will call the configured LLM to create T-SQL/PowerShell audit scripts.",
-                    "Generate Scripts", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (confirm != MessageBoxResult.Yes) return;
-
-                Log($"Starting script generation for {selectedItems.Count} items...");
-
-                var llmTimeoutCopy = llmTimeout;
-                var llmBaseUrlCopy = llmBaseUrl;
-                var llmApiKeyCopy = llmApiKey;
-                var llmModelCopy = llmModel;
-                var basePathCopy = basePath;
-
-                var progressWindow = new ScriptGenerationProgressWindow(selectedItems.Count);
-                progressWindow.Owner = this;
-
-                progressWindow.RunGeneration(async (progress, ct) =>
-                {
-                    var processor = new SQLAuditor.Agents.ChecklistItemProcessor(
-                        llmBaseUrlCopy, llmApiKeyCopy, llmModelCopy, promptsDir, llmTimeoutCopy, maxRetries: 3);
-                    var validator = new SQLAuditor.Agents.ScriptOutputValidator();
-                    var agent = new SQLAuditor.Agents.ScriptGeneratorAgent(processor, validator, basePathCopy);
-
-                    return await agent.RunAsync(progress, selectedItems, ct);
-                });
-
-                progressWindow.ShowDialog();
-
-                var result = progressWindow.Result;
-                if (result != null)
-                {
-                    Log($"Script generation complete — Generated: {result.Generated.Count}, Skipped: {result.Skipped.Count}, Failed: {result.Failed.Count}");
-
-                    if (result.Skipped.Count > 0)
-                    {
-                        var skippedMsg = string.Join("\n", result.Skipped.Select(s => $"  {s.ChecklistId}: {s.Reason}"));
-                        Log($"Skipped items:\n{skippedMsg}");
-                    }
-                }
-                else
-                {
-                    Log("Script generation was cancelled.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log($"Script generation error: {ex.Message}");
-                MessageBox.Show(this, $"Script generation failed:\n{ex.Message}", "Generate Scripts", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            finally
-            {
-                _isGeneratingScripts = false;
-                _scriptGenerationCts?.Dispose();
-                _scriptGenerationCts = null;
-                GenerateScriptsBtn.IsEnabled = _checklistLoaded;
-            }
-        }
-
-        private static string? FindRepoRootFromCwd()
-        {
-            var dir = new System.IO.DirectoryInfo(System.IO.Directory.GetCurrentDirectory());
-            while (dir != null)
-            {
-                var candidate = System.IO.Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.json");
-                if (System.IO.File.Exists(candidate)) return dir.FullName;
-                var alt = System.IO.Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.json");
-                if (System.IO.File.Exists(alt)) return dir.FullName;
-                dir = dir.Parent;
-            }
-            return null;
-        }
-
         private void AreaCb_Unchecked(object? sender, RoutedEventArgs e)
         {
             if (sender is System.Windows.Controls.CheckBox cb && cb.Parent is System.Windows.Controls.StackPanel sp)
@@ -3967,8 +3686,6 @@ namespace SQLAuditor.Wpf
 
                 // Allow loading checklist at any time (user action required)
                 LoadChecklistBtn.IsEnabled = true;
-                // Enable Generate Scripts when checklist is loaded and items are selected
-                GenerateScriptsBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
                 StartEvalBtn.IsEnabled = _checklistLoaded && (_loadedItems != null && _loadedItems.Count > 0);
             }
             catch { }
@@ -4177,7 +3894,7 @@ namespace SQLAuditor.Wpf
                 var dialog = new SaveFileDialog
                 {
                     Title = "Export Manual Checks",
-                    FileName = $"manual_checks_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                    FileName = ManualChecklistCsv.BuildExportFileName(DateTime.Now),
                     DefaultExt = ".csv",
                     Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
                     InitialDirectory = UiRunDirectory,
@@ -4186,7 +3903,7 @@ namespace SQLAuditor.Wpf
                 };
                 if (dialog.ShowDialog(this) != true) return;
 
-                WriteManualChecksCsv(dialog.FileName, manualChecks);
+                ManualChecklistCsv.Write(dialog.FileName, manualChecks);
                 var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
                 RegenerateReportFromPersisted();
 
@@ -4239,13 +3956,10 @@ namespace SQLAuditor.Wpf
             System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             try
             {
-                var importFile = ReadManualChecksCsv(dialog.FileName);
+                var importFile = ManualChecklistCsv.Read(dialog.FileName);
                 try
                 {
-                    var runDir = AuditOutputPaths.CurrentRunDirectory;
-                    var target = System.IO.Path.Combine(runDir, "manual-checklist.csv");
-                    System.IO.File.Copy(dialog.FileName, target, overwrite: true);
-                    SQLAuditor.Lib.PreviousEvaluationStore.RecordManualCsv(runDir, "manual-checklist.csv");
+                    ManualChecklistCsv.StoreInRunDirectory(dialog.FileName, UiRunDirectory);
                 }
                 catch (Exception copyEx)
                 {

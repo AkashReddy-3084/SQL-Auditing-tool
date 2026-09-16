@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "generate scripts for checklist ..." whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -17,24 +17,24 @@ or to supply any LLM configuration.
 All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper script
 `Backend/CLI/sql-auditor.ps1`, which locates or builds `SQLAuditor.exe` automatically.
 
-> **When to use this skill instead of the MCP skills.** `evaluate-checklist` and `generate-script`
-> only work when the `sql-auditor` MCP server is connected (VS Code). In Copilot CLI — or in any
-> session where those tools are missing — use this skill: it drives the **same** engine through the
-> wrapper script and needs no MCP server. Never tell the user the audit cannot run because the MCP
-> tools are unavailable; run the commands below instead.
+> **When to use this skill instead of the MCP skills.** `evaluate-checklist` and
+> `configure-checklist` only work when the `sql-auditor` MCP server is connected (VS Code). In
+> Copilot CLI — or in any session where those tools are missing — use this skill: it drives the
+> **same** engine through the wrapper script and needs no MCP server. Never tell the user the audit
+> cannot run because the MCP tools are unavailable; run the commands below instead.
 
-> **Always show the manual verification steps.** After running `evaluate`, your first
-> response must present the full Manual Verification Steps (objective, numbered steps, and
-> SQL) for **every** Needs Review item — automatically, every time, without the user asking.
-> Only ask for Pass/Fail decisions afterwards.
+> **Manual review is CSV-based.** After running `evaluate`, do NOT dump the verification steps into
+> the chat. First ask the user whether they want to **import an existing filled CSV** (e.g. one from a
+> previous run) or **export a fresh CSV** to fill now. Only for a fresh CSV, run `export_manual_csv`
+> and hand the user the file path: the steps are already in the CSV's `Manual Steps` column and the
+> user fills the `Decision` and `Evidence` columns there. Show a single item's steps in chat only if
+> the user explicitly asks for that item.
 
-> **Evaluate vs. generate scripts are two SEPARATE operations.**
-> - **"evaluate checklist ..."** → run the **evaluate** command below (connects to a SQL Server,
->   runs the deterministic scripts, and surfaces Needs Review items). This does NOT create scripts.
-> - **"generate scripts for checklist ..."** (a.k.a. "create/write audit scripts") → run the
->   **generate_scripts** command below. This authors read-only audit scripts and needs **no**
->   SQL Server and **no** credentials. Never start an evaluation for a script-generation request,
->   and never generate scripts when asked to evaluate.
+> **There is no standalone script-generation command.** Audit scripts are authored **only** by
+> `configure_checklist`, and only for the ONE new custom checklist item it reserves. Existing and
+> default checklist items already have their scripts and are never regenerated. If the user asks to
+> "generate a script", ask whether they want to **add a new custom checklist item** and run
+> `configure_checklist`; otherwise run `evaluate`.
 
 > **Rerun/redo a previous run — use `rerun`, NEVER `evaluate`.**
 > When the user asks to "rerun", "redo", "re-evaluate", "update", or "run again" a previous
@@ -68,7 +68,21 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report
   ```
-- **resolve_review** — record a decision for one Needs Review item:
+- **export_manual_csv** — export every manual item, with its verification steps, for offline review:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv [--out <path>] [--generate]
+  ```
+  Add `--generate` to also mark every still-undecided manual item as **Skipped** (excluded from
+  scoring) and regenerate the report suite now — the same as the desktop "Export Manual CSV +
+  Generate" button — so a report exists before the filled CSV is imported. A later
+  `import_manual_csv` overwrites the Skipped items with the user's real decisions.
+- **import_manual_csv** — apply the Pass/Fail decisions from the filled CSV:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 import_manual_csv --file <path>
+  ```
+  Rows are matched by `Checklist ID`, so a row records a new decision **or overwrites an existing one**.
+- **resolve_review** — record a single decision (corrections and `notapplicable` only, not the main
+  manual flow):
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> --notes "<rationale>"
   ```
@@ -90,15 +104,6 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   `--recommendation-file` — and `resolve_review` has `--notes-file`. **A quote character inside
   the text is eaten by the shell**, so write any field that quotes returned values (evidence,
   above all) to a file and pass the path instead of the text.
-- **generate_scripts** — GENERATE audit scripts for checklist items (no LLM endpoint, no SQL Server):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items <ids>
-  ```
-- **save_generated_script** — validate and save one script you generated (after generate_scripts):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id <id> --response-file <path-to-raw-response-file> [--validation-file <path-to-verdict-file>]
-  ```
-  Without `--validation-file` it prints the standard C1-C7 validation prompt and saves nothing.
 - **load_checklist** — list the checklist structure (read-only):
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 --dump-checklist
@@ -175,14 +180,22 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
      setting, or proof that an event happened (a failover test was run, an approval was given) are
      almost never answerable from a repository.
    - Afterwards, report which items you resolved from evidence and which still need the user.
-5. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item still listed there
-   (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
-   Manual Verification Steps for every item automatically, in your very first reply after
-   running evaluate — before asking anything.** Never ask the user for a decision, and
-   never ask whether to run the queries, until you have first printed the complete steps
-   for all items. Do **not** wait to be asked, do **not** summarize, and do **not** just
-   say "provide evidence for each". Use the baseline text as your source and render each
-   item in this exact format:
+5. Read the `=== COPILOT REVIEW REQUIRED ===` block, then **first ask the user which they want** —
+   do not export or import anything until they answer:
+   - **(a) Import an already-filled CSV** they have (for example one they filled during a previous
+     run). Ask for its path and run **import_manual_csv** with `--file <path>`. A CSV from an earlier
+     run works because rows are matched by `Checklist ID`; rows for items not in this run are ignored.
+     Do **not** export a new CSV in this case.
+   - **(b) Export a fresh CSV to fill now.** Run **export_manual_csv**. It writes every manual item —
+     with its area, description, verification and the verification steps already in the
+     **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give
+     the user **only that path** and a one-line instruction — do **not** paste the steps, a Pass/Fail
+     rubric or any per-item guidance into chat; the steps live in the CSV. For each row the user fills
+     the **`Decision`** column with `Pass` or `Fail` and the **`Evidence`** column with what they
+     inspected and found, leaving **`Checklist ID`** unchanged. The verdict is the reviewer's to make:
+     never infer it, assume it, announce it, or challenge it. Do **not** ask for these decisions one
+     item at a time. Show a single item's steps in chat — in the format below — **only if the user
+     explicitly asks** for that item:
 
    ```
    Checklist: <title>
@@ -205,26 +218,24 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    document, repository or record to obtain — and it also states what Not Applicable means. Render
    it as it stands; do **not** turn it into SSMS or T-SQL steps, and keep its Not Applicable
    criteria in the Pass/Fail section.
-6. Only **after** the full steps for all items have been shown, ask the user for their
-   **Pass / Fail / Not Applicable decision** — one item at a time or all at once. The verdict is the
-   reviewer's to make: never infer it, assume it, announce it, or challenge it.
-7. Ask **one** follow-up question: what they inspected and what they found. Accept the
-   answer as given — do not judge whether it is sufficient, do not ask for more detail, and
-   do not argue for a different outcome. Re-ask only if they gave no observation at all.
-8. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
-   (`pass`, `fail` or `notapplicable`), and `--notes` containing the user's own words. Then run
-   **enrich_result** for the same item with wording *you* derive from their evidence — finding,
+6. When the user gives you a filled CSV (whether an existing one or the one just exported), run
+   **import_manual_csv** with `--file <path>`. Accept their entries as given — do not judge whether
+   the evidence is sufficient and do not ask for more detail. Report back only the rows the import
+   listed as ignored or needing correction, and let the user fix the CSV and re-import; re-importing
+   overwrites decisions that were already recorded.
+7. Run **enrich_result** for each applied item with wording *you* derive from their evidence — finding,
    evidence, riskImpact and recommendation, using only facts they stated. The reviewer's raw words
    must never be left as the report Finding.
-   - Use `--decision notapplicable` when what the user reports shows the control does not exist on
-     this server at all — every value absent, empty, zero or irrelevant to the item, so there is
-     nothing to assess. The item is then excluded from every score, listed on the workbook's
+   - Use **resolve_review** with `--decision notapplicable` when what the user reports shows the control
+     does not exist on this server at all — every value absent, empty, zero or irrelevant to the item,
+     so there is nothing to assess. The item is then excluded from every score, listed on the workbook's
      "Not Applicable Items" sheet and reported as **Not Applicable**, never as Pass or Fail, and it
      needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
-9. Do not write a final summary until every review item is resolved and every script item
+     `resolve_review` is also how you correct a single item after an import.
+8. Do not write a final summary until every review item is resolved and every script item
    is enriched. The full report suite is generated automatically by `evaluate` in the run
    directory (but `results/historical_last_run.json` is **not** refreshed there).
-10. **Once every item is resolved and enriched, ASK the user whether to generate the final
+9. **Once every item is resolved and enriched, ASK the user whether to generate the final
    report** — e.g. "All items are complete. Shall I generate the final report now?" Wait for
    their answer; never generate it silently.
    - When the user confirms, run **generate_report**. This is the step that refreshes
@@ -233,31 +244,16 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    - Then run **show_reports** and report **its** counts — the counts `evaluate` printed are
      provisional, because Not Applicable is decided during enrichment.
 
-## Generating scripts (separate from evaluation)
+## Generating scripts (only for NEW custom checklist items)
 
-When the user asks to **generate/create/write audit scripts** for checklist items, do NOT
-evaluate. You (Copilot CLI) are the script-generator AI — no SQL Server and no credentials
-are needed.
+There is no standalone script-generation command. A script is authored **only** while
+`configure_checklist` adds a NEW custom checklist item, and only for the single ID that flow
+reserves. Existing and default checklist items are never regenerated.
 
-1. Run **generate_scripts** with the checklist `--items`. It prints the generator system
-   prompt plus one request per item.
-2. For each item, follow the system prompt exactly: write the ANALYSIS, decide FEASIBLE, then
-   emit the full raw response — the `FEASIBLE`/`SCRIPT_TYPE`/`SCOPE`/`SCRIPT_NAME`/
-   `SCORING_LOGIC` fields and the script between `---SCRIPT_START---` and `---SCRIPT_END---`.
-   Every feasible script must output `Result`, `Score`, `DatabaseQueried`, and `Finding`.
-   Process the items in batches of up to 10 in parallel.
-3. Save each generated item by writing its complete raw response to a file and running
-   **save_generated_script** with `--id` and `--response-file`. The first call runs the format
-   gate and prints the validation system/user prompt for that script. Review the script using
-   ONLY those C1-C7 checks, write your verdict to a file, and run **save_generated_script**
-   again adding `--validation-file`. Use `VERDICT: VALID`, or `VERDICT: INVALID` with `ISSUES:`
-   and the corrected script between `---CORRECTED_SCRIPT_START---` and
-   `---CORRECTED_SCRIPT_END---`. Nothing is written to disk until a verdict is supplied. If it
-   reports `VALIDATION FAILED` or `VALIDATION REJECTED`, correct the script and save again
-   (retry up to 3 times). On success it writes the script under
-   `Backend/checklists/Scripts/` and updates
-   `Backend/checklists/deterministic-script-mapping.json` and
-   `Backend/results/execution-results.json`.
+Run `configure_checklist` (see `Backend/Modules/configure_checklist`) and follow the prompts it
+prints: guardrails → semantic match → Area/Sub-area classification → script generation → C1-C7
+review → user approval. Nothing reaches `custom-checklist.json`,
+`custom-deterministic-script-mapping.json` or `Backend/checklists/Scripts/` until the user approves.
 
 ## Examples
 
@@ -269,13 +265,14 @@ powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --
 # Re-run reusing the manual results recorded by the previous audit
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost --databases all
 
-# Record a decision after reviewing with the user
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
+# Export the manual checklist items for the user to fill in offline
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv
 
-# Generate audit scripts for two controls (no server needed), then save one
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_scripts --items 1.1.2,3.1.1
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt
-powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 save_generated_script --id 3.1.1 --response-file .\results\3.1.1.response.txt --validation-file .\results\3.1.1.verdict.txt
+# Apply the decisions once the user has filled the Decision/Evidence columns
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 import_manual_csv --file "results\<run>\manual_checks_20260915_162306.csv"
+
+# Correct a single item, or record one that is not applicable at all
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
 
 # Show the final report
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report

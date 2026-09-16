@@ -1,6 +1,6 @@
 ---
 name: evaluate-checklist
-description: Audit a SQL Server instance against the governance checklist from inside VS Code, and list, rerun or edit previous audit runs, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit", and also for "show the run history", "evaluation history", "list the last runs", "previous evaluations", "rerun that run", "redo the last audit", "re-evaluate run 2". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for script GENERATION (that is the generate-script skill), from Copilot CLI (that is the sql-auditor skill), or for Copilot session/chat history and standups (that is the chronicle skill) — here "run history" always means SQL audit runs under results/.
+description: Audit a SQL Server instance against the governance checklist from inside VS Code, and list, rerun or edit previous audit runs, using the sql-auditor MCP server. Use for "/evaluate <id>", "/evaluate <startId> - <endId>", "/evaluate all", "evaluate checklist 1.1.2", "audit this instance", "run the SQL audit", and also for "show the run history", "evaluation history", "list the last runs", "previous evaluations", "rerun that run", "redo the last audit", "re-evaluate run 2". You are the AI layer — the server runs the deterministic engine and makes no LLM calls. Do NOT use for adding a custom checklist item (that is the configure-checklist skill), from Copilot CLI (that is the sql-auditor skill), or for Copilot session/chat history and standups (that is the chronicle skill) — here "run history" always means SQL audit runs under results/.
 license: MIT
 ---
 
@@ -22,7 +22,8 @@ Copilot CLI and bypasses this flow.
 > same engine through `Backend/CLI/sql-auditor.ps1`. Only report a failure if that wrapper also
 > cannot run.
 
-> **Evaluation, not generation.** Never call `generate_scripts` or `save_generated_script` here.
+> **Evaluation, not generation.** Never author or save audit scripts here. Scripts are created
+> only by `configure_checklist`, for a NEW custom checklist item.
 
 ## Trigger
 
@@ -46,7 +47,9 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
 | `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
-| `resolve_review` | Records the Pass/Fail decision for one review item |
+| `export_manual_csv` | Exports every manual item, with its verification steps, to a CSV the user fills in. `generateReport=true` also marks undecided manual items Skipped and regenerates the report now |
+| `import_manual_csv` | Applies the Pass/Fail decisions from the filled CSV to the run |
+| `resolve_review` | Records a single Pass/Fail/Not Applicable decision — corrections only, not the main manual flow |
 | `set_evidence_sources` | Attaches a Git repo, pipeline definitions, docs folder or policy files to the run as evidence |
 | `evidence_manifest` | Shows the evidence already attached to the active run |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
@@ -144,7 +147,7 @@ slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
 
 > **When evidence is attached, this step runs BEFORE the `enrich_result` pass in step 2.** The
 > evidence block is printed first for that reason. Do not start enriching script items, and do not
-> begin the step 4 interview, until every item listed under "Items eligible for evidence review" has
+> begin the step 4 manual CSV flow, until every item listed under "Items eligible for evidence review" has
 > either a `resolve_review` call or a stated reason the evidence could not settle it. Skipping this
 > leaves items sitting in NeedsReview that the attached files already answer.
 
@@ -194,31 +197,49 @@ the whole manifest.
 
 After the pass, report which items you resolved from evidence and which still need the user.
 
-### 4. Review the items neither the scripts nor the evidence could decide
+### 4. Review the items neither the scripts nor the evidence could decide — via the manual CSV
 
-For **every** remaining entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer:
+Manual items are decided through a **CSV export/import**, the same workflow the desktop app uses.
+Do **not** ask for these decisions one item at a time, and do **not** paste the verification steps
+into the chat — the CSV already carries them.
 
-1. Present the full verification guidance first, in the exact output format the tool prints
-   (Checklist / Objective / Manual Verification Steps / What indicates a PASS and a FAIL /
-   Recommended Actions), filled with item-specific content. For a documentation or process item the
-   guidance is artefact-oriented — which document, repository or record to obtain — so do **not**
-   turn it into SSMS or T-SQL steps. Do this for every item before asking anything.
-2. Ask for the user's **Pass / Fail / Not Applicable decision**. The verdict is theirs — never infer
-   it, assume it, announce it, or argue for a different one.
-3. Ask **one** follow-up: what they inspected and what they found. Accept the answer as given.
-4. Call `resolve_review(id, decision, notes=<their own words>)`. Use `decision="notapplicable"`
-   when what they report shows the control does not exist on this server at all — every value
-   absent, empty, zero or irrelevant to the item, so there is nothing to assess. That item is
-   excluded from every score, lands on the workbook's "Not Applicable Items" sheet and is reported
-   as **Not Applicable**, never as Pass or Fail; skip step 5 for it. A zero that itself proves
-   compliance is a Pass, not this.
-5. Call `enrich_result` for the same item with wording **you** derive from their evidence. Their
-   raw words must never be left as the report Finding.
+1. **First ask the user which they want** — do not export or import anything until they answer:
+   - **(a) Import an already-filled CSV** they have (for example one they filled during a previous
+     run). Ask for its path and call `import_manual_csv(path="<that path>")`. A CSV from an earlier
+     run works because rows are matched by `Checklist ID`; rows for items not in this run are
+     ignored. Do **not** export a new CSV in this case.
+   - **(b) Export a fresh CSV to fill now.** Call `export_manual_csv()`. It writes every manual item —
+     with its area, description, verification and the verification steps already in the
+     **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give the
+     user **only the path** and a one-line instruction: for each row, fill the **`Decision`** column
+     with `Pass` or `Fail` and the **`Evidence`** column with what they inspected and found, leaving
+     **`Checklist ID`** unchanged. The verdict is theirs — never infer it, assume it, announce it, or
+     argue for a different one. Show a single item's steps in chat **only if the user explicitly asks**.
+2. When the user gives you a filled CSV (whether an existing one or the one just exported), call
+   `import_manual_csv(path="<that path>")`. Rows are matched by `Checklist ID`, so each row records a
+   new decision **or overwrites an existing one** — the CSV is the source of truth. Accept the entries
+   as given: do not judge whether the evidence is sufficient and do not ask for extra detail. Report
+   back only the rows the import flagged as ignored or needing correction, and let the user fix and
+   re-import.
+3. Use `resolve_review(id, decision, notes)` only to correct a single item afterwards, or to record
+   `decision="notapplicable"` when what the user reports shows the control does not exist on this
+   server at all — every value absent, empty, zero or irrelevant, so there is nothing to assess.
+   That item is excluded from every score, lands on the workbook's "Not Applicable Items" sheet and
+   is reported as **Not Applicable**, never as Pass or Fail; skip step 4 for it. A zero that itself
+   proves compliance is a Pass, not this.
+4. Call `enrich_result` for every applied item with wording **you** derive from their evidence.
+   Their raw words must never be left as the report Finding.
 
 ### 5. Report
 
 `evaluate` generates the full report suite automatically in the run directory, but it does **not**
 refresh `results/historical_last_run.json`.
+
+If the user wants a report **before** the filled CSV comes back, call
+`export_manual_csv(generateReport=true)` (the same as the desktop "Export Manual CSV + Generate"
+button): every still-undecided manual item is marked **Skipped** and excluded from scoring, and the
+report suite is regenerated immediately. A later `import_manual_csv` overwrites those Skipped items
+with the user's real decisions and regenerates again.
 
 Once every item is enriched and reviewed, **ask the user whether to generate the final report** —
 e.g. "All items are complete. Shall I generate the final report now?" Never generate it silently.

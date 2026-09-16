@@ -135,8 +135,9 @@ public static class HistoricalManualResultsStore
 
     /// <summary>
     /// Merges the manual/AI-Manual results of the current <c>checklist_results.json</c> into the
-    /// historical file. Existing entries are preserved; only IDs that are not yet recorded are
-    /// added. Returns the number of newly recorded items.
+    /// historical file. New IDs are added and existing entries are overwritten with the latest
+    /// decision, so a manual result changed after the previous report (for example via a re-imported
+    /// manual CSV) always wins. Returns the number of entries added or updated.
     /// </summary>
     public static int RefreshFromResults()
     {
@@ -157,7 +158,7 @@ public static class HistoricalManualResultsStore
         if (results == null) return 0;
 
         var historical = Load();
-        var added = 0;
+        var changed = 0;
         foreach (var node in results)
         {
             if (node is not JsonObject entry) continue;
@@ -165,16 +166,22 @@ public static class HistoricalManualResultsStore
             if (string.IsNullOrWhiteSpace(id)) continue;
             if (!IsManualTechnique(ReadString(entry, "Technique"))) continue;
             if (!IsCompletedOutcome(ReadString(entry, "Outcome"))) continue;
-            if (historical.ContainsKey(id!)) continue;
 
-            historical[id!] = (JsonObject)entry.DeepClone();
-            added++;
+            var clone = (JsonObject)entry.DeepClone();
+            if (historical.TryGetValue(id!, out var existing)
+                && string.Equals(existing.ToJsonString(), clone.ToJsonString(), StringComparison.Ordinal))
+            {
+                continue; // already recorded with the same decision
+            }
+
+            historical[id!] = clone;
+            changed++;
         }
 
-        if (added == 0 && File.Exists(FilePath)) return 0;
+        if (changed == 0 && File.Exists(FilePath)) return 0;
 
         Save(historical);
-        return added;
+        return changed;
     }
 
     private static void Save(Dictionary<string, JsonObject> historical)
