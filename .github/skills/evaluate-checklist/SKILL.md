@@ -47,7 +47,9 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | `list_evaluations` | The most recent audit runs across all servers, each with an index to rerun |
 | `rerun_evaluation` | Re-runs (or edits) a previous run, overwriting its reports in the SAME folder |
 | `enrich_result` | Records the wording **you** author for one item |
-| `resolve_review` | Records the user's Pass/Fail decision for one review item |
+| `export_manual_csv` | Exports every manual item, with its verification steps, to a CSV the user fills in |
+| `import_manual_csv` | Applies the Pass/Fail decisions from the filled CSV to the run |
+| `resolve_review` | Records a single Pass/Fail/Not Applicable decision — corrections only, not the main manual flow |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
 | `show_reports` | The final report and the authoritative outcome counts |
 | `load_checklist` | Look up valid IDs when the user's input cannot be resolved |
@@ -121,25 +123,32 @@ proves compliance ("0 unauthorised logins" on a Pass) is real evidence, not "Not
 Call `enrich_result` per item and keep going. Work through the list in batches rather than
 pausing after each one, and do not write a summary until every listed item is recorded.
 
-### 3. Review the items the scripts could not decide
+### 3. Review the items the scripts could not decide — via the manual CSV
 
-For **every** entry in the `=== COPILOT REVIEW REQUIRED ===` block you are the reviewer:
+Manual items are decided through a **CSV export/import**, the same workflow the desktop app uses.
+Do **not** ask for these decisions one item at a time, and do **not** paste the verification steps
+into the chat — the CSV already carries them.
 
-1. Present the full verification guidance first, in the exact output format the tool prints
-   (Checklist / Objective / Manual Verification Steps / What indicates a PASS and a FAIL /
-   Recommended Actions), filled with item-specific content and real T-SQL. Do this for every
-   item before asking anything.
-2. Ask for the user's **Pass/Fail decision**. The verdict is theirs — never infer it, assume it,
-   announce it, or argue for a different one.
-3. Ask **one** follow-up: what they inspected and what they found. Accept the answer as given.
-4. Call `resolve_review(id, decision, notes=<their own words>)`. Use `decision="notapplicable"`
-   when what they report shows the control does not exist on this server at all — every value
-   absent, empty, zero or irrelevant to the item, so there is nothing to assess. That item is
-   excluded from every score, lands on the workbook's "Not Applicable Items" sheet and is reported
-   as **Not Applicable**, never as Pass or Fail; skip step 5 for it. A zero that itself proves
-   compliance is a Pass, not this.
-5. Call `enrich_result` for the same item with wording **you** derive from their evidence. Their
-   raw words must never be left as the report Finding.
+1. Call `export_manual_csv()`. It writes every manual item — with its area, description, verification
+   and the verification steps already in the **`Manual Steps`** column — to a timestamped
+   `manual_checks_*.csv` in the run directory. Give the user **only the path** and a one-line
+   instruction: for each row, fill the **`Decision`** column with `Pass` or `Fail` and the
+   **`Evidence`** column with what they inspected and found, leaving **`Checklist ID`** unchanged.
+   The verdict is theirs — never infer it, assume it, announce it, or argue for a different one.
+   Show a single item's steps in chat **only if the user explicitly asks** for that item.
+2. When the user says the file is ready, call `import_manual_csv(path="<that path>")`. Rows are
+   matched by `Checklist ID`, so each row records a new decision **or overwrites an existing one** —
+   the CSV is the source of truth. Accept the entries as given: do not judge whether the evidence
+   is sufficient and do not ask for extra detail. Report back only the rows the import flagged as
+   ignored or needing correction, and let the user fix and re-import.
+3. Use `resolve_review(id, decision, notes)` only to correct a single item afterwards, or to record
+   `decision="notapplicable"` when what the user reports shows the control does not exist on this
+   server at all — every value absent, empty, zero or irrelevant, so there is nothing to assess.
+   That item is excluded from every score, lands on the workbook's "Not Applicable Items" sheet and
+   is reported as **Not Applicable**, never as Pass or Fail; skip step 4 for it. A zero that itself
+   proves compliance is a Pass, not this.
+4. Call `enrich_result` for every applied item with wording **you** derive from their evidence.
+   Their raw words must never be left as the report Finding.
 
 ### 4. Report
 

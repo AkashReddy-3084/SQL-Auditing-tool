@@ -292,38 +292,26 @@ public static class AuditTools
             sb.AppendLine();
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
             sb.AppendLine($"{manualPending.Count} item(s) were not decided by the deterministic scripts and need review.");
-            sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. For EACH item below you MUST:");
-            sb.AppendLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content — exact T-SQL to run, settings/objects to inspect in SSMS):");
-            sb.AppendLine("       Checklist: <checklist title>");
-            sb.AppendLine("       Objective: <one sentence explaining what is being verified>");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## Manual Verification Steps:");
-            sb.AppendLine("       1. ...");
-            sb.AppendLine("       2. ... (include SQL queries in ```sql code blocks whenever required)");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## What indicates a PASS and a FAIL");
-            sb.AppendLine("       Pass:");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("       Fail:");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("       ");
-            sb.AppendLine("       ## Recommended Actions (if failed)");
-            sb.AppendLine("       - ...");
-            sb.AppendLine("     Do NOT add extra sections or headings outside this format.");
-            sb.AppendLine("  2. Ask the user for their DECISION: Pass or Fail. The verdict is the reviewer's to make — never infer,");
-            sb.AppendLine("     assume, announce, question or challenge it, and never propose a different outcome.");
-            sb.AppendLine("  3. Ask ONE follow-up question: what they inspected and what they found. Accept their answer as given.");
-            sb.AppendLine("     Do NOT assess whether the evidence is sufficient, do NOT ask for extra detail, and do NOT argue that");
-            sb.AppendLine("     the item should stay NeedsReview. Re-ask ONLY if they supplied no observation at all.");
-            sb.AppendLine("  4. Immediately call 'resolve_review' with the user's decision and their exact words in 'notes'.");
-            sb.AppendLine("     If what they report shows the control does not exist on this server at all — every value absent, empty,");
-            sb.AppendLine("     zero or irrelevant to the item — it is not assessable: call resolve_review with decision='notapplicable'");
-            sb.AppendLine("     and the reason in 'notes'. It is then excluded from every score and reported as Not Applicable, never as");
-            sb.AppendLine("     Pass or Fail, and needs no enrich_result call. A zero that itself proves compliance is a Pass, not this.");
-            sb.AppendLine("  5. Then call 'enrich_result' for the same item with audit wording YOU derive from the user's evidence:");
+            sb.AppendLine("This MCP server performs NO AI/LLM calls — YOU (GitHub Copilot) are the reviewer. The manual review is CSV-based:");
+            sb.AppendLine("  1. Call 'export_manual_csv'. It writes EVERY manual item, with its verification steps already in the");
+            sb.AppendLine("     'Manual Steps' column, to one CSV. Give the user ONLY the file path and a one-line instruction — do NOT");
+            sb.AppendLine("     paste the steps, a Pass/Fail rubric or any per-item guidance into the chat; the steps live in the CSV.");
+            sb.AppendLine("     Tell the user to open it and, for each row, enter Pass or Fail in the 'Decision' column and what they");
+            sb.AppendLine("     inspected and found in the 'Evidence' column, leaving 'Checklist ID' unchanged. The verdict is the");
+            sb.AppendLine("     reviewer's to make — never infer, assume, announce, question or challenge it, or propose a different outcome.");
+            sb.AppendLine("  2. When they say the CSV is filled, call 'import_manual_csv' with its path to apply every decision at once.");
+            sb.AppendLine("     Accept their entries as given: do NOT assess whether the evidence is sufficient, do NOT ask for extra detail,");
+            sb.AppendLine("     and do NOT argue that an item should stay NeedsReview. Report back only the rows the import flagged.");
+            sb.AppendLine("     Do NOT ask for these decisions one item at a time, and do NOT call resolve_review for them — the CSV is the");
+            sb.AppendLine("     manual workflow. Use resolve_review only to correct a single item afterwards, or to record 'notapplicable'");
+            sb.AppendLine("     when the user reports a control does not exist on this server at all (excluded from every score, and it");
+            sb.AppendLine("     needs no enrich_result call). A zero that itself proves compliance is a Pass, not this.");
+            sb.AppendLine("  3. Then call 'enrich_result' for each applied item with audit wording YOU derive from the user's evidence:");
             sb.AppendLine("     finding (the actual state they observed), evidence (why it supports the outcome), riskImpact (the specific");
             sb.AppendLine("     consequence) and recommendation (targeted remediation). Use ONLY facts the user stated — invent nothing.");
-            sb.AppendLine("Two questions per item — decision, then evidence. Do NOT write a final summary until every item is resolved.");
+            sb.AppendLine("Only if the user explicitly asks to see a specific item's steps, show that one item using this format");
+            sb.AppendLine("(Checklist / Objective / Manual Verification Steps / What indicates a PASS and a FAIL / Recommended Actions).");
+            sb.AppendLine("Do NOT write a final summary until the CSV has been imported and every applied item is enriched.");
             foreach (var r in manualPending)
             {
                 sb.AppendLine();
@@ -333,13 +321,8 @@ public static class AuditTools
                     if (!string.IsNullOrWhiteSpace(it.Category)) sb.AppendLine($"Area/Category: {it.Category}");
                     if (!string.IsNullOrWhiteSpace(it.Verification)) sb.AppendLine($"Verification objective: {it.Verification}");
                 }
-                if (!string.IsNullOrWhiteSpace(r.Evidence))
-                {
-                    sb.AppendLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
-                    sb.AppendLine(r.Evidence.Trim());
-                }
-                sb.AppendLine($"Ask for the Pass/Fail decision first, then the evidence, then call: resolve_review(id=\"{r.Id}\", decision=\"pass\", \"fail\" or \"notapplicable\", notes=\"<the user's own observation/evidence, not just 'pass'>\")");
-                sb.AppendLine($"Then call: enrich_result(id=\"{r.Id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\") derived from that evidence.");
+                sb.AppendLine("This item is a row in the manual CSV; its verification steps are in the CSV's 'Manual Steps' column.");
+                sb.AppendLine("Do NOT paste those steps into the chat and do NOT collect its decision through a per-item resolve_review call.");
             }
         }
 
@@ -683,6 +666,107 @@ public static class AuditTools
         var trimmed = notes.Trim().Trim('.', '!', ' ').ToLowerInvariant();
         return trimmed is not ("pass" or "passed" or "fail" or "failed" or "p" or "f"
             or "yes" or "no" or "y" or "n" or "ok" or "okay" or "good" or "bad" or "n/a");
+    }
+
+    [McpServerTool(Name = "export_manual_csv")]
+    [Description("Export every manual/AI-Manual checklist item of the current run — with its area, description, verification and generated manual steps — to a CSV the user fills in offline. This is the manual review workflow: the user enters Pass/Fail in the 'Decision' column and their observation in the 'Evidence' column, then 'import_manual_csv' applies the whole file. Identical CSV contract to the desktop app and the CLI. Use after 'evaluate' reports manual items.")]
+    public static async Task<string> ExportManualCsvAsync(
+        [Description("Optional full path for the CSV. Defaults to a timestamped manual_checks_*.csv inside the current run directory.")] string? path = null)
+    {
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+        if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            return "No evaluation results were found. Run 'evaluate' first.";
+
+        var auditor = new Auditor(string.Empty);
+        var rows = await ManualChecklistCsv.BuildExportRowsAsync(auditor);
+        if (rows.Count == 0)
+            return "The current evaluation contains no manual checklist items to export.";
+
+        var target = string.IsNullOrWhiteSpace(path)
+            ? Path.Combine(resultsDir, ManualChecklistCsv.BuildExportFileName(DateTime.Now))
+            : Path.GetFullPath(path);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            ManualChecklistCsv.Write(target, rows);
+        }
+        catch (Exception ex)
+        {
+            return $"The manual checklist CSV could not be written to {target}: {ex.Message}";
+        }
+
+        var undecided = rows.Count(r => string.IsNullOrWhiteSpace(r.Decision));
+        var sb = new StringBuilder();
+        sb.AppendLine($"Exported {rows.Count} manual checklist item(s) ({undecided} undecided) to:");
+        sb.AppendLine($"  {target}");
+        sb.AppendLine();
+        sb.AppendLine("Tell the user to open that CSV and, for each row, enter 'Pass' or 'Fail' in the 'Decision' column and");
+        sb.AppendLine("what they inspected and found in the 'Evidence' column, leaving 'Checklist ID' unchanged. The 'Manual Steps'");
+        sb.AppendLine("column already holds the verification guidance for each item. Then call");
+        sb.AppendLine($"  import_manual_csv(path=\"{target}\")");
+        sb.AppendLine("to apply every decision at once. Rows left blank stay NeedsReview; re-importing an edited CSV overwrites");
+        sb.AppendLine("decisions that were already recorded. Do NOT ask the user for these decisions one item at a time.");
+        sb.AppendLine();
+        sb.AppendLine("Items exported:");
+        foreach (var row in rows)
+            sb.AppendLine($"- [{row.Id}] {row.Status} - {row.Description}");
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "import_manual_csv")]
+    [Description("Apply the Pass/Fail decisions from a filled manual checklist CSV to the current run. Rows are matched to checklist items by 'Checklist ID', so a row records a new decision or overwrites an existing one; the CSV is the source of truth. Rows whose ID is not a manual item in this run are ignored. Updates checklist_results.json and regenerates the five-file report suite. Use after 'export_manual_csv' once the user has filled the file.")]
+    public static Task<string> ImportManualCsvAsync(
+        [Description("Full path to the filled CSV produced by 'export_manual_csv' (or by the desktop app / CLI).")] string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return Task.FromResult("Error: 'path' is required (the filled manual checklist CSV).");
+        if (!File.Exists(path))
+            return Task.FromResult($"File not found: {path}. Ask the user for the saved location of the filled CSV.");
+
+        var resultsDir = AuditOutputPaths.CurrentRunDirectory;
+        if (!File.Exists(Path.Combine(resultsDir, "checklist_results.json")))
+            return Task.FromResult("No evaluation results were found. Run 'evaluate' first.");
+
+        ManualCheckImportFile importFile;
+        try
+        {
+            importFile = ManualChecklistCsv.Read(path);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult($"The manual CSV could not be read: {ex.Message}");
+        }
+
+        var auditor = new Auditor(string.Empty);
+        var applied = ManualChecklistCsv.Apply(auditor, importFile.Rows);
+
+        try { ManualChecklistCsv.StoreInRunDirectory(path); }
+        catch { }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Applied {applied.Applied.Count} manual decision(s); outputs regenerated in {resultsDir}.");
+        foreach (var entry in applied.Applied) sb.AppendLine($"  [{entry}]");
+        if (applied.Ignored.Count > 0)
+            sb.AppendLine($"Ignored {applied.Ignored.Count} row(s) that are not manual items in this run: {string.Join(", ", applied.Ignored)}");
+        if (applied.Failed.Count > 0)
+            sb.AppendLine($"Could not update {applied.Failed.Count} row(s): {string.Join(", ", applied.Failed)}");
+        if (importFile.Issues.Count > 0)
+        {
+            sb.AppendLine($"{importFile.Issues.Count} row(s) need correction before they can be applied:");
+            foreach (var issue in importFile.Issues.Take(20)) sb.AppendLine($"  {issue}");
+            if (importFile.Issues.Count > 20) sb.AppendLine($"  ...and {importFile.Issues.Count - 20} more.");
+            sb.AppendLine("Report these to the user so they can correct the CSV and call import_manual_csv again.");
+        }
+
+        if (applied.Applied.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("NEXT: for each applied item call enrich_result(id=\"<id>\", ...) with audit wording you derive from the");
+            sb.AppendLine("reviewer's Evidence text — finding, evidence, riskImpact and recommendation — using only facts they stated.");
+        }
+
+        return Task.FromResult(sb.ToString());
     }
 
     [McpServerTool(Name = "enrich_result")]

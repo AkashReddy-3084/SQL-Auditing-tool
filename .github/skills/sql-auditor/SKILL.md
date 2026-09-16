@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and records decisions with resolve_review. Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -23,10 +23,10 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
 > **same** engine through the wrapper script and needs no MCP server. Never tell the user the audit
 > cannot run because the MCP tools are unavailable; run the commands below instead.
 
-> **Always show the manual verification steps.** After running `evaluate`, your first
-> response must present the full Manual Verification Steps (objective, numbered steps, and
-> SQL) for **every** Needs Review item — automatically, every time, without the user asking.
-> Only ask for Pass/Fail decisions afterwards.
+> **Manual review is CSV-based.** After running `evaluate`, do NOT dump the verification steps into
+> the chat. Run `export_manual_csv` and hand the user the file path: the steps are already in the
+> CSV's `Manual Steps` column and the user fills the `Decision` and `Evidence` columns there. Show a
+> single item's steps in chat only if the user explicitly asks for that item.
 
 > **There is no standalone script-generation command.** Audit scripts are authored **only** by
 > `configure_checklist`, and only for the ONE new custom checklist item it reserves. Existing and
@@ -66,9 +66,19 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 generate_report
   ```
-- **resolve_review** — record a decision for one Needs Review item:
+- **export_manual_csv** — export every manual item, with its verification steps, for offline review:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview> --notes "<rationale>"
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv [--out <path>]
+  ```
+- **import_manual_csv** — apply the Pass/Fail decisions from the filled CSV:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 import_manual_csv --file <path>
+  ```
+  Rows are matched by `Checklist ID`, so a row records a new decision **or overwrites an existing one**.
+- **resolve_review** — record a single decision (corrections and `notapplicable` only, not the main
+  manual flow):
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> --notes "<rationale>"
   ```
 - **enrich_result** — record the audit wording you authored for one script-evaluated item:
   ```powershell
@@ -128,14 +138,16 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    passing `--evidence-file` so the quotes it contains survive. When the command replies that the
    item moved to Outcome `Not Applicable`, that item is excluded from every score and is listed on
    the workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
-4. Read the `=== COPILOT REVIEW REQUIRED ===` block. For **every** item listed there
-   (each `--- <id>: <desc> ---` entry), you are the reviewer. **ALWAYS present the full
-   Manual Verification Steps for every item automatically, in your very first reply after
-   running evaluate — before asking anything.** Never ask the user for a decision, and
-   never ask whether to run the queries, until you have first printed the complete steps
-   for all items. Do **not** wait to be asked, do **not** summarize, and do **not** just
-   say "provide evidence for each". Use the baseline text as your source and render each
-   item in this exact format:
+4. Read the `=== COPILOT REVIEW REQUIRED ===` block, then run **export_manual_csv**. It writes
+   every manual item — with its area, description, verification and the verification steps already in
+   the **`Manual Steps`** column — to a timestamped `manual_checks_*.csv` in the run directory. Give
+   the user **only that path** and a one-line instruction — do **not** paste the steps, a Pass/Fail
+   rubric or any per-item guidance into chat; the steps live in the CSV. For each row the user fills
+   the **`Decision`** column with `Pass` or `Fail` and the **`Evidence`** column with what they
+   inspected and found, leaving **`Checklist ID`** unchanged. The verdict is the reviewer's to make:
+   never infer it, assume it, announce it, or challenge it. Do **not** ask for these decisions one
+   item at a time. Show a single item's steps in chat — in the format below — **only if the user
+   explicitly asks** for that item:
 
    ```
    Checklist: <title>
@@ -153,22 +165,19 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    ## Recommended Actions (if failed)
    - ...
    ```
-5. Only **after** the full steps for all items have been shown, ask the user for their
-   **Pass/Fail decision first** — one item at a time or all at once. The verdict is the
-   reviewer's to make: never infer it, assume it, announce it, or challenge it.
-6. Ask **one** follow-up question: what they inspected and what they found. Accept the
-   answer as given — do not judge whether it is sufficient, do not ask for more detail, and
-   do not argue for a different outcome. Re-ask only if they gave no observation at all.
-7. Record the decision immediately by running **resolve_review** with `--id`, `--decision`
-   (`pass`, `fail` or `notapplicable`), and `--notes` containing the user's own words. Then run
-   **enrich_result** for the same item with wording *you* derive from their evidence — finding,
+6. When the user says the file is ready, run **import_manual_csv** with `--file <path>`. Accept their
+   entries as given — do not judge whether the evidence is sufficient and do not ask for more detail.
+   Report back only the rows the import listed as ignored or needing correction, and let the user fix
+   the CSV and re-import; re-importing overwrites decisions that were already recorded.
+7. Run **enrich_result** for each applied item with wording *you* derive from their evidence — finding,
    evidence, riskImpact and recommendation, using only facts they stated. The reviewer's raw words
    must never be left as the report Finding.
-   - Use `--decision notapplicable` when what the user reports shows the control does not exist on
-     this server at all — every value absent, empty, zero or irrelevant to the item, so there is
-     nothing to assess. The item is then excluded from every score, listed on the workbook's
+   - Use **resolve_review** with `--decision notapplicable` when what the user reports shows the control
+     does not exist on this server at all — every value absent, empty, zero or irrelevant to the item,
+     so there is nothing to assess. The item is then excluded from every score, listed on the workbook's
      "Not Applicable Items" sheet and reported as **Not Applicable**, never as Pass or Fail, and it
      needs no `enrich_result` call. A zero that itself proves compliance is a Pass, not this.
+     `resolve_review` is also how you correct a single item after an import.
 8. Do not write a final summary until every review item is resolved and every script item
    is enriched. The full report suite is generated automatically by `evaluate` in the run
    directory (but `results/historical_last_run.json` is **not** refreshed there).
@@ -202,7 +211,13 @@ powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --
 # Re-run reusing the manual results recorded by the previous audit
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evaluate --copilot --manual-results last-runs --items 1.1.1,3.1.4 --server localhost --databases all
 
-# Record a decision after reviewing with the user
+# Export the manual checklist items for the user to fill in offline
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 export_manual_csv
+
+# Apply the decisions once the user has filled the Decision/Evidence columns
+powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 import_manual_csv --file "results\<run>\manual_checks_20260915_162306.csv"
+
+# Correct a single item, or record one that is not applicable at all
 powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id 3.1.4 --decision pass --notes "SET NOCOUNT ON present in all procs"
 
 # Show the final report

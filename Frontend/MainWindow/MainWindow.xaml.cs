@@ -44,32 +44,6 @@ namespace SQLAuditor.Wpf
             public string? EnrichedKey { get; set; }
         }
 
-        private sealed class ManualCheckExportRow
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Area { get; init; } = string.Empty;
-            public string Description { get; init; } = string.Empty;
-            public string Verification { get; init; } = string.Empty;
-            public string ManualSteps { get; init; } = string.Empty;
-            public string Status { get; init; } = string.Empty;
-            public string Decision { get; init; } = string.Empty;
-            public string Evidence { get; init; } = string.Empty;
-        }
-
-        private sealed class ManualCheckImportRow
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Decision { get; init; } = string.Empty;
-            public string Evidence { get; init; } = string.Empty;
-            public string ManualSteps { get; init; } = string.Empty;
-        }
-
-        private sealed class ManualCheckImportFile
-        {
-            public System.Collections.Generic.List<ManualCheckImportRow> Rows { get; } = new();
-            public System.Collections.Generic.List<string> Issues { get; } = new();
-        }
-
         private System.Threading.CancellationTokenSource? _progressWatcherCts;
         private long _progressStreamPos = 0;
         private bool _isVerified = false;
@@ -1117,128 +1091,6 @@ namespace SQLAuditor.Wpf
             }
 
             return unresolved;
-        }
-
-        private static void WriteManualChecksCsv(string path, System.Collections.Generic.IEnumerable<ManualCheckExportRow> rows)
-        {
-            var csv = new System.Text.StringBuilder();
-            csv.AppendLine(string.Join(",", new[]
-            {
-                "Checklist ID", "Area", "Description", "Verification", "Manual Steps",
-                "Current Status", "Decision", "Evidence",
-            }.Select(ToCsvField)));
-
-            foreach (var row in rows)
-            {
-                csv.AppendLine(string.Join(",", new[]
-                {
-                    row.Id, row.Area, row.Description, row.Verification, row.ManualSteps,
-                    row.Status, row.Decision, row.Evidence,
-                }.Select(ToCsvField)));
-            }
-
-            System.IO.File.WriteAllText(path, csv.ToString(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        }
-
-        private static string ToCsvField(string? value) =>
-            $"\"{(value ?? string.Empty).Replace("\"", "\"\"")}\"";
-
-        private static ManualCheckImportFile ReadManualChecksCsv(string path)
-        {
-            var result = new ManualCheckImportFile();
-            using var parser = new Microsoft.VisualBasic.FileIO.TextFieldParser(path, System.Text.Encoding.UTF8)
-            {
-                TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited,
-                HasFieldsEnclosedInQuotes = true,
-                TrimWhiteSpace = false,
-            };
-            parser.SetDelimiters(",");
-
-            var headers = parser.ReadFields();
-            if (headers == null || headers.Length == 0)
-                throw new InvalidDataException("The CSV is empty or has no header row.");
-
-            var headerIndexes = headers
-                .Select((header, index) => new { Header = (header ?? string.Empty).Trim().TrimStart('\uFEFF'), Index = index })
-                .GroupBy(entry => entry.Header, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(group => group.Key, group => group.First().Index, StringComparer.OrdinalIgnoreCase);
-
-            var requiredHeaders = new[] { "Checklist ID", "Decision", "Evidence" };
-            var missingHeaders = requiredHeaders.Where(header => !headerIndexes.ContainsKey(header)).ToArray();
-            if (missingHeaders.Length > 0)
-                throw new InvalidDataException("Missing required CSV column(s): " + string.Join(", ", missingHeaders));
-
-            var seenIds = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            while (!parser.EndOfData)
-            {
-                var lineNumber = parser.LineNumber;
-                string[]? fields;
-                try
-                {
-                    fields = parser.ReadFields();
-                }
-                catch (Microsoft.VisualBasic.FileIO.MalformedLineException ex)
-                {
-                    result.Issues.Add($"Line {lineNumber}: malformed CSV ({ex.Message}).");
-                    continue;
-                }
-
-                if (fields == null || fields.All(string.IsNullOrWhiteSpace)) continue;
-
-                string Field(string header)
-                {
-                    if (!headerIndexes.TryGetValue(header, out var index) || index >= fields.Length) return string.Empty;
-                    return fields[index]?.Trim() ?? string.Empty;
-                }
-
-                var id = Field("Checklist ID");
-                if (string.IsNullOrWhiteSpace(id))
-                {
-                    result.Issues.Add($"Line {lineNumber}: Checklist ID is empty.");
-                    continue;
-                }
-
-                if (!seenIds.Add(id))
-                {
-                    result.Issues.Add($"Line {lineNumber}: duplicate Checklist ID '{id}'.");
-                    continue;
-                }
-
-                var decision = Field("Decision").ToLowerInvariant() switch
-                {
-                    "pass" or "passed" or "p" => "Pass",
-                    "fail" or "failed" or "f" => "Fail",
-                    "" => string.Empty,
-                    _ => "Invalid",
-                };
-                if (decision.Length == 0)
-                {
-                    result.Issues.Add($"{id}: Decision is empty; enter Pass or Fail.");
-                    continue;
-                }
-                if (decision == "Invalid")
-                {
-                    result.Issues.Add($"{id}: Decision must be Pass or Fail.");
-                    continue;
-                }
-
-                var evidence = Field("Evidence");
-                if (string.IsNullOrWhiteSpace(evidence))
-                {
-                    result.Issues.Add($"{id}: Evidence is empty.");
-                    continue;
-                }
-
-                result.Rows.Add(new ManualCheckImportRow
-                {
-                    Id = id,
-                    Decision = decision,
-                    Evidence = evidence,
-                    ManualSteps = Field("Manual Steps"),
-                });
-            }
-
-            return result;
         }
 
         private async Task<(int Applied, int Ignored)> ApplyImportedManualChecksAsync(
@@ -3076,7 +2928,7 @@ namespace SQLAuditor.Wpf
                 var dialog = new SaveFileDialog
                 {
                     Title = "Export Manual Checks",
-                    FileName = $"manual_checks_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                    FileName = ManualChecklistCsv.BuildExportFileName(DateTime.Now),
                     DefaultExt = ".csv",
                     Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
                     InitialDirectory = AuditOutputPaths.CurrentRunDirectory,
@@ -3085,7 +2937,7 @@ namespace SQLAuditor.Wpf
                 };
                 if (dialog.ShowDialog(this) != true) return;
 
-                WriteManualChecksCsv(dialog.FileName, manualChecks);
+                ManualChecklistCsv.Write(dialog.FileName, manualChecks);
                 var skippedCount = MarkPendingManualAsSkipped(pendingIds, dialog.FileName);
                 RegenerateReportFromPersisted();
 
@@ -3138,13 +2990,10 @@ namespace SQLAuditor.Wpf
             System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             try
             {
-                var importFile = ReadManualChecksCsv(dialog.FileName);
+                var importFile = ManualChecklistCsv.Read(dialog.FileName);
                 try
                 {
-                    var runDir = AuditOutputPaths.CurrentRunDirectory;
-                    var target = System.IO.Path.Combine(runDir, "manual-checklist.csv");
-                    System.IO.File.Copy(dialog.FileName, target, overwrite: true);
-                    SQLAuditor.Lib.PreviousEvaluationStore.RecordManualCsv(runDir, "manual-checklist.csv");
+                    ManualChecklistCsv.StoreInRunDirectory(dialog.FileName);
                 }
                 catch (Exception copyEx)
                 {
