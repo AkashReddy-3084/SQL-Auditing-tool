@@ -1,0 +1,368 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL Estate Assessment Readout</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;letter-spacing:0!important}
+:root{--red:#E31837;--dark:#17283A;--ink:#283746;--muted:#687583;--light:#F5F7F9;--paper:#FFF;--line:#DCE2E8;--blue:#1967A3;--blue-soft:#EAF3FA;--green:#147A52;--green-soft:#E8F5EF;--amber:#8A5600;--amber-soft:#FFF3DF;--critical:#B4232F;--high:#D96318;--medium:#C89A00;--good:#168256;--excellent:#2377B9;--font:'Segoe UI Variable','Segoe UI',Tahoma,sans-serif}
+html{scroll-behavior:smooth}body{font-family:var(--font);background:var(--light);color:var(--ink);font-size:14px;line-height:1.55;letter-spacing:0}button,input,select{font:inherit;letter-spacing:0}
+.header{background:var(--dark);color:#fff;padding:1.55rem max(1.25rem,calc((100vw - 1240px)/2));border-bottom:4px solid var(--red)}
+.header-eye{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#91ABC3;margin-bottom:.25rem}.header h1{font-size:24px;font-weight:650}.header h1 span{color:#FF526A}.header-sub{font-size:12.5px;color:#B6C5D3;max-width:850px;margin-top:.3rem}.header-stats{display:grid;grid-template-columns:repeat(5,minmax(100px,1fr));gap:1rem;margin-top:1.1rem;max-width:920px}.hstat{border-left:1px solid #486078;padding-left:.8rem}.hstat b{display:block;font-size:20px;line-height:1.15}.hstat span{font-size:9.5px;color:#91ABC3;text-transform:uppercase;letter-spacing:.05em}
+.tabs{display:flex;background:#fff;border-bottom:1px solid var(--line);padding:0 max(1rem,calc((100vw - 1280px)/2));position:sticky;top:0;z-index:20;box-shadow:0 2px 8px rgba(22,40,58,.06)}.tab-group{display:flex;flex-wrap:nowrap}.tab-group.context{margin-left:auto}.tab{border:0;background:transparent;padding:.8rem .62rem;font-size:11.5px;font-weight:600;color:#66727F;border-bottom:3px solid transparent;cursor:pointer;white-space:nowrap}.tab:hover,.tab:focus-visible{color:var(--dark);background:#F7F9FB;outline:none}.tab.active{color:var(--dark);border-bottom-color:var(--red)}
+.content{max-width:1240px;margin:0 auto;padding:1.7rem 1.5rem 2.5rem}.panel{display:none}.panel.active{display:block;animation:fade .18s ease}@keyframes fade{from{opacity:.25;transform:translateY(3px)}to{opacity:1;transform:none}}
+.page-title{font-size:19px;font-weight:650;color:var(--dark)}.page-desc{font-size:12.5px;color:var(--muted);margin:.25rem 0 1.2rem;max-width:900px}.slabel{font-size:10px;font-weight:750;text-transform:uppercase;letter-spacing:.08em;color:#7D8996;margin:.85rem 0 .45rem}
+.hero{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:1.5rem;background:var(--dark);padding:1.35rem 1.6rem;color:#fff;border-left:6px solid var(--red)}.hero-score{font-size:50px;font-weight:750;line-height:1}.hero-meta{font-size:12px;color:#B7C6D3;margin-top:.5rem}.rate{display:inline-block;font-weight:750;border-radius:4px;padding:3px 10px;font-size:11px;color:#fff}.rate.critical{background:var(--critical)}.rate.high{background:var(--high)}.rate.medium{background:var(--medium);color:#17283A}.rate.good{background:var(--good)}.rate.excellent{background:var(--excellent)}.rate.not-scored{background:#88939D}
+.kpi-band{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:#fff;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:1rem 0 1.3rem}.kpi{padding:.85rem 1rem;border-right:1px solid var(--line)}.kpi:nth-child(4n){border-right:0}.kpi-value{font-size:22px;font-weight:720;color:var(--dark)}.kpi-label{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:#778490;font-weight:700}.kpi-note{font-size:10.5px;color:#8A949E;margin-top:.15rem}
+.two-col{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(300px,.92fr);gap:1.25rem;align-items:start}.chart-panel{background:#fff;border:1px solid var(--line);padding:1rem}.chart-title{font-size:13px;font-weight:700;color:var(--dark)}.chart-sub{font-size:10.5px;color:#87919B;margin-bottom:.55rem}.chart-panel svg{display:block;width:100%;height:auto;max-height:430px}.priority-list{display:flex;flex-direction:column;gap:.55rem}.priority{background:#fff;border:1px solid var(--line);border-left:4px solid var(--red);padding:.7rem .8rem}.priority-rank{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--critical);font-weight:800}.priority h3{font-size:12.5px;color:var(--dark);margin:.15rem 0}.priority p{font-size:11.2px;color:#5B6874}.priority strong{color:var(--blue)}
+.dtable-wrap{overflow:auto;border:1px solid var(--line);background:#fff;margin:.45rem 0 1rem}.dtable{width:100%;border-collapse:collapse;min-width:760px}.dtable th{background:var(--dark);color:#BCD0E1;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;text-align:left;padding:8px 10px;position:sticky;top:0;z-index:1}.dtable td{padding:8px 10px;border-bottom:1px solid #E8EDF1;font-size:11.5px;vertical-align:top}.dtable tr:last-child td{border-bottom:0}.dtable tbody tr:hover{background:#F8FAFC}.dtable .center{text-align:center}.dtable .num{text-align:right;font-variant-numeric:tabular-nums}.jump{border:0;background:none;color:var(--blue);text-decoration:underline;font-weight:650;cursor:pointer;padding:0}
+.sort-button{display:flex;align-items:center;gap:5px;width:100%;border:0;background:transparent;color:inherit;font:inherit;text-transform:inherit;text-align:left;cursor:pointer;padding:0}.sort-button:hover,.sort-button:focus-visible{color:#fff;outline:2px solid #8FB8D8;outline-offset:2px}.sort-indicator{font-size:9px;color:#8FB8D8}.sort-button[data-direction="asc"] .sort-indicator::after{content:'â–²'}.sort-button[data-direction="desc"] .sort-indicator::after{content:'â–¼'}.sort-button:not([data-direction]) .sort-indicator::after{content:'â—†';opacity:.55}
+.badge{display:inline-block;font-size:9.5px;padding:2px 7px;border-radius:10px;font-weight:750;white-space:nowrap}.badge-critical{background:#FCE8EA;color:#A41F2B}.badge-high{background:#FFF0E6;color:#B94E0C}.badge-medium,.badge-amber{background:#FFF5D7;color:#715500}.badge-good,.badge-low{background:var(--green-soft);color:var(--green)}.badge-excellent{background:var(--blue-soft);color:var(--blue)}.badge-gray{background:#EDF0F2;color:#59636D}.badge-blue{background:var(--blue-soft);color:var(--blue)}
+.chip{display:inline-block;min-width:28px;text-align:center;font-weight:800;border-radius:4px;padding:2px 7px;font-size:10.5px;color:#fff}.chip.s0{background:#B4232F}.chip.s1{background:#D96318}.chip.s2{background:#C89A00;color:#17283A}.chip.s3{background:#168256}.chip.sna{background:#87929C}.delta-pos{color:var(--green);font-weight:750}.delta-neg{color:var(--critical);font-weight:750}
+.area-sec{background:#fff;border:1px solid var(--line);margin-bottom:.7rem}.area-head{display:flex;align-items:center;gap:.65rem;padding:.68rem .9rem;background:#EEF2F5;color:var(--dark);font-weight:700;cursor:pointer;user-select:none}.area-sec.expanded .area-head{background:var(--dark);color:#fff}.area-num{font-size:9px;text-transform:uppercase;letter-spacing:.08em;padding:2px 7px;background:rgba(23,40,58,.08);color:#647382}.area-sec.expanded .area-num{background:rgba(255,255,255,.1);color:#B9CCDB}.area-meta{margin-left:auto;font-size:10px;color:#71808D;font-weight:550}.area-sec.expanded .area-meta{color:#ADC0D0}.area-toggle{font-size:10px;transition:transform .15s}.area-sec.expanded .area-toggle{transform:rotate(180deg)}.area-content{display:none;padding:.85rem}.area-sec.expanded .area-content{display:block}.area-summary{display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:.65rem}
+.filter-bar{display:flex;flex-wrap:wrap;gap:.65rem;align-items:end;background:#fff;border:1px solid var(--line);padding:.75rem;margin-bottom:.8rem}.filter-bar label{display:flex;flex-direction:column;gap:3px;font-size:9.5px;font-weight:750;text-transform:uppercase;letter-spacing:.04em;color:#697581}.filter-bar select,.filter-bar input{border:1px solid #C9D1D9;background:#fff;padding:5px 8px;min-width:145px;color:var(--dark);border-radius:3px;font-size:11.5px}.filter-bar input{min-width:230px}.filter-count{margin-left:auto;align-self:center;font-size:10.5px;color:#7A8692}.empty{padding:2rem;text-align:center;color:#8B959E;font-size:12px}
+.evidence-detail{margin-top:.35rem}.evidence-detail summary{cursor:pointer;color:var(--blue);font-size:10.5px;font-weight:650}.evidence-grid{display:grid;grid-template-columns:1fr 1fr;gap:.55rem;margin-top:.45rem}.evidence-box{background:#F5F8FA;border-left:3px solid #9DB2C4;padding:.5rem;font-size:10.5px}.evidence-box b{display:block;color:var(--dark);margin-bottom:.15rem}.code{font-family:Consolas,'Courier New',monospace;font-size:10px;white-space:pre-wrap;word-break:break-word;background:#F1F3F5;border:1px solid var(--line);padding:.55rem;margin-top:.35rem;color:#34424F}
+.warn{background:var(--amber-soft);border-left:4px solid #D89B2B;padding:.8rem 1rem;margin:.85rem 0}.warn.info{background:var(--blue-soft);border-left-color:var(--blue)}.warn h3{font-size:12px;color:var(--dark);margin-bottom:.2rem}.warn p{font-size:11.5px;color:#53616D}.ul-clean{list-style:none;display:flex;flex-direction:column;gap:.3rem}.ul-clean li{font-size:11.5px;padding-left:.8rem;position:relative}.ul-clean li::before{content:'â–ª';position:absolute;left:0;color:var(--red)}
+.server-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1rem}.server-panel{background:#fff;border:1px solid var(--line);border-top:4px solid var(--blue);padding:1rem}.server-panel h3{font-size:15px;color:var(--dark)}.server-score{font-size:34px;font-weight:750;color:var(--dark);margin:.25rem 0}.meter{height:8px;background:#E7EBEF;margin:.4rem 0 .7rem}.meter span{display:block;height:100%;background:var(--high)}.server-facts{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}.server-fact{border-top:1px solid var(--line);padding-top:.4rem}.server-fact b{display:block;font-size:14px}.server-fact span{font-size:9px;text-transform:uppercase;color:#7C8792}
+.timeline-chart{background:#fff;border:1px solid var(--line);padding:1rem;overflow-x:auto}.timeline-chart svg{display:block;min-width:900px;width:100%;height:auto}.step-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.7rem}.step-card{background:#fff;border:1px solid var(--line);border-top:4px solid var(--blue);padding:.85rem;min-width:0}.step-card:first-child{border-top-color:var(--red)}.step-card:nth-child(3){border-top-color:#267D91}.step-card:nth-child(4){border-top-color:#C89A00}.step-card:nth-child(5){border-top-color:var(--green)}.step-window{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#74818D;font-weight:800}.step-card h3{font-size:13px;color:var(--dark);margin:.15rem 0}.step-owner{font-size:10.5px;color:#60707D;margin-bottom:.55rem}.step-target{font-size:18px;font-weight:750;color:var(--blue);margin:.25rem 0 .55rem}.step-gate{border-top:1px solid var(--line);margin-top:.65rem;padding-top:.5rem;font-size:10.5px;color:#53616D}.timeline-legend{display:flex;flex-wrap:wrap;gap:1rem;margin-top:.6rem;font-size:10.5px;color:#65727E}.legend-key{display:inline-flex;align-items:center;gap:.35rem}.legend-line{display:inline-block;width:20px;height:3px;background:var(--blue)}.legend-line.target{height:0;border-top:2px dashed var(--red);background:transparent}.legend-line.maturity{height:0;border-top:2px dashed var(--green);background:transparent}
+.principle-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem}.principle{background:#fff;border:1px solid var(--line);padding:.75rem}.principle strong{display:block;color:var(--dark);font-size:12px}.principle span{font-size:10.8px;color:#677480}.scope-diagram{background:#fff;border:1px solid var(--line);padding:1rem}.scope-diagram svg{display:block;width:100%;height:auto;max-height:520px}
+.footer{border-top:1px solid var(--line);background:#fff;padding:1.1rem;text-align:center;font-size:10px;color:#7D8994}
+@media(max-width:1050px){.tabs,.tab-group{flex-wrap:wrap}.tab-group{width:100%}.tab-group.context{margin-left:0}.header-stats{grid-template-columns:repeat(3,1fr)}.kpi-band{grid-template-columns:repeat(2,1fr)}.kpi:nth-child(2n){border-right:0}.two-col{grid-template-columns:1fr}.step-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.principle-grid{grid-template-columns:1fr}}
+@media(max-width:680px){.content{padding:1rem .7rem}.header{padding:1.15rem}.header-stats{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}.hero-score{font-size:42px}.server-grid,.step-grid{grid-template-columns:1fr}.filter-bar>*{width:100%}.filter-bar select,.filter-bar input{width:100%;min-width:0}.filter-count{margin-left:0}.evidence-grid{grid-template-columns:1fr}}
+@media print{.tabs,.filter-bar,.jump{display:none!important}.panel{display:block!important;break-before:page}.panel:first-child{break-before:auto}.area-content{display:block!important}.content{max-width:none}.header{background:#17283A!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style>
+</head>
+<body>
+<header class="header">
+  <div class="header-eye" id="header-eye">SQL Estate Assessment</div>
+  <h1 id="header-title">SQL Assessment Readout</h1>
+  <div class="header-sub" id="header-subtitle"></div>
+  <div class="header-stats" id="header-stats"></div>
+</header>
+<nav class="tabs" aria-label="Assessment sections">
+  <div class="tab-group">
+    <button class="tab active" data-panel="exec">Assessment Summary</button>
+    <button class="tab" data-panel="servers">Server Comparison</button>
+    <button class="tab" data-panel="results">Detailed Results</button>
+    <button class="tab" data-panel="risks">Key Risks</button>
+    <button class="tab" data-panel="controls">Control Explorer</button>
+    <button class="tab" data-panel="recommendations">Recommendations</button>
+    <button class="tab" data-panel="timeline">Next Steps &amp; Timeline</button>
+  </div>
+  <div class="tab-group context">
+    <button class="tab" data-panel="principles">Principles</button>
+    <button class="tab" data-panel="scope">Scope &amp; Evidence</button>
+    <button class="tab" data-panel="scoring">Scoring</button>
+  </div>
+</nav>
+<main class="content">
+  <section class="panel active" id="panel-exec">
+    <div class="page-title">Assessment Summary</div>
+    <p class="page-desc">Executive posture, cross-server consistency, and the controls with the greatest operational consequence.</p>
+    <div class="hero" id="summary-hero"></div>
+    <div class="kpi-band" id="summary-kpis"></div>
+    <div class="two-col">
+      <div class="chart-panel"><div class="chart-title">Estate maturity profile</div><div class="chart-sub">Fourteen weighted SQL audit areas against the 76% Good threshold.</div><div id="radar-chart"></div></div>
+      <div><div class="chart-title">Top four priorities</div><div class="chart-sub" id="priority-subtitle">Evidence-backed priorities shared across the SQL estate.</div><div class="priority-list" id="top-priorities"></div></div>
+    </div>
+    <div class="slabel">All audit areas</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>#</th><th>Audit area</th><th id="summary-server-1">Server 1 score</th><th id="summary-server-2">Server 2 score</th><th>Estate avg</th><th>Rating</th><th>Priority</th><th>Details</th></tr></thead><tbody id="summary-areas"></tbody></table></div>
+    <div class="warn"><h3>Bottom line</h3><p id="summary-conclusion"></p></div>
+  </section>
+
+  <section class="panel" id="panel-servers">
+    <div class="page-title">Server Comparison</div>
+    <p class="page-desc">Side-by-side posture, coverage, area variance, and database scope for both audited SQL Server instances.</p>
+    <div class="server-grid" id="server-grid"></div>
+    <div class="chart-panel"><div class="chart-title">Server score versus Good threshold</div><div class="chart-sub">The line marks 76%, the beginning of the Good band.</div><div id="server-bars"></div></div>
+    <div class="slabel">Area-by-area comparison</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>#</th><th>Area</th><th id="server-area-1">Server 1</th><th id="server-area-2">Server 2</th><th>Spread</th><th>Estate rating</th><th>Priority actions</th></tr></thead><tbody id="server-area-table"></tbody></table></div>
+    <div class="slabel">Database inventory</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>Estate ID</th><th>Server</th><th>Database</th><th>Source-local ID</th></tr></thead><tbody id="database-table"></tbody></table></div>
+  </section>
+
+  <section class="panel" id="panel-results">
+    <div class="page-title">Detailed Results by Area</div>
+    <p class="page-desc" id="results-description">Consolidated action controls grouped by audit area. Expand an area to inspect findings and recommended actions.</p>
+    <div id="area-results"></div>
+  </section>
+
+  <section class="panel" id="panel-risks">
+    <div class="page-title">Key Risks and Observations</div>
+    <p class="page-desc">The complete consolidated action register, filterable by area, severity, server scope, and text.</p>
+    <div class="filter-bar">
+      <label>Area<select id="risk-area"></select></label>
+      <label>Severity<select id="risk-severity"><option value="">All severities</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label>
+      <label>Scope<select id="risk-scope"><option value="">All scopes</option><option value="shared">Shared</option><option value="specific">Server-specific</option></select></label>
+      <label>Search<input id="risk-search" type="search" placeholder="Ref, title, finding..."></label>
+      <span class="filter-count" id="risk-count"></span>
+    </div>
+    <div class="dtable-wrap"><table class="dtable" id="risk-action-table"><thead><tr><th aria-sort="none"><button class="sort-button" type="button" data-risk-sort="ref">Ref <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-risk-sort="area">Area <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-risk-sort="severity">Severity <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="descending"><button class="sort-button" type="button" data-risk-sort="risk" data-direction="desc">Risk <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-risk-sort="scope">Server scope <span class="sort-indicator" aria-hidden="true"></span></button></th><th>Finding / current evidence</th></tr></thead><tbody id="risk-table"></tbody></table></div>
+  </section>
+
+  <section class="panel" id="panel-controls">
+    <div class="page-title">Control Explorer</div>
+    <p class="page-desc" id="controls-description">All effective controls with adjacent server outcomes, comparison state, and evidence rationale.</p>
+    <div class="filter-bar">
+      <label>Area<select id="control-area"></select></label>
+      <label>Severity<select id="control-severity"><option value="">All severities</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label>
+      <label>Comparison<select id="control-comparison"><option value="">All comparisons</option><option>Aligned</option><option>Score differs</option><option>Status differs</option></select></label>
+      <label>Search<input id="control-search" type="search" placeholder="Ref, title, rationale..."></label>
+      <span class="filter-count" id="control-count"></span>
+    </div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>Ref</th><th>Area / category</th><th>Control</th><th>Severity</th><th id="control-server-1">Server 1</th><th id="control-server-2">Server 2</th><th>Comparison</th></tr></thead><tbody id="control-table"></tbody></table></div>
+  </section>
+
+  <section class="panel" id="panel-recommendations">
+    <div class="page-title">Recommendations and Modeled Score Opportunity</div>
+    <p class="page-desc">Portfolio priorities and source-modeled score changes. Scenarios are independent, denominator-fixed opportunities rather than forecasts.</p>
+    <div class="warn info"><h3>How to read the projections</h3><p>The estate projection is the arithmetic mean of the two independently modeled server scores. Individual gains are not additive; credit requires implementation, evidence, and a rerun.</p></div>
+    <div class="chart-panel"><div class="chart-title">Modeled estate score by scenario</div><div class="chart-sub">Current average compared with the two highest-value remediation scenarios and theoretical ceilings.</div><div id="scenario-bars"></div></div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>Scenario</th><th>Current avg</th><th>Projected avg</th><th>Gain</th><th id="scenario-server-1">Server 1 projected</th><th id="scenario-server-2">Server 2 projected</th><th>Controls moved to 3</th></tr></thead><tbody id="scenario-table"></tbody></table></div>
+    <div class="slabel">Priority concentration by area</div>
+    <div class="dtable-wrap"><table class="dtable" id="recommendation-area-table"><thead><tr><th aria-sort="ascending"><button class="sort-button" type="button" data-sort="number" data-direction="asc"># <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-sort="name">Area <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-sort="priorityActions">Priority actions <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-sort="sharedPriority">Shared priority <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-sort="actions">All actions <span class="sort-indicator" aria-hidden="true"></span></button></th><th aria-sort="none"><button class="sort-button" type="button" data-sort="focus">Recommended focus <span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead><tbody id="recommendation-areas"></tbody></table></div>
+  </section>
+
+  <section class="panel" id="panel-timeline">
+    <div class="page-title">Next Steps &amp; Timeline</div>
+    <p class="page-desc">A sequenced remediation path from immediate risk containment through Good maturity to a 90% estate target, with explicit ownership and evidence gates.</p>
+    <div class="warn info"><h3>Planning basis</h3><p>Intermediate scores are denominator-fixed scenarios, not delivery forecasts. The 90% endpoint is a management maturity target; credit is recognized only after remediation evidence is accepted and both server assessments are rerun.</p></div>
+    <div class="timeline-chart"><div class="chart-title">Modeled remediation path to 90%</div><div class="chart-sub">Relative delivery windows combine independently modeled source-server scenarios with the 90% management target.</div><div id="timeline-chart"></div><div class="timeline-legend"><span class="legend-key"><span class="legend-line"></span>Current and modeled estate average</span><span class="legend-key"><span class="legend-line target"></span>76% Good threshold</span><span class="legend-key"><span class="legend-line maturity"></span>90% maturity target</span></div></div>
+    <div class="slabel">Delivery sequence</div>
+    <div class="step-grid" id="next-step-grid"></div>
+  </section>
+
+  <section class="panel" id="panel-principles">
+    <div class="page-title">Assessment Principles</div>
+    <p class="page-desc">The SQL Server engineering principles represented by the fourteen audit areas.</p>
+    <div class="principle-grid" id="principle-grid"></div>
+  </section>
+
+  <section class="panel" id="panel-scope">
+    <div class="page-title">Assessment Scope &amp; Evidence</div>
+    <p class="page-desc">Audited servers, estate database identities, source provenance, access limitations, and reconciliation controls.</p>
+    <div class="scope-diagram" id="scope-diagram"></div>
+    <div class="slabel">Source provenance</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>Server</th><th>Source workbook</th><th>Workbook SHA-256</th><th>Source modified</th></tr></thead><tbody id="source-table"></tbody></table></div>
+    <div class="slabel">Open access exceptions</div>
+    <div id="access-list"></div>
+    <div class="slabel">Combined report reconciliation</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>Check</th><th>Expected</th><th>Actual</th><th>Status</th><th>Notes</th></tr></thead><tbody id="qa-table"></tbody></table></div>
+  </section>
+
+  <section class="panel" id="panel-scoring">
+    <div class="page-title">Assessment Scoring and Criteria</div>
+    <p class="page-desc">Only validated controls contribute to category, area, and weighted overall scores. Pending, inaccessible, and not-applicable controls are excluded rather than counted as failures.</p>
+    <div class="hero" id="scoring-hero"></div>
+    <div class="two-col" style="margin-top:1rem">
+      <div><div class="slabel">Control score scale</div><div class="dtable-wrap"><table class="dtable"><thead><tr><th>Score</th><th>Meaning</th><th>Treatment</th></tr></thead><tbody><tr><td><span class="chip s0">0</span></td><td>Not implemented / ineffective</td><td>Priority remediation</td></tr><tr><td><span class="chip s1">1</span></td><td>Partially implemented / major gaps</td><td>Strengthen and verify</td></tr><tr><td><span class="chip s2">2</span></td><td>Implemented / improvement remains</td><td>Targeted improvement</td></tr><tr><td><span class="chip s3">3</span></td><td>Best practice / fully implemented</td><td>Maintain evidence</td></tr><tr><td><span class="chip sna">â€”</span></td><td>Pending, inaccessible, or N/A</td><td>Excluded from arithmetic</td></tr></tbody></table></div></div>
+      <div><div class="slabel">Risk rating bands</div><div class="dtable-wrap"><table class="dtable"><thead><tr><th>Band</th><th>Range</th><th>Interpretation</th></tr></thead><tbody><tr><td><span class="rate critical">Critical</span></td><td>0â€“40%</td><td>Immediate remediation</td></tr><tr><td><span class="rate high">High</span></td><td>&gt;40â€“60%</td><td>Significant gaps</td></tr><tr><td><span class="rate medium">Medium</span></td><td>&gt;60â€“75%</td><td>Functional; targeted improvement</td></tr><tr><td><span class="rate good">Good</span></td><td>&gt;75â€“90%</td><td>Minor improvements</td></tr><tr><td><span class="rate excellent">Excellent</span></td><td>&gt;90â€“100%</td><td>Maintain best practice</td></tr></tbody></table></div></div>
+    </div>
+    <div class="slabel">Weighted area model</div>
+    <div class="dtable-wrap"><table class="dtable"><thead><tr><th>#</th><th>Area</th><th>Weight</th><th id="scoring-server-1">Server 1 score</th><th id="scoring-server-2">Server 2 score</th><th>Estate average</th></tr></thead><tbody id="scoring-areas"></tbody></table></div>
+    <div class="warn info"><h3>Estate interpretation</h3><p id="scoring-interpretation"></p></div>
+  </section>
+</main>
+<footer class="footer" id="report-footer">SQL Estate Audit &nbsp;|&nbsp; Evidence from combined-audit-report.xlsx &nbsp;|&nbsp; Internal / Confidential</footer>
+<script id="readout-data" type="application/json">__READOUT_DATA__</script>
+<script>
+'use strict';
+const DATA=JSON.parse(document.getElementById('readout-data').textContent);
+const serverLabel=id=>DATA.servers.find(s=>s.id===id)?.name||id;
+const esc=value=>String(value??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+const severityClass=value=>'badge-'+String(value||'gray').toLowerCase().replace(/\s+/g,'-');
+const rateClass=value=>String(value||'not-scored').toLowerCase().replace(/\s+/g,'-');
+const scoreChip=(score,status)=>Number.isFinite(Number(score))?`<span class="chip s${Number(score)}">${Number(score)}</span>`:`<span class="chip sna" title="${esc(status)}">â€”</span>`;
+const pct=value=>Number.isFinite(Number(value))?`${Number(value).toFixed(1)}%`:'â€”';
+const actionText=text=>esc(text).replace(/\n\n/g,'<br><br>').replace(/\n/g,'<br>');
+const areaByNumber=number=>DATA.areas.find(area=>area.number===Number(number));
+
+function showPanel(name){
+  document.querySelectorAll('.panel').forEach(panel=>panel.classList.toggle('active',panel.id===`panel-${name}`));
+  document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.panel===name));
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>showPanel(tab.dataset.panel)));
+function goArea(number){showPanel('results');const section=document.getElementById(`area-${number}`);section?.classList.add('expanded');setTimeout(()=>section?.scrollIntoView({behavior:'smooth',block:'start'}),180)}
+
+function renderHeader(){
+  document.title=DATA.meta.title;
+  document.getElementById('header-eye').textContent=`SQL Estate Assessment / ${DATA.meta.estateLabel}`;
+  document.getElementById('header-title').innerHTML=`${esc(DATA.meta.estateLabel)} <span>SQL Assessment</span> Readout`;
+  document.getElementById('header-subtitle').textContent=DATA.meta.headerSubtitle;
+  document.getElementById('report-footer').innerHTML=`${esc(DATA.meta.estateLabel)} SQL Estate Audit &nbsp;|&nbsp; Evidence from ${esc(DATA.meta.workbook)} &nbsp;|&nbsp; Internal / Confidential`;
+  const labels=[
+    ['summary-server-1',`${DATA.servers[0].name} score`],['summary-server-2',`${DATA.servers[1].name} score`],
+    ['server-area-1',DATA.servers[0].name],['server-area-2',DATA.servers[1].name],
+    ['control-server-1',DATA.servers[0].name],['control-server-2',DATA.servers[1].name],
+    ['scenario-server-1',`${DATA.servers[0].name} projected`],['scenario-server-2',`${DATA.servers[1].name} projected`],
+    ['scoring-server-1',`${DATA.servers[0].name} score`],['scoring-server-2',`${DATA.servers[1].name} score`]
+  ];
+  labels.forEach(([id,label])=>document.getElementById(id).textContent=label);
+  document.getElementById('results-description').textContent=`All ${DATA.kpis.actions} consolidated action controls grouped by audit area. Expand an area to inspect findings and recommended actions.`;
+  document.getElementById('controls-description').textContent=`All ${DATA.controls.length} effective controls with adjacent ${DATA.servers[0].name} and ${DATA.servers[1].name} outcomes, comparison state, and evidence rationale.`;
+  document.getElementById('priority-subtitle').textContent=`Evidence-backed priorities shared across the ${DATA.meta.estateLabel} SQL estate.`;
+  const items=[[DATA.servers.length,'Servers'],[DATA.kpis.databases,'Databases'],[pct(DATA.kpis.averageScore),'Average score'],[DATA.kpis.estateRisk,'Estate rating'],[DATA.kpis.priorityActions,'Priority actions']];
+  document.getElementById('header-stats').innerHTML=items.map(([v,l])=>`<div class="hstat"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join('');
+}
+function renderSummary(){
+  document.getElementById('summary-hero').innerHTML=`<div class="hero-score">${pct(DATA.kpis.averageScore)}</div><div><span class="rate ${rateClass(DATA.kpis.estateRisk)}">${esc(DATA.kpis.estateRisk)}</span><div class="hero-meta">Informational estate average Â· ${DATA.servers.length} SQL servers Â· ${DATA.kpis.databases} databases Â· ${DATA.kpis.actions} unique action controls Â· weakest-server risk rule</div></div>`;
+  const kpis=[
+    [DATA.kpis.validated,'Validated outcomes','Across both server checklists'],[`${DATA.kpis.sharedActionRate.toFixed(1)}%`,'Shared action rate',`${DATA.kpis.sharedActions} controls affect both servers`],[`${DATA.kpis.exactAlignment.toFixed(1)}%`,'Exact score alignment',`${DATA.kpis.comparableControls} comparable controls`],[DATA.kpis.commonWeak,'Common weak controls','Both servers score 0 or 1'],[`${DATA.kpis.scoreSpread.toFixed(1)} pts`,'Server score spread','Difference between server scores'],[DATA.kpis.splitMaturity,'Split maturity','Weak on one server, mature on the other'],[DATA.kpis.areasAtGood,'Areas at Good','Good begins above 75%'],[`${DATA.kpis.priorityReuse.toFixed(1)}%`,'Priority reuse',`${DATA.kpis.priorityActions} Critical/High controls`]
+  ];
+  document.getElementById('summary-kpis').innerHTML=kpis.map(([v,l,n])=>`<div class="kpi"><div class="kpi-value">${esc(v)}</div><div class="kpi-label">${esc(l)}</div><div class="kpi-note">${esc(n)}</div></div>`).join('');
+  document.getElementById('top-priorities').innerHTML=DATA.topPriorities.map((priority,i)=>`<article class="priority"><div class="priority-rank">Priority ${i+1}</div><h3>${esc(priority.title)}</h3><p><strong>${esc(priority.reference)}</strong> Â· ${esc(priority.detail)}</p></article>`).join('');
+  document.getElementById('summary-areas').innerHTML=DATA.areas.map(area=>{const scores=DATA.servers.map(server=>pct(area.scores[server.id]));return `<tr><td class="center">${area.number}</td><td><strong>${esc(area.name)}</strong></td><td class="center">${scores[0]}</td><td class="center">${scores[1]}</td><td class="center"><strong>${pct(area.average)}</strong></td><td class="center"><span class="rate ${rateClass(area.rating)}">${esc(area.rating)}</span></td><td class="center"><span class="badge ${area.priorityActions?'badge-high':'badge-good'}">${area.priorityActions}</span></td><td class="center"><button class="jump" onclick="goArea(${area.number})">View details â†’</button></td></tr>`}).join('');
+  document.getElementById('summary-conclusion').textContent=DATA.meta.summaryConclusion;
+  renderRadar();
+}
+function polar(cx,cy,r,angle){const rad=(angle-90)*Math.PI/180;return [cx+r*Math.cos(rad),cy+r*Math.sin(rad)]}
+function renderRadar(){
+  const n=DATA.areas.length,cx=250,cy=220,maxR=155,angles=DATA.areas.map((_,i)=>i*360/n);
+  const polygon=radius=>angles.map(angle=>polar(cx,cy,radius,angle).map(x=>x.toFixed(1)).join(',')).join(' ');
+  const current=DATA.areas.map((area,i)=>polar(cx,cy,maxR*(area.average/100),angles[i]).map(x=>x.toFixed(1)).join(',')).join(' ');
+  const good=polygon(maxR*.76);
+  let svg=`<svg viewBox="0 0 500 470" role="img" aria-label="Radar chart of fourteen SQL audit areas">`;
+  [0.25,0.5,0.75,1].forEach(level=>svg+=`<polygon points="${polygon(maxR*level)}" fill="none" stroke="#D7DEE5"/>`);
+  angles.forEach(angle=>{const p=polar(cx,cy,maxR,angle);svg+=`<line x1="${cx}" y1="${cy}" x2="${p[0]}" y2="${p[1]}" stroke="#D7DEE5"/>`});
+  svg+=`<polygon points="${good}" fill="none" stroke="#E31837" stroke-width="2" stroke-dasharray="6 5"/><polygon points="${current}" fill="rgba(25,103,163,.18)" stroke="#1967A3" stroke-width="3"/>`;
+  DATA.areas.forEach((area,i)=>{const p=polar(cx,cy,maxR+27,angles[i]);const anchor=p[0]<cx-20?'end':p[0]>cx+20?'start':'middle';svg+=`<text x="${p[0]}" y="${p[1]}" text-anchor="${anchor}" font-size="9.5" fill="#52606D">A${area.number} ${esc(area.name.split(' ')[0])}</text>`});
+  svg+=`<rect x="145" y="442" width="16" height="3" fill="#1967A3"/><text x="167" y="447" font-size="10" fill="#52606D">Estate average</text><line x1="275" y1="444" x2="294" y2="444" stroke="#E31837" stroke-width="2" stroke-dasharray="5 4"/><text x="300" y="447" font-size="10" fill="#52606D">76% Good threshold</text></svg>`;
+  document.getElementById('radar-chart').innerHTML=svg;
+}
+
+function renderServers(){
+  document.getElementById('server-grid').innerHTML=DATA.servers.map(server=>`<article class="server-panel"><h3>${esc(server.name)}</h3><div class="server-score">${pct(server.score)}</div><span class="rate ${rateClass(server.rating)}">${esc(server.rating)}</span><div class="meter"><span style="width:${server.score}%"></span></div><div class="server-facts"><div class="server-fact"><b>${server.validated}</b><span>Validated</span></div><div class="server-fact"><b>${server.awaiting}</b><span>Awaiting</span></div><div class="server-fact"><b>${pct(server.coverage)}</b><span>Deterministic</span></div></div></article>`).join('');
+  const width=760,height=190,left=185,right=35,barWidth=height===190?28:28,plot=width-left-right;
+  let svg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Server score bars">`;
+  [0,25,50,75,100].forEach(tick=>{const x=left+plot*tick/100;svg+=`<line x1="${x}" y1="18" x2="${x}" y2="145" stroke="#E0E5EA"/><text x="${x}" y="168" text-anchor="middle" font-size="10" fill="#75818C">${tick}%</text>`});
+  const goodX=left+plot*.76;svg+=`<line x1="${goodX}" y1="12" x2="${goodX}" y2="150" stroke="#E31837" stroke-width="2" stroke-dasharray="5 4"/>`;
+  DATA.servers.forEach((server,i)=>{const y=42+i*65;svg+=`<text x="${left-12}" y="${y+18}" text-anchor="end" font-size="12" font-weight="600" fill="#263746">${esc(server.name)}</text><rect x="${left}" y="${y}" width="${plot*server.score/100}" height="${barWidth}" fill="#1967A3"/><text x="${left+plot*server.score/100+8}" y="${y+19}" font-size="12" font-weight="700" fill="#263746">${server.score.toFixed(1)}%</text>`});
+  svg+='</svg>';document.getElementById('server-bars').innerHTML=svg;
+  document.getElementById('server-area-table').innerHTML=DATA.areas.map(area=>{const a=area.scores[DATA.servers[0].id],b=area.scores[DATA.servers[1].id];return `<tr><td>${area.number}</td><td><strong>${esc(area.name)}</strong></td><td class="center">${pct(a)}</td><td class="center">${pct(b)}</td><td class="center">${area.spread.toFixed(1)} pts</td><td class="center"><span class="rate ${rateClass(area.rating)}">${esc(area.rating)}</span></td><td class="center">${area.priorityActions}</td></tr>`}).join('');
+  document.getElementById('database-table').innerHTML=DATA.databases.map(db=>`<tr><td><strong>${esc(db.id)}</strong></td><td>${esc(serverLabel(db.server))}</td><td>${esc(db.name)}</td><td>${esc(db.sourceId)}</td></tr>`).join('');
+}
+
+function actionRows(actions){return actions.map(action=>`<tr><td><strong>${esc(action.ref)}</strong><br><span style="color:#75818C">${esc(action.title)}</span></td><td><span class="badge ${severityClass(action.severity)}">${esc(action.severity)}</span></td><td>${action.servers.map(serverLabel).map(esc).join(', ')}</td><td>${actionText(action.finding)}<details class="evidence-detail"><summary>Recommended action</summary><div class="evidence-box">${actionText(action.recommendation)}</div></details></td></tr>`).join('')}
+function renderAreaResults(){
+  document.getElementById('area-results').innerHTML=DATA.areas.map(area=>{const actions=DATA.actions.filter(action=>action.area===area.number);return `<section class="area-sec" id="area-${area.number}"><div class="area-head" onclick="this.parentElement.classList.toggle('expanded')"><span class="area-num">Area ${area.number}</span>${esc(area.name)}<span class="area-meta">${pct(area.average)} Â· ${area.actions} actions Â· ${area.priorityActions} priority</span><span class="area-toggle">â–¼</span></div><div class="area-content"><div class="area-summary"><span class="rate ${rateClass(area.rating)}">${esc(area.rating)}</span>${DATA.servers.map(server=>`<span class="badge badge-blue">${esc(server.name)} ${pct(area.scores[server.id])}</span>`).join('')}<span class="badge badge-gray">Weight ${area.weight}%</span></div><div class="dtable-wrap"><table class="dtable"><thead><tr><th>Control / title</th><th>Severity</th><th>Server scope</th><th>Finding and recommendation</th></tr></thead><tbody>${actionRows(actions)}</tbody></table></div></div></section>`}).join('');
+}
+
+function fillAreaSelect(id){document.getElementById(id).innerHTML='<option value="">All areas</option>'+DATA.areas.map(area=>`<option value="${area.number}">${area.number}. ${esc(area.name)}</option>`).join('')}
+function renderRisks(){
+  fillAreaSelect('risk-area');
+  let sortKey='risk',sortDirection='desc';
+  const severityRank={Critical:4,High:3,Medium:2,Low:1,Informational:0};
+  const compareRefs=(left,right)=>{const a=String(left).split('.').map(Number),b=String(right).split('.').map(Number),length=Math.max(a.length,b.length);for(let index=0;index<length;index++){const difference=(a[index]||0)-(b[index]||0);if(difference)return difference}return String(left).localeCompare(String(right))};
+  const compareActions=(left,right)=>{
+    if(sortKey==='ref')return compareRefs(left.ref,right.ref);
+    if(sortKey==='area')return left.area-right.area;
+    if(sortKey==='severity')return (severityRank[left.severity]||0)-(severityRank[right.severity]||0);
+    if(sortKey==='risk')return left.risk-right.risk;
+    const leftScope=left.shared?'Shared':left.servers.map(serverLabel).join(', '),rightScope=right.shared?'Shared':right.servers.map(serverLabel).join(', ');
+    return leftScope.localeCompare(rightScope,undefined,{sensitivity:'base'});
+  };
+  const updateSortHeaders=()=>{document.querySelectorAll('#risk-action-table th').forEach(header=>header.setAttribute('aria-sort','none'));document.querySelectorAll('#risk-action-table .sort-button').forEach(button=>button.removeAttribute('data-direction'));const active=document.querySelector(`#risk-action-table .sort-button[data-risk-sort="${sortKey}"]`);active.dataset.direction=sortDirection;active.closest('th').setAttribute('aria-sort',sortDirection==='asc'?'ascending':'descending')};
+  const update=()=>{const area=document.getElementById('risk-area').value,severity=document.getElementById('risk-severity').value,scope=document.getElementById('risk-scope').value,search=document.getElementById('risk-search').value.toLowerCase();const direction=sortDirection==='asc'?1:-1;const filtered=DATA.actions.filter(action=>(!area||action.area===Number(area))&&(!severity||action.severity===severity)&&(!scope||(scope==='shared'?action.shared:!action.shared))&&(!search||`${action.ref} ${action.title} ${action.finding}`.toLowerCase().includes(search))).sort((left,right)=>direction*compareActions(left,right)||compareRefs(left.ref,right.ref));document.getElementById('risk-count').textContent=`Showing ${filtered.length} of ${DATA.actions.length}`;document.getElementById('risk-table').innerHTML=filtered.map(action=>`<tr><td><strong>${esc(action.ref)}</strong></td><td>${action.area}. ${esc(areaByNumber(action.area).name)}</td><td><span class="badge ${severityClass(action.severity)}">${esc(action.severity)}</span></td><td class="center">${action.risk}</td><td>${action.shared?'<span class="badge badge-blue">Shared</span>':action.servers.map(serverLabel).map(esc).join(', ')}</td><td><strong>${esc(action.title)}</strong><br>${actionText(action.finding)}<details class="evidence-detail"><summary>Recommendation</summary><div class="evidence-box">${actionText(action.recommendation)}</div></details></td></tr>`).join('')||'<tr><td colspan="6" class="empty">No actions match these filters.</td></tr>';updateSortHeaders()};
+  document.querySelectorAll('#risk-action-table .sort-button').forEach(button=>button.addEventListener('click',()=>{const nextKey=button.dataset.riskSort;if(sortKey===nextKey){sortDirection=sortDirection==='asc'?'desc':'asc'}else{sortKey=nextKey;sortDirection=['risk','severity'].includes(nextKey)?'desc':'asc'}update()}));
+  ['risk-area','risk-severity','risk-scope'].forEach(id=>document.getElementById(id).addEventListener('change',update));document.getElementById('risk-search').addEventListener('input',update);update();
+}
+
+function renderControls(){
+  fillAreaSelect('control-area');
+  const update=()=>{const area=document.getElementById('control-area').value,severity=document.getElementById('control-severity').value,comparison=document.getElementById('control-comparison').value,search=document.getElementById('control-search').value.toLowerCase();const filtered=DATA.controls.filter(control=>(!area||control.area===Number(area))&&(!severity||control.severity===severity)&&(!comparison||control.comparison===comparison)&&(!search||`${control.ref} ${control.title} ${control.category} ${Object.values(control.servers).map(x=>x.rationale).join(' ')}`.toLowerCase().includes(search)));document.getElementById('control-count').textContent=`Showing ${filtered.length} of ${DATA.controls.length}`;document.getElementById('control-table').innerHTML=filtered.map(control=>{const serverCells=DATA.servers.map(server=>{const result=control.servers[server.id];return `<td class="center">${scoreChip(result.score,result.status)}<div style="font-size:9px;color:#76828E;margin-top:2px">${esc(result.status)}</div></td>`}).join('');return `<tr><td><strong>${esc(control.ref)}</strong></td><td>${control.area}. ${esc(control.category)}</td><td><strong>${esc(control.title)}</strong><details class="evidence-detail"><summary>Evidence rationale</summary><div class="evidence-grid">${DATA.servers.map(server=>`<div class="evidence-box"><b>${esc(server.name)}</b>${esc(control.servers[server.id].rationale||'No rationale supplied')}</div>`).join('')}</div></details></td><td><span class="badge ${severityClass(control.severity)}">${esc(control.severity)}</span></td>${serverCells}<td><span class="badge ${control.comparison==='Aligned'?'badge-good':'badge-amber'}">${esc(control.comparison)}</span></td></tr>`}).join('')||'<tr><td colspan="7" class="empty">No controls match these filters.</td></tr>'};
+  ['control-area','control-severity','control-comparison'].forEach(id=>document.getElementById(id).addEventListener('change',update));document.getElementById('control-search').addEventListener('input',update);update();
+}
+
+const focusByArea={1:'Document topology and implement a supported HA endpoint pattern.',2:'Make ETL incremental, restartable, idempotent, and failure-aware.',3:'Remove unsafe dynamic SQL and enforce structured error handling.',4:'Strengthen keys, constraints, schema design, and measured maintenance.',5:'Add schema, completeness, reconciliation, quarantine, and promotion gates.',6:'Reduce privileged access; encrypt data and backups; remove stored credentials.',7:'Enable reviewable, retained, tamper-resistant SQL Audit evidence.',8:'Assign ownership, metadata, lineage, dictionary, and glossary controls.',9:'Prove restores, move backups off-host, and test HA/DR.',10:'Enable Query Store, persistent telemetry, and actionable alerting.',11:'Route production changes through versioned, tested deployment pipelines.',12:'Persist workload trends and right-size from measured demand.',13:'Create owned runbooks, recovery procedures, and data definitions.',14:'Enable Query Store, blocking capture, and evidence-based tuning.'};
+function renderRecommendations(){
+  document.getElementById('scenario-table').innerHTML=DATA.estateScenarios.map(row=>`<tr><td><strong>${esc(row.name)}</strong><div style="font-size:10px;color:#77838E">${esc(row.assumption)}</div></td><td class="center">${pct(row.current)}</td><td class="center"><strong>${pct(row.projected)}</strong></td><td class="center"><span class="delta-pos">+${row.gain.toFixed(1)} pp</span></td><td class="center">${pct(row.serverProjected[DATA.servers[0].id])}</td><td class="center">${pct(row.serverProjected[DATA.servers[1].id])}</td><td>${DATA.servers.map(server=>`${esc(server.name)} ${row.controls[server.id]}`).join(' Â· ')}</td></tr>`).join('');
+  const rows=DATA.areas.map(area=>({...area,focus:focusByArea[area.number]}));
+  let sortKey='number',sortDirection='asc';
+  const renderAreaRows=()=>{
+    const direction=sortDirection==='asc'?1:-1;
+    const sorted=[...rows].sort((left,right)=>{
+      const a=left[sortKey],b=right[sortKey];
+      return direction*(typeof a==='number'&&typeof b==='number'?a-b:String(a).localeCompare(String(b),undefined,{sensitivity:'base'}));
+    });
+    document.getElementById('recommendation-areas').innerHTML=sorted.map(area=>`<tr><td>${area.number}</td><td><strong>${esc(area.name)}</strong></td><td class="center">${area.priorityActions}</td><td class="center">${area.sharedPriority}</td><td class="center">${area.actions}</td><td>${esc(area.focus)}</td></tr>`).join('');
+    document.querySelectorAll('#recommendation-area-table th').forEach(header=>header.setAttribute('aria-sort','none'));
+    document.querySelectorAll('#recommendation-area-table .sort-button').forEach(button=>button.removeAttribute('data-direction'));
+    const active=document.querySelector(`#recommendation-area-table .sort-button[data-sort="${sortKey}"]`);
+    active.dataset.direction=sortDirection;
+    active.closest('th').setAttribute('aria-sort',sortDirection==='asc'?'ascending':'descending');
+  };
+  document.querySelectorAll('#recommendation-area-table .sort-button').forEach(button=>button.addEventListener('click',()=>{
+    const nextKey=button.dataset.sort;
+    sortDirection=sortKey===nextKey&&sortDirection==='asc'?'desc':'asc';
+    sortKey=nextKey;
+    renderAreaRows();
+  }));
+  renderAreaRows();
+  const scenarios=DATA.estateScenarios,width=920,height=250,left=175,right=55,plot=width-left-right,max=100,barH=23,gap=12;let svg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Modeled estate score scenarios">`;[0,25,50,75,100].forEach(t=>{const x=left+(width-left-right)*t/max;svg+=`<line x1="${x}" y1="12" x2="${x}" y2="215" stroke="#E0E5EA"/><text x="${x}" y="238" text-anchor="middle" font-size="10" fill="#75818C">${t}%</text>`});scenarios.forEach((row,i)=>{const y=15+i*(barH+gap);svg+=`<text x="${left-10}" y="${y+16}" text-anchor="end" font-size="10" fill="#40505E">${esc(row.name.replace('Raise every scored control to 3','All scored to 3').replace('Raise all score 0-1 controls','All score 0â€“1').replace('Raise all score 0 controls','All score 0'))}</text><rect x="${left}" y="${y}" width="${(width-left-right)*row.projected/max}" height="${barH}" fill="${i<3?'#1967A3':'#7399B6'}"/><text x="${left+(width-left-right)*row.projected/max+7}" y="${y+16}" font-size="10" font-weight="700" fill="#263746">${row.projected.toFixed(1)}%</text>`});svg+='</svg>';document.getElementById('scenario-bars').innerHTML=svg;
+}
+
+function renderTimeline(){
+  const scenario=fragment=>DATA.estateScenarios.find(row=>row.name.toLowerCase().includes(fragment)) || null;
+  const critical=scenario('close critical risks') || DATA.estateScenarios[0];
+  const criticalHigh=scenario('critical and high') || DATA.estateScenarios[1];
+  const topTen=scenario('top 10') || DATA.estateScenarios[2];
+  const allZero=scenario('all score 0 controls') || DATA.estateScenarios[3];
+  const allWeak=scenario('all score 0-1 controls') || DATA.estateScenarios[4];
+  const points=[
+    {label:'Current',window:'Baseline',score:DATA.kpis.averageScore},
+    {label:'Critical closure',window:'0â€“7 days',score:critical.projected},
+    {label:'Top 10 / server',window:'By day 30',score:topTen.projected},
+    {label:'Critical + High',window:'By day 90',score:criticalHigh.projected},
+    {label:'Score 0 closure',window:'By day 180',score:allZero.projected},
+    {label:'90% maturity',window:'6â€“12 month target',score:90}
+  ];
+  const width=1080,height=310,left=65,right=45,top=35,bottom=70,plotWidth=width-left-right,plotHeight=height-top-bottom;
+  const coordinates=points.map((point,index)=>[left+plotWidth*index/(points.length-1),top+plotHeight*(1-point.score/100)]);
+  let svg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Modeled SQL remediation timeline">`;
+  [0,25,50,75,100].forEach(tick=>{const y=top+plotHeight*(1-tick/100);svg+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#DCE2E8" stroke-dasharray="5 5"/><text x="${left-10}" y="${y+4}" text-anchor="end" font-size="10" fill="#7A8792">${tick}%</text>`});
+  const thresholdY=top+plotHeight*(1-.76);svg+=`<line x1="${left}" y1="${thresholdY}" x2="${width-right}" y2="${thresholdY}" stroke="#E31837" stroke-width="2" stroke-dasharray="7 5"/>`;
+  const maturityY=top+plotHeight*(1-.90);svg+=`<line x1="${left}" y1="${maturityY}" x2="${width-right}" y2="${maturityY}" stroke="#147A52" stroke-width="2" stroke-dasharray="7 5"/>`;
+  svg+=`<polyline points="${coordinates.map(point=>point.join(',')).join(' ')}" fill="none" stroke="#1967A3" stroke-width="4"/>`;
+  points.forEach((point,index)=>{const [x,y]=coordinates[index];const observed=index===0,target=index===points.length-1,stroke=observed?'#17283A':target?'#147A52':'#1967A3';svg+=`<circle cx="${x}" cy="${y}" r="7" fill="${observed?'#17283A':'#FFF'}" stroke="${stroke}" stroke-width="3"/><text x="${x}" y="${y-14}" text-anchor="middle" font-size="12" font-weight="700" fill="#263746">${point.score.toFixed(1)}%</text><text x="${x}" y="${height-38}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#52606D">${esc(point.label)}</text><text x="${x}" y="${height-21}" text-anchor="middle" font-size="9.5" fill="#84909A">${esc(point.window)}</text>`});
+  svg+='</svg>';document.getElementById('timeline-chart').innerHTML=svg;
+
+  const criticalCount=DATA.kpis.severity.Critical || 0;
+  const sharedPriority=DATA.areas.reduce((total,area)=>total+area.sharedPriority,0);
+  const serverSpecificPriority=Math.max(0,DATA.kpis.priorityActions-sharedPriority);
+  const serverSpecificStep=serverSpecificPriority
+    ? `Complete remediation for the remaining ${serverSpecificPriority} server-specific Critical/High action control${serverSpecificPriority===1?'':'s'}.`
+    : 'Validate every shared priority closure independently on both servers.';
+  const steps=[
+    {window:'0â€“7 days',title:'Contain and assign',owner:'Accountable executive, DBA, and control owners',target:`${critical.projected.toFixed(1)}% modeled`,actions:[`Assign an owner and target date to all ${DATA.kpis.priorityActions} Critical/High action controls.`,`Contain and evidence ${criticalCount} Critical action control${criticalCount===1?'':'s'} across the estate.`,`Resolve, recollect, or formally accept all ${DATA.accessIssues.length} access exceptions.`],gate:'Critical exposure is closed or accepted, ownership is complete, and evidence locations are recorded.'},
+    {window:'By day 30',title:'Deliver highest-leverage controls',owner:'DBA, Security, and Data Engineering leads',target:`${topTen.projected.toFixed(1)}% modeled`,actions:['Implement each serverâ€™s top ten modeled controls.','Deliver shared controls once with server-specific validation evidence.','Rerun targeted checks and reconcile the action register.'],gate:'Top-ten changes pass technical validation and the refreshed report reproduces the claimed score.'},
+    {window:'By day 90',title:'Close the priority backlog',owner:'Control owners with independent assurance review',target:`${criticalHigh.projected.toFixed(1)}% modeled`,actions:[`Close the remaining Critical/High controls, prioritizing the ${sharedPriority} shared priority actions.`,serverSpecificStep,'Verify closure evidence and rerun both full assessments.'],gate:'No Critical/High item is marked closed without dated evidence and independent verification.'},
+    {window:'By day 180',title:'Eliminate score-zero controls',owner:'Area owners coordinated by the service owner',target:`${allZero.projected.toFixed(1)}% modeled`,actions:['Remediate every validated score-zero control to the fully implemented standard.','Sequence Medium/Low work by weighted area impact and operational dependency.','Rerun each server and confirm it independently crosses the Good threshold.'],gate:'Both servers exceed 75%, score-zero closures have accepted evidence, and no weak node is hidden by the estate average.'},
+    {window:'6â€“12 months',title:'Reach 90% maturity',owner:'Service owner and governance forum',target:'90.0% target',actions:['Raise remaining score-one controls and close residual governance, monitoring, and documentation gaps.',`The full score 0â€“1 remediation scenario models ${allWeak.projected.toFixed(1)}%, providing headroom above the 90% target.`,'Review access, restore, audit, alert, and capacity evidence quarterly.'],gate:'Both servers independently reach at least 90%, with every credited control supported by current evidence.'}
+  ];
+  document.getElementById('next-step-grid').innerHTML=steps.map(step=>`<article class="step-card"><div class="step-window">${esc(step.window)}</div><h3>${esc(step.title)}</h3><div class="step-owner"><strong>Owner:</strong> ${esc(step.owner)}</div><div class="step-target">${esc(step.target)}</div><ul class="ul-clean">${step.actions.map(action=>`<li>${esc(action)}</li>`).join('')}</ul><div class="step-gate"><strong>Evidence gate:</strong> ${esc(step.gate)}</div></article>`).join('');
+}
+
+function renderPrinciples(){
+  const principles={1:'Deliberate architecture, explicit topology, and failover-aware endpoints.',2:'Incremental, restartable, idempotent ETL with durable control state.',3:'Parameterized, schema-qualified, set-based T-SQL with structured error handling.',4:'Appropriate types, keys, constraints, indexes, compression, and storage layout.',5:'Data quality enforced through reusable rules, reconciliation, and recoverable quarantine.',6:'Least privilege, protected credentials, encryption, segmentation, and classification.',7:'Reviewable, retained, tamper-resistant evidence for regulated operations.',8:'Named ownership, lineage, catalog metadata, dictionary, and glossary.',9:'Tested recovery, off-host backups, HA/DR aligned to RPO and RTO.',10:'Persistent telemetry, Query Store, actionable alerts, and owned job monitoring.',11:'Versioned, tested, approved, and reversible production deployment.',12:'Measured capacity planning and accountable cost optimization.',13:'Living architecture, runbooks, recovery procedures, and knowledge transfer.',14:'Evidence-based query, index, concurrency, tempdb, and statistics tuning.'};
+  document.getElementById('principle-grid').innerHTML=DATA.areas.map(area=>`<article class="principle"><strong>${area.number}. ${esc(area.name)}</strong><span>${esc(principles[area.number])}</span></article>`).join('');
+}
+
+function renderScope(){
+  const nodes=DATA.databases,serverWidth=300,boxWidth=136,boxGap=12,maxDatabaseCount=Math.max(...DATA.servers.map(server=>nodes.filter(db=>db.server===server.id).length)),diagramHeight=Math.max(340,220+Math.ceil(maxDatabaseCount/2)*62);let svg=`<svg viewBox="0 0 1040 ${diagramHeight}" role="img" aria-label="${esc(DATA.meta.estateLabel)} SQL estate scope diagram"><rect x="15" y="88" width="150" height="70" rx="4" fill="#17283A"/><text x="90" y="116" text-anchor="middle" fill="#FFF" font-size="13" font-weight="700">SQL Audit Tool</text><text x="90" y="138" text-anchor="middle" fill="#B6C5D3" font-size="10">read-only evidence</text>`;DATA.servers.forEach((server,i)=>{const sx=205+i*410,center=sx+serverWidth/2;svg+=`<line x1="165" y1="123" x2="${sx}" y2="123" stroke="#7D8B97"/><rect x="${sx}" y="70" width="${serverWidth}" height="100" rx="4" fill="#EAF3FA" stroke="#1967A3"/><text x="${center}" y="101" text-anchor="middle" fill="#17283A" font-size="13" font-weight="700">${esc(server.name)}</text><text x="${center}" y="128" text-anchor="middle" fill="#1967A3" font-size="20" font-weight="700">${server.score.toFixed(1)}%</text><text x="${center}" y="150" text-anchor="middle" fill="#687583" font-size="10">${esc(server.rating)} Â· audited SQL Server instance</text>`;const dbs=nodes.filter(db=>db.server===server.id);dbs.forEach((db,j)=>{const column=j%2,row=Math.floor(j/2),x=sx+8+column*(boxWidth+boxGap),y=205+row*62,boxCenter=x+boxWidth/2,displayName=db.name.length>24?db.name.slice(0,21)+'...':db.name;svg+=`<line x1="${center}" y1="170" x2="${boxCenter}" y2="${y}" stroke="#A8B4BE"/><rect x="${x}" y="${y}" width="${boxWidth}" height="48" rx="3" fill="#FFF" stroke="#C9D1D9"><title>${esc(db.name)}</title></rect><text x="${boxCenter}" y="${y+19}" text-anchor="middle" fill="#17283A" font-size="8.5" font-weight="700">${esc(db.id)}</text><text x="${boxCenter}" y="${y+35}" text-anchor="middle" fill="#687583" font-size="8">${esc(displayName)}</text>`})});svg+='</svg>';document.getElementById('scope-diagram').innerHTML=svg;
+  document.getElementById('source-table').innerHTML=DATA.sources.map(source=>`<tr><td><strong>${esc(serverLabel(source.server))}</strong></td><td>${esc(source.workbook)}</td><td><code>${esc(source.hash)}</code></td><td>${esc(source.modified)}</td></tr>`).join('');
+  document.getElementById('access-list').innerHTML=DATA.accessIssues.map(issue=>`<section class="area-sec"><div class="area-head" onclick="this.parentElement.classList.toggle('expanded')"><span class="area-num">${esc(serverLabel(issue.server))}</span>${esc(issue.ref)} Â· ${esc(issue.title)}<span class="area-meta">${esc(issue.capability)}</span><span class="area-toggle">â–¼</span></div><div class="area-content"><div class="warn"><h3>Collection issue</h3><p>${esc(issue.error)}</p></div><div class="slabel">Read-only query</div><div class="code">${esc(issue.query)}</div><div class="slabel">Suggested action</div><p>${esc(issue.action)}</p></div></section>`).join('');
+  document.getElementById('qa-table').innerHTML=DATA.qa.map(row=>`<tr><td><strong>${esc(row.check)}</strong></td><td>${esc(row.expected)}</td><td>${esc(row.actual)}</td><td><span class="badge ${row.status==='PASS'?'badge-good':'badge-high'}">${esc(row.status)}</span></td><td>${esc(row.notes)}</td></tr>`).join('');
+}
+
+function renderScoring(){
+  document.getElementById('scoring-hero').innerHTML=`<div class="hero-score">${pct(DATA.kpis.averageScore)}</div><div><span class="rate ${rateClass(DATA.kpis.estateRisk)}">${esc(DATA.kpis.estateRisk)}</span><div class="hero-meta">Average of ${DATA.servers.map(s=>`${s.name} ${s.score.toFixed(1)}%`).join(' and ')} Â· ${DATA.kpis.validated} validated server/control outcomes Â· 100% area weights</div></div>`;
+  document.getElementById('scoring-areas').innerHTML=DATA.areas.map(area=>`<tr><td>${area.number}</td><td><strong>${esc(area.name)}</strong></td><td class="center">${area.weight}%</td><td class="center">${pct(area.scores[DATA.servers[0].id])}</td><td class="center">${pct(area.scores[DATA.servers[1].id])}</td><td class="center"><strong>${pct(area.average)}</strong></td></tr>`).join('');
+  document.getElementById('scoring-interpretation').textContent=`The ${DATA.kpis.averageScore.toFixed(1)}% estate average is informational. Estate risk is ${DATA.kpis.estateRisk} because the weakest-server rule prevents averaging from hiding a weak node.`;
+}
+
+renderHeader();renderSummary();renderServers();renderAreaResults();renderRisks();renderControls();renderRecommendations();renderTimeline();renderPrinciples();renderScope();renderScoring();
+</script>
+</body>
+</html>

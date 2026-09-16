@@ -32,10 +32,11 @@ public sealed class ReportSuiteGenerator
         string resultsJsonPath,
         string outputDirectory,
         ReportMetadata? metadata = null,
-        Action<string>? reportError = null)
+        Action<string>? reportError = null,
+        string? targetOverride = null)
     {
         var model = AuditWorkbookBuilder.Build(
-            resultsJsonPath, outputDirectory, metadata ?? new ReportMetadata());
+            resultsJsonPath, outputDirectory, metadata ?? new ReportMetadata(), targetOverride);
         var messages = new List<string>();
 
         Directory.CreateDirectory(outputDirectory);
