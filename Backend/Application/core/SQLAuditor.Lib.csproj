@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute> -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SQLAuditor.Tests" />
+  </ItemGroup>
+  <!-- Feature modules build into the engine library; the CLI and IDE hosts have their own projects. -->
+  <ItemGroup>
+    <Compile Include="..\..\Modules\**\*.cs" />
+    <EmbeddedResource Include="..\..\Modules\show_results\templates\estate-readout.html" LogicalName="SqlAuditor.Reporting.estate-readout.html" />
+  </ItemGroup>
+
+</Project>
+

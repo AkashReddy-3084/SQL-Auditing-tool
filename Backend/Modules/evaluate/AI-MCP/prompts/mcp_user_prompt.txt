@@ -1,0 +1,11 @@
+SQL Server: {{SQL_SERVER_NAME}}
+SQL Snapshot:
+{{SQL_SNAPSHOT}}
+
+Assess the checklist item below using ONLY the snapshot above, applying the feasibility, Not Applicable and field rules from the system prompt.
+
+Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
+
+Return strict JSON only with keys: outcome, feasible, score, severity, finding, evidence, recommendation, effort, riskImpact.

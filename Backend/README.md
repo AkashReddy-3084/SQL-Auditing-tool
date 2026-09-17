@@ -1,8 +1,14 @@
-Backend folder: logical grouping for backend code.
+Backend folder layout.
 
- - core: core audit library and orchestration (current: Backend/core)
-- agents: AI evaluator implementations and agent adapters
-- mcp: PowerShell/DBA tooling helpers and MCP checks
-- evalautor: evalor adapters and scoring logic
+- `Application/core`: audit engine (`Auditor`), run output paths, provider and prompt
+  infrastructure, and the `SQLAuditor.Lib` project every host references.
+- `Modules/evaluate`: the three evaluation techniques (`Script`, `AI-MCP`, `AI-Manual`) plus the
+  outcome rules and result enrichment they share.
+- `Modules/generate_scripts`: generation pipeline, its models, prompts and authoring tools.
+- `Modules/show_results`: Markdown and Excel report generation.
+- `CLI`: console host (`SQLAuditor.exe`) and the `sql-auditor.ps1` launcher.
+- `IDE`: MCP server for VS Code, with one `SKILL.md` per exposed tool.
+- `checklists`: master checklist, deterministic script mapping, and `Scripts/{sql,ps1}`.
 
-Note: Projects are currently left in place to avoid breaking builds. To fully move projects here, confirm and I will update csproj paths and namespaces.
+Each module owns its own `prompts/` folder. `SQLAuditor.Lib` compiles `Modules/**`, so a module has
+exactly one implementation, shared by the WPF, CLI and MCP hosts.

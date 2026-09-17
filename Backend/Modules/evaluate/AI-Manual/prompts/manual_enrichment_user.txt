@@ -1,0 +1,17 @@
+Checklist Item: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Verification: {{CHECKLIST_ITEM_VERIFICATION}}
+
+Evaluation already decided by the human reviewer (do not change these):
+Outcome: {{OUTCOME}}
+Score: {{SCORE}} (0 = Not Implemented, 1 = Partially Implemented, 2 = Implemented, 3 = Best Practice)
+
+Manual verification steps the reviewer was given (context only, not evidence):
+{{MANUAL_STEPS}}
+
+Reviewer's Input / Evidence (the ONLY factual source for your wording):
+{{REVIEWER_INPUT}}
+
+Write the audit wording for this item from the reviewer input above.
+
+Return strict JSON only with keys: finding, evidence, riskImpact, recommendation, severity.

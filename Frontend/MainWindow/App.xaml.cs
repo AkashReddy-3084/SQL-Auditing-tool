@@ -39,7 +39,8 @@ namespace SQLAuditor.Wpf
         {
             try
             {
-                var dir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "results");
+                var dir = SQLAuditor.Lib.AuditOutputPaths.ActiveRunDirectory
+                    ?? SQLAuditor.Lib.AuditOutputPaths.RootDirectory;
                 System.IO.Directory.CreateDirectory(dir);
                 var path = System.IO.Path.Combine(dir, "startup_error.log");
                 System.IO.File.WriteAllText(path, ex?.ToString() ?? "(null exception)");

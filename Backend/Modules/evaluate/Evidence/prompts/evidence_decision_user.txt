@@ -1,0 +1,16 @@
+CHECKLIST ITEM
+Id: {{CHECKLIST_ITEM_ID}}
+Description: {{CHECKLIST_ITEM_DESCRIPTION}}
+Audit area: {{CHECKLIST_ITEM_CATEGORY}}
+Verification objective: {{CHECKLIST_ITEM_VERIFICATION}}
+
+VERIFICATION GUIDANCE (what would evidence this control, and what Pass / Fail / Not Applicable mean for it)
+{{MANUAL_STEPS}}
+
+GIT SIGNALS FROM THE ATTACHED REPOSITORIES
+{{GIT_SIGNALS}}
+
+CANDIDATE EVIDENCE FILES (these are the ONLY files you may cite)
+{{EVIDENCE_FILES}}
+
+Decide this item from the evidence above and return the JSON object.

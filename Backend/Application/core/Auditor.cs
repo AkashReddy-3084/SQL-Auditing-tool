@@ -1,0 +1,2751 @@
+using System;
+using System.Collections.Concurrent;
+using System.Data;
+using System.Diagnostics;
+using System.IO;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Linq;
+using Microsoft.Data.SqlClient;
+
+namespace SQLAuditor.Lib
+{
+    public record ScriptResult(string ScriptName, string TextOutput, object? JsonSummary);
+
+    public record ChecklistItem(string Id, string Description, string Category, string Verification, string ScriptFile, string Implemented);
+
+    public record ChecklistResult
+    {
+        public ChecklistResult(string id, string description, string verification, string outcome, string? evidence, string scriptFile, string technique = "")
+        {
+            Id = id;
+            Description = description;
+            Verification = verification;
+            Outcome = outcome;
+            Evidence = evidence;
+            ScriptFile = scriptFile;
+            Technique = technique;
+        }
+
+        // Serialized fields, declared in the exact order required for
+        // checklist_results.json: Id, Description, Outcome, Score, Evidence,
+        // Severity, Finding, Recommendation, RiskImpact, Technique, Databases Verified.
+
+        public string Id { get; init; }
+
+        public string Description { get; init; }
+
+        [JsonIgnore]
+        public string Verification { get; init; }
+
+        public string Outcome { get; init; }
+
+        [JsonPropertyName("Score")]
+        public int? Score { get; init; }
+
+        [JsonPropertyName("Evidence")]
+        public string? Evidence { get; init; }
+
+        [JsonPropertyName("Severity")]
+        public string Severity { get; init; } = string.Empty;
+
+        [JsonPropertyName("Finding")]
+        public string Finding { get; init; } = string.Empty;
+
+        [JsonPropertyName("Recommendation")]
+        public string? Recommendation { get; init; }
+
+        [JsonPropertyName("RiskImpact")]
+        public string? RiskImpact { get; init; }
+
+        public string Technique { get; init; }
+
+        [JsonPropertyName("Databases Verified")]
+        public string? DatabasesVerified { get; init; }
+
+        // ---- Internal-only fields (never serialized) ----
+
+        // Effort and ScriptFile are consumed by the enricher/report generator but are
+        // intentionally excluded from the persisted JSON schema.
+        [JsonIgnore]
+        public string? Effort { get; init; }
+
+        [JsonIgnore]
+        public string ScriptFile { get; init; }
+
+        // The structured verdict a Script-technique evaluation produced. Kept in memory
+        // so the AI enricher can reason over the real SQL result set; never serialized.
+        [JsonIgnore]
+        public SqlScriptOutcome? ScriptOutcome { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonPropertyName("NotApplicable")]
+        public bool? NotApplicable { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonPropertyName("NotApplicableJustification")]
+        public string? NotApplicableJustification { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonPropertyName("rawAttribute")]
+        public JsonElement? RawAttribute { get; init; }
+
+        [JsonIgnore]
+        public string? McpUsage { get; init; }
+
+        [JsonIgnore]
+        public long? McpExecutionTimeMs { get; init; }
+
+        [JsonIgnore]
+        public string? McpEvidence { get; init; }
+    }
+
+    public class Auditor
+    {
+        /// <summary>
+        /// Non-null when the AI provider rejected this run outright (expired key, unknown model),
+        /// which disables evidence review and every AI-written field.
+        /// </summary>
+        public static string? ProviderFault => ProviderChatClient.PermanentFaultMessage;
+
+        public static void ClearProviderFault() => ProviderChatClient.ClearPermanentFault();
+
+        private const string RuntimeDatabasesTable = "#SqlAuditorDatabases";
+
+        // MCP evaluation and manual-step generation are both provider-bound, so each stage works
+        // on several checklist items at once rather than one at a time.
+        private const int MaxAiStageWorkers = 4;
+        private static readonly Regex DeclaredScriptScopeRegex = new(
+            @"\bScope\s*:\s*(SERVER|DATABASE)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex SysDatabasesReferenceRegex = new(
+            @"(?<![\w#])(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)(?![\w])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // checklist_results.json is written by this engine at the end of a run and by the WPF
+        // manual Pass/Fail merge after a completed run. Both writers take this lock so neither
+        // can observe or produce a half-written file. Keyed per run directory so parallel
+        // multi-server runs do not serialise on each other.
+        private static readonly ConcurrentDictionary<string, object> ResultsFileLocks =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        public static object ResultsFileLock => ResultsFileLockFor(AuditOutputPaths.CurrentRunDirectory);
+
+        public static object ResultsFileLockFor(string runDirectory) =>
+            ResultsFileLocks.GetOrAdd(Path.GetFullPath(runDirectory), _ => new object());
+
+        private string _connectionString;
+        private SqlAuthProfile? _authProfile;
+        private SqlServerMcpEvaluator? _mcpEvaluator;
+        private ManualStepsGenerator? _manualStepsGenerator;
+        private ScriptResultAiEnricher? _scriptEnricher;
+        private ManualResultAiEnricher? _manualResultEnricher;
+        private EvidenceAiAnalyzer? _evidenceAnalyzer;
+
+        /// <summary>The normalized connection string this auditor runs against.</summary>
+        public string ConnectionString => _connectionString;
+
+        /// <summary>UI-supplied inputs (server/auth/LLM) recorded with the run so it can be rerun or edited later.</summary>
+        public RunInputs? LastRunInputs { get; set; }
+
+        /// <summary>Run directory created by the most recent run on this instance.</summary>
+        public string? RunDirectory { get; private set; }
+
+        // A multi-server batch pre-creates the run directory and enters its scope; a rerun/edit
+        // reuses the already-resumed directory so reports overwrite the same timestamp folder;
+        // a standalone run creates its own.
+        private string BeginRunDirectory(bool reuseActiveRunDirectory = false)
+        {
+            var directory = reuseActiveRunDirectory
+                ? AuditOutputPaths.CurrentRunDirectory
+                : AuditOutputPaths.AmbientRunDirectory ?? AuditOutputPaths.BeginRun(_connectionString);
+            RunDirectory = directory;
+            return directory;
+        }
+
+        public Auditor(string connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                _connectionString = connectionString;
+            }
+            else
+            {
+                var builder = new SqlConnectionStringBuilder(connectionString);
+                // An explicit catalog is honoured: on Azure SQL Database the login is often
+                // scoped to one user database and cannot open master.
+                if (string.IsNullOrWhiteSpace(builder.InitialCatalog))
+                    builder.InitialCatalog = "master";
+                _connectionString = builder.ConnectionString;
+            }
+            _authProfile = null;
+            // Evaluators are created tolerantly so the auditor can be built for SQL-only
+            // operations (connection verification, checklist loading) before the user has
+            // supplied LLM settings at runtime.
+            EnsureLlmEvaluators();
+        }
+
+        public Auditor(SqlAuthProfile authProfile)
+            : this(SqlConnectionStringFactory.Build(
+                (authProfile ?? throw new ArgumentNullException(nameof(authProfile))) with { Database = "master" }))
+        {
+            _authProfile = authProfile;
+        }
+
+        // How this run authenticated. Inferred for the legacy connection-string ctor so the
+        // engine can still make auth-aware decisions.
+        public SqlAuthMethod AuthMethod => _authProfile?.Method ?? SqlAuthProfile.InferMethod(_connectionString);
+
+        // Redacted description of the authentication in use; safe for logs and reports.
+        public string AuthDescription => _authProfile?.Describe() ?? SqlAuthProfile.DisplayNameFor(AuthMethod);
+
+        // Single place every SQL connection in this auditor is created, so an access-token
+        // provider can later be attached without touching each call site.
+        private SqlConnection CreateConnection(string? connectionString = null)
+            => new SqlConnection(connectionString ?? _connectionString);
+
+        // Creates the LLM evaluators if they don't exist yet. Safe to call repeatedly;
+        // it is a no-op once the evaluators exist and silently skips when LLM settings
+        // are not yet configured.
+        public void EnsureLlmEvaluators()
+        {
+            if (_llmDisabled) return;
+            try { _mcpEvaluator ??= SqlServerMcpEvaluator.CreateFromEnvironment(); } catch { }
+            try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
+            try { _scriptEnricher ??= ScriptResultAiEnricher.CreateFromEnvironment(); } catch { }
+            try { _manualResultEnricher ??= ManualResultAiEnricher.CreateFromEnvironment(); } catch { }
+            try { _evidenceAnalyzer ??= EvidenceAiAnalyzer.CreateFromEnvironment(); } catch { }
+        }
+
+        // When set, the auditor never creates LLM evaluators (even if .env or env vars
+        // are present). The IDE/MCP server calls this so GitHub Copilot Chat is the AI
+        // and the server makes no direct LLM/API calls. CLI and WPF do not set it.
+        private static bool _llmDisabled;
+        public static void DisableLlmEvaluators() => _llmDisabled = true;
+
+        // Supplies LLM provider settings at runtime (from the UI). Not persisted to disk;
+        // these values take precedence over any .env or environment variables.
+        public static void SetLlmConfig(string baseUrl, string apiKey, string model)
+            => ProviderConfig.SetRuntime(baseUrl, apiKey, model);
+
+        // Verifies the currently-configured LLM provider by issuing a minimal request.
+        public static async Task<(bool Ok, string Message)> VerifyLlmAsync(System.Threading.CancellationToken cancellationToken = default)
+        {
+            string baseUrl, apiKey, model;
+            try { baseUrl = ProviderConfig.BaseUrl; apiKey = ProviderConfig.ApiKey; model = ProviderConfig.Model; }
+            catch (Exception ex) { return (false, ex.Message); }
+
+            try
+            {
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+                var body = new { model, max_tokens = 1, messages = new[] { new { role = "user", content = "ping" } } };
+                using var content = new System.Net.Http.StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
+                using var resp = await http.PostAsync(baseUrl + "/chat/completions", content, cancellationToken);
+                if (resp.IsSuccessStatusCode) return (true, $"Connected to model '{model}'.");
+                var txt = await resp.Content.ReadAsStringAsync(cancellationToken);
+                if (txt.Length > 300) txt = txt.Substring(0, 300);
+                return (false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {txt}");
+            }
+            catch (Exception ex) { return (false, ex.Message); }
+        }
+
+        // Set when master could not be opened on an Azure endpoint and the audit was pinned
+        // to the login's default database instead.
+        private bool _singleDatabaseMode;
+
+        public bool IsSingleDatabaseMode => _singleDatabaseMode;
+
+        // On Azure SQL Database a login is frequently scoped to one user database and cannot open
+        // master. Falling back to the login's default database keeps the audit runnable there.
+        private async Task<SqlConnection> OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken cancellationToken)
+        {
+            try
+            {
+                var connection = CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                return connection;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var builder = new SqlConnectionStringBuilder(_connectionString);
+                if (!SqlAuthProfile.IsAzureSqlEndpoint(builder.DataSource) ||
+                    !string.Equals(builder.InitialCatalog, "master", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw;
+                }
+
+                builder.InitialCatalog = string.Empty;
+                var fallbackConnectionString = builder.ConnectionString;
+                var connection = CreateConnection(fallbackConnectionString);
+                await connection.OpenAsync(cancellationToken);
+
+                _connectionString = fallbackConnectionString;
+                _singleDatabaseMode = true;
+                AppendConnectionLog(
+                    $"master unreachable on Azure endpoint ({ex.Message}); pinned to default database '{connection.Database}'.");
+                return connection;
+            }
+        }
+
+        private static void AppendConnectionLog(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
+        }
+
+        public async Task<string[]> GetAvailableDatabasesAsync(System.Threading.CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(_connectionString))
+                return Array.Empty<string>();
+
+            var databases = new System.Collections.Generic.List<string>();
+            using var conn = await OpenWithAzureCatalogFallbackAsync(cancellationToken);
+            if (_singleDatabaseMode)
+                return new[] { conn.Database };
+
+            using var editionCommand = new SqlCommand(
+                "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition'));",
+                conn)
+            {
+                CommandTimeout = 30
+            };
+            var editionValue = await editionCommand.ExecuteScalarAsync(cancellationToken);
+            var engineEdition = editionValue == null || editionValue == DBNull.Value
+                ? 0
+                : Convert.ToInt32(editionValue);
+
+            // Only user databases are returned: system databases hold no audited user data,
+            // and RunChecklistAsync rejects them when they are selected explicitly.
+            var discoverySql = engineEdition == 5
+                ? "SELECT [name] FROM sys.databases " +
+                  "WHERE [name] <> N'master' AND state = 0 AND source_database_id IS NULL " +
+                  "ORDER BY [name];"
+                : "SELECT [name] FROM sys.databases " +
+                  "WHERE [name] NOT IN (N'master', N'model', N'msdb', N'tempdb') " +
+                  "AND state = 0 AND source_database_id IS NULL " +
+                  "AND HAS_DBACCESS([name]) = 1 " +
+                  "ORDER BY [name];";
+
+            using var cmd = new SqlCommand(discoverySql, conn) { CommandTimeout = 30 };
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                    databases.Add(reader.GetString(0));
+            }
+
+            await reader.CloseAsync();
+
+            if (engineEdition == 5)
+            {
+                var accessibleDatabases = new System.Collections.Generic.List<string>();
+                foreach (var databaseName in databases)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        using var databaseConnection = CreateConnection(GetDatabaseConnectionString(databaseName));
+                        await databaseConnection.OpenAsync(cancellationToken);
+                        accessibleDatabases.Add(databaseName);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // A visible Azure SQL database is selectable only when this credential can open it.
+                    }
+                }
+                databases = accessibleDatabases;
+            }
+
+            return databases
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static string? GetDeclaredScriptScope(string? scriptText)
+        {
+            if (string.IsNullOrWhiteSpace(scriptText)) return null;
+            var match = DeclaredScriptScopeRegex.Match(scriptText);
+            return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+        }
+
+        private string GetDatabaseConnectionString(string databaseName)
+        {
+            var builder = new SqlConnectionStringBuilder(_connectionString)
+            {
+                InitialCatalog = databaseName
+            };
+            return builder.ConnectionString;
+        }
+
+        private static async Task<string> PrepareDatabaseScopedScriptAsync(
+            SqlConnection connection,
+            string scriptText,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            var rewrittenScript = RewriteSysDatabasesReferences(scriptText);
+            if (string.Equals(rewrittenScript, scriptText, StringComparison.Ordinal))
+                return scriptText;
+
+            var setup = $@"
+IF OBJECT_ID('tempdb..{RuntimeDatabasesTable}') IS NOT NULL
+    DROP TABLE {RuntimeDatabasesTable};
+
+SELECT d.*
+INTO {RuntimeDatabasesTable}
+FROM sys.databases AS d
+WHERE d.name = DB_NAME();";
+
+            using var command = new SqlCommand(setup, connection) { CommandTimeout = 30 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return rewrittenScript;
+        }
+
+        private static string RewriteSysDatabasesReferences(string scriptText)
+        {
+            var output = new System.Text.StringBuilder(scriptText.Length);
+            var codeStart = 0;
+            var index = 0;
+
+            void AppendCode(int end)
+            {
+                if (end > codeStart)
+                    output.Append(SysDatabasesReferenceRegex.Replace(
+                        scriptText.Substring(codeStart, end - codeStart),
+                        RuntimeDatabasesTable));
+            }
+
+            while (index < scriptText.Length)
+            {
+                if (scriptText[index] == '\'')
+                {
+                    AppendCode(index);
+                    var literalStart = index++;
+                    while (index < scriptText.Length)
+                    {
+                        if (scriptText[index] != '\'')
+                        {
+                            index++;
+                            continue;
+                        }
+                        index++;
+                        if (index < scriptText.Length && scriptText[index] == '\'')
+                        {
+                            index++;
+                            continue;
+                        }
+                        break;
+                    }
+                    var literal = scriptText.Substring(literalStart, index - literalStart);
+                    var readsDatabaseCatalog = Regex.IsMatch(
+                        literal,
+                        @"\b(FROM|JOIN)\s+(?:(?:\[?master\]?)\s*\.\s*)?(?:\[?sys\]?)\s*\.\s*(?:\[?databases\]?)\b",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                    output.Append(readsDatabaseCatalog
+                        ? SysDatabasesReferenceRegex.Replace(literal, RuntimeDatabasesTable)
+                        : literal);
+                    codeStart = index;
+                    continue;
+                }
+
+                if (index + 1 < scriptText.Length && scriptText[index] == '-' && scriptText[index + 1] == '-')
+                {
+                    AppendCode(index);
+                    var commentStart = index;
+                    index += 2;
+                    while (index < scriptText.Length && scriptText[index] != '\r' && scriptText[index] != '\n')
+                        index++;
+                    output.Append(scriptText, commentStart, index - commentStart);
+                    codeStart = index;
+                    continue;
+                }
+
+                if (index + 1 < scriptText.Length && scriptText[index] == '/' && scriptText[index + 1] == '*')
+                {
+                    AppendCode(index);
+                    var commentStart = index;
+                    var depth = 1;
+                    index += 2;
+                    while (index < scriptText.Length && depth > 0)
+                    {
+                        if (index + 1 < scriptText.Length && scriptText[index] == '/' && scriptText[index + 1] == '*')
+                        {
+                            depth++;
+                            index += 2;
+                        }
+                        else if (index + 1 < scriptText.Length && scriptText[index] == '*' && scriptText[index + 1] == '/')
+                        {
+                            depth--;
+                            index += 2;
+                        }
+                        else
+                        {
+                            index++;
+                        }
+                    }
+                    output.Append(scriptText, commentStart, index - commentStart);
+                    codeStart = index;
+                    continue;
+                }
+
+                index++;
+            }
+
+            AppendCode(scriptText.Length);
+            return output.ToString();
+        }
+
+        // --- Remaining methods omitted for brevity; this Auditor is a lightweight stub for UI testing ---
+
+        public async Task<System.Collections.Generic.List<(string Area, ChecklistItem[] Items)>> GetChecklistStructureAsync()
+        {
+            var repoRoot = FindRepoRoot();
+            if (repoRoot == null) throw new FileNotFoundException("Checklist not found in repository root.");
+            // Prefer JSON master checklist under Backend/checklists/master_checklist.json when present
+            string[] lines;
+            var jsonPath = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.json");
+            var jsonPathAlt = Path.Combine(repoRoot, "Backend", "checklists", "master-checklist.json");
+            var checklistCandidate = Path.Combine(repoRoot, "SQL", "02-audit-checklist.md");
+            var mappingPath = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.md");
+            // accept either master_checklist.json or master-checklist.json
+            var effectiveJson = File.Exists(jsonPath) ? jsonPath : (File.Exists(jsonPathAlt) ? jsonPathAlt : null);
+            if (effectiveJson != null)
+            {
+                try
+                {
+                    var json = await File.ReadAllTextAsync(effectiveJson);
+                    var builder = new System.Collections.Generic.List<string>();
+                    using var jd = JsonDocument.Parse(json);
+                    var root = jd.RootElement;
+                    // Support two schemas:
+                    // 1) simple array of { Id, Description, Category, Verification, ScriptFile }
+                    // 2) nested { areas: [ { id, title, sub_areas: [ { id, title, items: [ { id, text } ] } ] } ] }
+                    if (root.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var el in root.EnumerateArray())
+                        {
+                            var id = el.TryGetProperty("Id", out var pid) ? pid.GetString() : null;
+                            var desc = el.TryGetProperty("Description", out var pdesc) ? pdesc.GetString() : null;
+                            if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(desc))
+                            {
+                                var line = id + " | " + desc;
+                                if (el.TryGetProperty("Category", out var pcat) && pcat.ValueKind != JsonValueKind.Null) line += " | Cat:" + pcat.GetString();
+                                if (el.TryGetProperty("Verification", out var pver) && pver.ValueKind != JsonValueKind.Null) line += " | Verification:" + pver.GetString();
+                                if (el.TryGetProperty("ScriptFile", out var psf) && psf.ValueKind != JsonValueKind.Null) line += " | ScriptFile:" + psf.GetString();
+                                builder.Add(line);
+                            }
+                        }
+                    }
+                    else if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("areas", out var areas) && areas.ValueKind == JsonValueKind.Array)
+                    {
+                        var structuredResult = new System.Collections.Generic.List<(string Area, ChecklistItem[] Items)>();
+                        foreach (var area in areas.EnumerateArray())
+                        {
+                            var areaTitle = area.TryGetProperty("title", out var at) ? at.GetString() : area.TryGetProperty("id", out var aid) ? aid.GetString() : "Area";
+                            var currentAreaItems = new System.Collections.Generic.List<ChecklistItem>();
+                            if (area.TryGetProperty("sub_areas", out var subs) && subs.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var sub in subs.EnumerateArray())
+                                {
+                                    var subTitle = sub.TryGetProperty("title", out var st) ? st.GetString() : sub.TryGetProperty("id", out var sid) ? sid.GetString() : string.Empty;
+                                    if (sub.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var it in items.EnumerateArray())
+                                        {
+                                            var id = it.TryGetProperty("id", out var iid) ? iid.GetString() : null;
+                                            var text = it.TryGetProperty("text", out var txt) ? txt.GetString() : it.TryGetProperty("description", out var dsc) ? dsc.GetString() : null;
+                                            if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(text))
+                                            {
+                                                currentAreaItems.Add(new ChecklistItem(id, text, subTitle, string.Empty, string.Empty, string.Empty));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (currentAreaItems.Count > 0)
+                            {
+                                structuredResult.Add((areaTitle ?? "Area", currentAreaItems.ToArray()));
+                            }
+                        }
+                        return structuredResult;
+                    }
+                    lines = builder.ToArray();
+                }
+                catch
+                {
+                    // fallback to markdown parsing if JSON invalid
+                    lines = Array.Empty<string>();
+                }
+            }
+            else if (File.Exists(checklistCandidate))
+            {
+                lines = await File.ReadAllLinesAsync(checklistCandidate);
+            }
+            else
+            {
+                if (!File.Exists(mappingPath)) mappingPath = Path.Combine(repoRoot, "implementation-tracking.md");
+                if (!File.Exists(mappingPath)) throw new FileNotFoundException("Checklist file not found at SQL/02-audit-checklist.md or Backend/checklists/master_checklist.md/implementation-tracking.md or Backend/checklists/master_checklist.json");
+                lines = await File.ReadAllLinesAsync(mappingPath);
+            }
+            var result = new System.Collections.Generic.List<(string, ChecklistItem[])>();
+            string currentArea = "General";
+            string currentCategoryHeader = string.Empty;
+            var areaItems = new System.Collections.Generic.List<ChecklistItem>();
+
+            foreach (var rawLine in lines)
+            {
+                if (string.IsNullOrWhiteSpace(rawLine)) continue;
+                var raw = rawLine.Trim();
+
+                // Area header: 'Area 1: Title' or '## Area 1: Title' or 'Area 1 - Title'
+                var areaMatch = System.Text.RegularExpressions.Regex.Match(raw, @"^#{0,6}\s*(Area\s+\d+[:\-]?)\s*(.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (areaMatch.Success)
+                {
+                    if (areaItems.Count > 0) { result.Add((currentArea, areaItems.ToArray())); areaItems.Clear(); }
+                    var title = (areaMatch.Groups[1].Value + " " + areaMatch.Groups[2].Value).Trim();
+                    currentArea = System.Text.RegularExpressions.Regex.Replace(title, @"^#+\s*", "").Trim();
+                    currentCategoryHeader = string.Empty;
+                    continue;
+                }
+
+                // Category header: '### 1.1 Title' or '1.1 Title' as header
+                var catMatch = System.Text.RegularExpressions.Regex.Match(raw, @"^#{1,6}\s*(\d+(?:\.\d+)*)\s*(.*)$");
+                if (catMatch.Success)
+                {
+                    currentCategoryHeader = string.IsNullOrWhiteSpace(catMatch.Groups[2].Value) ? catMatch.Groups[1].Value.Trim() : ($"{catMatch.Groups[1].Value.Trim()} {catMatch.Groups[2].Value.Trim()}");
+                    continue;
+                }
+
+                // If line contains pipe-separated fields, prefer that parsing
+                if (raw.Contains("|") )
+                {
+                    var parts = raw.Split('|').Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
+                    // Expect at least id and description
+                    if (parts.Length >= 2 && System.Text.RegularExpressions.Regex.IsMatch(parts[0], "^\\d+(?:\\.\\d+)*$"))
+                    {
+                        var id = parts[0];
+                        var desc = parts[1];
+                        string cat = string.Empty, ver = string.Empty, script = string.Empty, impl = string.Empty;
+                        // Attempt to find labeled fields in remaining parts
+                        for (int i = 2; i < parts.Length; i++)
+                        {
+                            var p = parts[i];
+                            if (p.StartsWith("Cat:", StringComparison.OrdinalIgnoreCase)) cat = MapCategoryLabel(p.Substring(4).Trim());
+                            else if (p.StartsWith("Verification:", StringComparison.OrdinalIgnoreCase)) ver = p.Substring(13).Trim();
+                            else if (p.StartsWith("ScriptFile:", StringComparison.OrdinalIgnoreCase)) script = p.Substring(11).Trim();
+                            else if (p.StartsWith("Implemented:", StringComparison.OrdinalIgnoreCase)) impl = p.Substring(12).Trim();
+                        }
+                        if (string.IsNullOrWhiteSpace(cat)) cat = string.IsNullOrWhiteSpace(currentCategoryHeader) ? MapCategoryLabel(string.Empty) : currentCategoryHeader;
+                        if (string.IsNullOrWhiteSpace(ver)) ver = string.Empty;
+                        if (string.IsNullOrWhiteSpace(script)) script = string.Empty;
+                        if (string.IsNullOrWhiteSpace(impl)) impl = string.Empty;
+                        // If no explicit category header, derive from id prefix (e.g., 1.1)
+                        if (string.IsNullOrWhiteSpace(currentCategoryHeader) && string.IsNullOrWhiteSpace(cat))
+                        {
+                            var idParts = id.Split('.');
+                            if (idParts.Length >= 2) cat = string.Join('.', idParts.Take(2));
+                        }
+                        areaItems.Add(new ChecklistItem(id, desc, cat, ver, script, impl));
+                        continue;
+                    }
+                }
+
+                // Fallback: lines like '1.1.1 Description...' or '1.1.1 | ...' without full labeling
+                var itemMatch = System.Text.RegularExpressions.Regex.Match(raw, @"^(\d+(?:\.\d+)*)(?:[\t\s\-|:]+)(.+)$");
+                if (itemMatch.Success)
+                {
+                    var id = itemMatch.Groups[1].Value.Trim();
+                    var desc = itemMatch.Groups[2].Value.Trim();
+                    // derive category from id when no header provided
+                    string cat = currentCategoryHeader;
+                    if (string.IsNullOrWhiteSpace(cat))
+                    {
+                        var idParts = id.Split('.');
+                        if (idParts.Length >= 2) cat = string.Join('.', idParts.Take(2));
+                        else cat = string.Empty;
+                    }
+                    areaItems.Add(new ChecklistItem(id, desc, cat, string.Empty, string.Empty, string.Empty));
+                    continue;
+                }
+            }
+
+            if (areaItems.Count > 0) result.Add((currentArea, areaItems.ToArray()));
+            return result;
+        }
+
+        private static readonly Lazy<string?> RepoRootCache =
+            new(LocateRepoRoot, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+        private string? FindRepoRoot() => RepoRootCache.Value;
+
+        private static string? LocateRepoRoot()
+        {
+            var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+            while (dir != null)
+            {
+                var checklistMd = Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.md");
+                var checklistMdAlt = Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.md");
+                var checklistJson = Path.Combine(dir.FullName, "Backend", "checklists", "master_checklist.json");
+                var checklistJsonAlt = Path.Combine(dir.FullName, "Backend", "checklists", "master-checklist.json");
+                if (File.Exists(checklistMd) || File.Exists(checklistMdAlt) || File.Exists(checklistJson) || File.Exists(checklistJsonAlt)) return dir.FullName;
+                var candidate = Path.Combine(dir.FullName, "implementation-tracking.md");
+                if (File.Exists(candidate)) return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
+        private string? FindSqlScriptsFolder()
+        {
+            var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+            while (dir != null)
+            {
+                // Prefer curated backend scripts folder when present
+                var checklistCandidate = Path.Combine(dir.FullName, "Backend", "checklists", "Scripts", "sql");
+                if (Directory.Exists(checklistCandidate)) return checklistCandidate;
+                var backendCandidate = Path.Combine(dir.FullName, "Backend", "scripts", "sql");
+                if (Directory.Exists(backendCandidate)) return backendCandidate;
+                var candidate = Path.Combine(dir.FullName, "SQL", "scripts");
+                if (Directory.Exists(candidate)) return candidate;
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
+        private static string MapCategoryLabel(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+            var s = raw.Trim();
+            // strip Markdown emphasis and non-alphanumeric wrappers
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"[*_\[\]\(\)]", "").Trim();
+            // If the value looks like a numeric category code (e.g. 1, 2, 4.2), return it as-is
+            if (System.Text.RegularExpressions.Regex.IsMatch(s, @"^\d+(?:\.\d+)*$") ) return s;
+            // Preserve human-readable labels when they appear
+            if (s.IndexOf("Automated", StringComparison.OrdinalIgnoreCase) >= 0) return "Automated";
+            if (s.IndexOf("Admin", StringComparison.OrdinalIgnoreCase) >= 0) return "Admin Review";
+            if (s.IndexOf("Client", StringComparison.OrdinalIgnoreCase) >= 0 || s.IndexOf("Documentation", StringComparison.OrdinalIgnoreCase) >= 0) return "Client Documentation";
+            return s;
+        }
+
+        private object SummarizeTextResultToJson(string name, string text)
+        {
+            var lines = text?.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
+            int errorCount = 0;
+            foreach (var l in lines) if (l.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0) errorCount++;
+            return new { Script = name, LineCount = lines.Length, ErrorCount = errorCount, Sample = lines.Take(Math.Min(5, lines.Length)).ToArray() };
+        }
+
+        private static string? FindExecutable(string name)
+        {
+            var paths = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
+            foreach (var p in paths)
+            {
+                try
+                {
+                    var candidate = Path.Combine(p, name + (OperatingSystem.IsWindows() ? ".exe" : string.Empty));
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private async Task<string> RunPowerShellScriptAsync(string scriptPath)
+        {
+            var psi = new ProcessStartInfo();
+            var pwsh = FindExecutable("pwsh") ?? FindExecutable("powershell");
+            if (pwsh == null) throw new InvalidOperationException("No PowerShell executable found (pwsh or powershell)");
+            psi.FileName = pwsh;
+            psi.Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"";
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            using var proc = Process.Start(psi)!;
+            var outText = await proc.StandardOutput.ReadToEndAsync();
+            var errText = await proc.StandardError.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            return outText + (string.IsNullOrWhiteSpace(errText) ? string.Empty : "\nERRORS:\n" + errText);
+        }
+
+        public async Task<ScriptResult[]> RunAllScriptsAsync()
+        {
+            var scriptsDir = FindSqlScriptsFolder();
+            if (scriptsDir == null) return Array.Empty<ScriptResult>();
+            var resultsDir = BeginRunDirectory();
+            var list = new System.Collections.Generic.List<ScriptResult>();
+            foreach (var f in Directory.GetFiles(scriptsDir, "*.sql"))
+            {
+                var txt = await RunScriptFileAsync(f);
+                var json = SummarizeTextResultToJson(Path.GetFileName(f), txt);
+                var outPath = Path.Combine(resultsDir, Path.GetFileNameWithoutExtension(f) + "_result.txt");
+                await File.WriteAllTextAsync(outPath, txt);
+                var jsonPath = Path.Combine(resultsDir, Path.GetFileNameWithoutExtension(f) + ".json");
+                await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }));
+                list.Add(new ScriptResult(Path.GetFileName(f), txt, json));
+            }
+            return list.ToArray();
+        }
+
+        public async Task<string> RunScriptFileAsync(string path)
+        {
+            if (!File.Exists(path)) throw new FileNotFoundException("Script not found", path);
+            var ext = Path.GetExtension(path);
+            if (ext.Equals(".ps1", StringComparison.OrdinalIgnoreCase))
+            {
+                try { return await RunPowerShellScriptAsync(path); } catch (Exception ex) { return "PS ERROR: " + ex.Message; }
+            }
+            else
+            {
+                var txt = await File.ReadAllTextAsync(path);
+                // If we have a DB connection configured, attempt to execute SQL batches and capture output
+                if (!string.IsNullOrWhiteSpace(_connectionString))
+                {
+                    try
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        // Split batches by standalone GO on its own line
+                        var batches = System.Text.RegularExpressions.Regex.Split(txt, @"^GO\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+                        using var conn = CreateConnection();
+                        await conn.OpenAsync();
+                        int batchNo = 1;
+                        foreach (var batch in batches)
+                        {
+                            var script = batch.Trim();
+                            if (string.IsNullOrWhiteSpace(script)) { batchNo++; continue; }
+                            sb.AppendLine($"--- Batch {batchNo} ---");
+                            try
+                            {
+                                using var cmd = new SqlCommand(script, conn) { CommandTimeout = 120 };
+                                using var rdr = await cmd.ExecuteReaderAsync();
+                                int rowCount = 0;
+                                while (await rdr.ReadAsync())
+                                {
+                                    rowCount++;
+                                    var cols = new System.Collections.Generic.List<string>();
+                                    for (int i = 0; i < rdr.FieldCount; i++)
+                                    {
+                                        try { cols.Add(rdr.IsDBNull(i) ? "NULL" : rdr.GetValue(i)?.ToString() ?? string.Empty); }
+                                        catch { cols.Add("<err>"); }
+                                    }
+                                    sb.AppendLine(string.Join('\t', cols));
+                                }
+                                sb.AppendLine($"(rows: {rowCount})");
+                                // move to next result set if any
+                                while (await rdr.NextResultAsync()) { /* iterate to exhaust results */ }
+                            }
+                            catch (Exception ex)
+                            {
+                                sb.AppendLine("SQL ERROR: " + ex.Message);
+                            }
+                            batchNo++;
+                        }
+                        await conn.CloseAsync();
+                        return sb.ToString();
+                    }
+                    catch (Exception ex)
+                    {
+                        return "SQL EXEC ERROR: " + ex.Message + "\n\nScript contents:\n" + txt;
+                    }
+                }
+
+                // No DB connection — return file contents as dry-run output
+                return txt;
+            }
+        }
+
+        public void ShowMappingFile()
+        {
+            var repoRoot = FindRepoRoot();
+            if (repoRoot == null) { Console.WriteLine("Repository root not found"); return; }
+            var mapping = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
+            if (File.Exists(mapping)) { Console.WriteLine(File.ReadAllText(mapping)); return; }
+            var legacy = Path.Combine(repoRoot, "Backend", "checklists", "master_checklist.md");
+            if (File.Exists(legacy)) { Console.WriteLine(File.ReadAllText(legacy)); return; }
+            var fallback = Path.Combine(repoRoot, "implementation-tracking.md");
+            if (File.Exists(fallback)) Console.WriteLine(File.ReadAllText(fallback));
+            else Console.WriteLine("Mapping file not found.");
+        }
+
+        /// <param name="useHistoricalManualResults">
+        /// When true, manual/AI-Manual items that already have a completed result in
+        /// results/historical_last_run.json are copied forward and skip manual-step generation and
+        /// manual review entirely. The caller must decide this explicitly; the engine never infers it.
+        /// </param>
+        /// <param name="generateReports">
+        /// When true, the five-file report suite is produced as soon as the run finishes.
+        /// </param>
+        public Task<ChecklistResult[]> RunChecklistAsync(IProgress<ChecklistResult>? progress = null, Func<ChecklistItem, string, Task<string?>>? requestUserInput = null, System.Collections.Generic.IEnumerable<string>? selectedIds = null, System.Threading.CancellationToken cancellationToken = default, bool useHistoricalManualResults = false, bool generateReports = true)
+            => RunChecklistAsync(progress, requestUserInput, selectedIds, cancellationToken, useHistoricalManualResults, generateReports, null);
+
+        /// <summary>Platform identified at the start of the most recent run, for host banners.</summary>
+        public PlatformProfile? LastDetectedPlatform { get; private set; }
+
+        /// <summary>Items the most recent run skipped as not applicable to the detected platform.</summary>
+        public int LastPlatformExclusionCount { get; private set; }
+
+        // An item excluded on platform grounds never reaches a script or a model, so every
+        // field is fixed here rather than inferred later. This is what keeps the outcome
+        // identical across the WPF, IDE and CLI hosts.
+        private static ChecklistResult BuildPlatformExclusionResult(ChecklistItem item, string justification) =>
+            new(item.Id,
+                item.Description,
+                item.Verification,
+                NotApplicableEvidence.Outcome,
+                justification,
+                string.Empty,
+                "PlatformExclusion")
+            {
+                Score = null,
+                Severity = "Informational",
+                Finding = justification,
+                Recommendation = null,
+                RiskImpact = null,
+                Effort = null,
+                NotApplicable = true,
+                NotApplicableJustification = justification,
+                DatabasesVerified = null
+            };
+
+        // A script that could not produce a trustworthy verdict yields a diagnostic result
+        // rather than a scored one, so a tooling failure is never reported as a control gap.
+        private static ChecklistResult BuildScriptDiagnosticResult(
+            ChecklistItem item,
+            string[] files,
+            string outcome,
+            string note,
+            SqlScriptOutcome? scriptOutcome) =>
+            new(item.Id,
+                item.Description,
+                item.Verification,
+                outcome,
+                note,
+                string.Join(';', files),
+                "Script")
+            {
+                // Scored as a failure, not left unscored: a null score marks an item Not Applicable
+                // and drops it from the compliance denominator, hiding the unverified control.
+                Score = 0,
+                Severity = "High",
+                Finding = note,
+                Recommendation = null,
+                RiskImpact = null,
+                Effort = null,
+                DatabasesVerified = scriptOutcome?.DatabasesVerified,
+                ScriptOutcome = scriptOutcome
+            };
+
+        /// <param name="targetDatabases">
+        /// User databases on which DATABASE-scope SQL scripts run. Null means all currently
+        /// accessible online user databases; an explicit empty selection is rejected.
+        /// </param>
+        /// <param name="evidenceContext">
+        /// Repository, pipeline and documentation artefacts attached to the run. When supplied and
+        /// the provider is configured, documentation items are decided from it before falling back
+        /// to reviewer input. Ignored when LLM evaluators are disabled (MCP and CLI hosts).
+        /// </param>
+        public async Task<ChecklistResult[]> RunChecklistAsync(
+            IProgress<ChecklistResult>? progress,
+            Func<ChecklistItem, string, Task<string?>>? requestUserInput,
+            System.Collections.Generic.IEnumerable<string>? selectedIds,
+            System.Threading.CancellationToken cancellationToken,
+            bool useHistoricalManualResults,
+            bool generateReports,
+            System.Collections.Generic.IEnumerable<string>? targetDatabases,
+            bool reuseActiveRunDirectory = false,
+            EvidenceContext? evidenceContext = null)
+        {
+            // Ensure LLM evaluators reflect any runtime configuration provided after construction.
+            EnsureLlmEvaluators();
+            var runStartedAt = DateTime.Now;
+            var resultsDir = BeginRunDirectory(reuseActiveRunDirectory);
+            LogConnectionAttempt($"Run started using {AuthDescription}.");
+            _mcpEvaluator?.ResetSnapshotCache();
+            var structure = await GetChecklistStructureAsync();
+            var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+
+            // normalize connection (try alternate server variants) so script execution reuses a working connection string when possible
+            try { await TestAndNormalizeConnectionAsync(); } catch { }
+
+            string[] databaseTargets;
+            if (targetDatabases == null)
+            {
+                databaseTargets = await GetAvailableDatabasesAsync(cancellationToken);
+            }
+            else
+            {
+                databaseTargets = targetDatabases
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Select(name => name.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (databaseTargets.Length == 0)
+                    throw new InvalidOperationException("Select at least one database before evaluation.");
+
+                var systemDatabase = databaseTargets.FirstOrDefault(name =>
+                    string.Equals(name, "master", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "model", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "msdb", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "tempdb", StringComparison.OrdinalIgnoreCase));
+                if (systemDatabase != null)
+                    throw new InvalidOperationException($"System database '{systemDatabase}' cannot be selected as a user-database target.");
+            }
+
+            // load deterministic mapping if present
+            var mapping = new System.Collections.Generic.Dictionary<string, string[]>();
+            var scriptScopes = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var mcpFeasibleItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Items whose compliance can only be judged from external documentation.
+            var documentationItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Items needing elevated rights: the script is still generated, but the operator runs it.
+            var adminItems = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var mapPath = Path.Combine(repoRoot, "Backend", "checklists", "deterministic-script-mapping.json");
+                if (File.Exists(mapPath))
+                {
+                    var mapJson = File.ReadAllText(mapPath);
+                    using var mapDoc = JsonDocument.Parse(mapJson);
+                    foreach (var prop in mapDoc.RootElement.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.Array)
+                        {
+                            // Legacy format: { "id": ["path1", ...] }
+                            var arr = prop.Value.EnumerateArray()
+                                .Select(e => e.GetString() ?? string.Empty)
+                                .Where(s => !string.IsNullOrWhiteSpace(s))
+                                .ToArray();
+                            mapping[prop.Name] = arr;
+                        }
+                        else if (prop.Value.ValueKind == JsonValueKind.Object)
+                        {
+                            // New format: { "id": { "script_file": "path", ... } }
+                            var scriptFile = prop.Value.TryGetProperty("script_file", out var sf) ? sf.GetString() : null;
+                            if (!string.IsNullOrWhiteSpace(scriptFile))
+                                mapping[prop.Name] = new[] { scriptFile! };
+
+                            if (string.IsNullOrWhiteSpace(scriptFile)
+                                && prop.Value.TryGetProperty("MCP_Feasibility", out var mcpCheck)
+                                && mcpCheck.ValueKind == JsonValueKind.True)
+                            {
+                                mcpFeasibleItems.Add(prop.Name);
+                            }
+
+                            if (!prop.Value.TryGetProperty("scope", out var scriptScope))
+                                prop.Value.TryGetProperty("Scope", out scriptScope);
+                            if (scriptScope.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(scriptScope.GetString()))
+                                scriptScopes[prop.Name] = scriptScope.GetString()!.Trim().ToUpperInvariant();
+
+                            if (prop.Value.TryGetProperty("IsDocumentationCheck", out var docCheck) && docCheck.ValueKind == JsonValueKind.True)
+                                documentationItems.Add(prop.Name);
+
+                            if (prop.Value.TryGetProperty("IsAdminCheck", out var adminCheck) && adminCheck.ValueKind == JsonValueKind.True)
+                                adminItems.Add(prop.Name);
+                        }
+                    }
+                }
+
+                var generationResultsPath = Path.Combine(repoRoot, "Backend", "results", "execution-results.json");
+                if (File.Exists(generationResultsPath))
+                {
+                    using var resultsDoc = JsonDocument.Parse(File.ReadAllText(generationResultsPath));
+                    if (resultsDoc.RootElement.TryGetProperty("results", out var generatedResults)
+                        && generatedResults.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var generatedResult in generatedResults.EnumerateArray())
+                        {
+                            var checklistId = generatedResult.TryGetProperty("ChecklistId", out var idElement)
+                                ? idElement.GetString()
+                                : null;
+                            var scope = generatedResult.TryGetProperty("Scope", out var scopeElement)
+                                ? scopeElement.GetString()
+                                : null;
+                            if (!string.IsNullOrWhiteSpace(checklistId)
+                                && !string.IsNullOrWhiteSpace(scope)
+                                && !scriptScopes.ContainsKey(checklistId))
+                            {
+                                scriptScopes[checklistId] = scope.Trim().ToUpperInvariant();
+                            }
+                        }
+                    }
+                }
+
+                // Normalize script paths written before the Backend/checklists restructure.
+                var keys = mapping.Keys.ToArray();
+                foreach (var k in keys)
+                {
+                    var arr = mapping[k];
+                    if (arr == null) continue;
+                    var normalized = arr
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s.Replace("Backend/checklist/tools/sql/", "Backend/checklists/Scripts/sql/")
+                                      .Replace("Backend/checklist/scripts/", "Backend/checklists/Scripts/"))
+                        .Distinct()
+                        .ToArray();
+                    mapping[k] = normalized;
+                }
+            }
+            catch { }
+
+            var results = new System.Collections.Concurrent.ConcurrentBag<ChecklistResult>();
+
+            var selectedSet = selectedIds != null && selectedIds.Any()
+                ? new System.Collections.Generic.HashSet<string>(selectedIds)
+                : null;
+            var nonBlockingManualFallback = selectedSet != null;
+
+            var selectedItems = new System.Collections.Generic.List<ChecklistItem>();
+            foreach (var (_, items) in structure)
+            {
+                foreach (var it in items)
+                {
+                    if (selectedSet != null && !selectedSet.Contains(it.Id)) continue;
+                    selectedItems.Add(it);
+                }
+            }
+
+            // Applicability is a property of the target platform and is settled before any
+            // evaluation begins. Excluded items are recorded as Not Applicable without
+            // executing a script or calling a language model.
+            var platformProfile = await PlatformApplicability.DetectAsync(_connectionString, cancellationToken);
+            LastDetectedPlatform = platformProfile;
+            LastPlatformExclusionCount = 0;
+
+            var applicability = PlatformApplicability.Load(repoRoot);
+            if (applicability.RuleCount > 0 && platformProfile.Platform != PlatformApplicability.PlatformUnknown)
+            {
+                var applicableItems = new System.Collections.Generic.List<ChecklistItem>(selectedItems.Count);
+                foreach (var item in selectedItems)
+                {
+                    if (applicability.IsApplicable(item.Id, platformProfile, out var justification))
+                    {
+                        applicableItems.Add(item);
+                        continue;
+                    }
+
+                    var exclusion = BuildPlatformExclusionResult(item, justification!);
+                    results.Add(exclusion);
+                    progress?.Report(exclusion);
+                    LastPlatformExclusionCount++;
+                }
+
+                selectedItems = applicableItems;
+            }
+
+            bool IsDocumentationCheck(ChecklistItem item)
+            {
+                return documentationItems.Contains(item.Id);
+            }
+
+            bool IsAdminCheck(ChecklistItem item)
+            {
+                return adminItems.Contains(item.Id);
+            }
+
+            // A mapped script_file is authoritative: if a script exists the tool runs it, even for an
+            // admin check. IsAdminCheck/IsDocumentationCheck only steer items that have no script.
+            bool IsScriptMapped(ChecklistItem item)
+            {
+                return mapping.TryGetValue(item.Id, out var files) && files != null && files.Length > 0;
+            }
+
+            string? ReadMappedScript(ChecklistItem item)
+            {
+                if (!mapping.TryGetValue(item.Id, out var files) || files == null) return null;
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var full = Path.IsPathRooted(f) ? f : Path.Combine(repoRoot, f.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(full)) return File.ReadAllText(full);
+                    }
+                    catch { }
+                }
+                return null;
+            }
+
+            bool IsDatabaseScopedSql(ChecklistItem item, string path, string scriptText)
+            {
+                if (!string.Equals(Path.GetExtension(path), ".sql", StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                var scope = scriptScopes.TryGetValue(item.Id, out var mappedScope)
+                    ? mappedScope
+                    : GetDeclaredScriptScope(scriptText);
+                return string.Equals(scope, "DATABASE", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var scriptItems = selectedItems.Where(IsScriptMapped).ToList();
+            var aiItems = selectedItems.Where(it => !IsScriptMapped(it)).ToList();
+
+            // Historical reuse: manual/AI-Manual items decided in an earlier run are copied
+            // forward verbatim and never reach the manual pipeline, so no manual steps are
+            // generated, no review is queued and no LLM call is made for them. Script and
+            // AI-MCP items are untouched — an entry only qualifies when the recorded technique
+            // is manual.
+            var copiedFromHistory = new System.Collections.Generic.List<ChecklistResult>();
+            if (useHistoricalManualResults)
+            {
+                try
+                {
+                    var historical = HistoricalManualResultsStore.Load();
+                    if (historical.Count > 0)
+                    {
+                        var remaining = new System.Collections.Generic.List<ChecklistItem>(aiItems.Count);
+                        foreach (var it in aiItems)
+                        {
+                            if (historical.TryGetValue(it.Id, out var entry)
+                                && HistoricalManualResultsStore.TryBuildResult(entry, it, out var copied))
+                            {
+                                results.Add(copied);
+                                copiedFromHistory.Add(copied);
+                                progress?.Report(copied);
+                                continue;
+                            }
+                            remaining.Add(it);
+                        }
+                        aiItems = remaining;
+                    }
+
+                    if (copiedFromHistory.Count > 0)
+                        LogDiagnostic($"Copied {copiedFromHistory.Count} manual result(s) from {HistoricalManualResultsStore.FileName}.");
+                }
+                catch (Exception ex)
+                {
+                    // A missing or malformed historical file must never fail a run: fall back to
+                    // the normal manual flow for every item.
+                    LogDiagnostic($"Historical manual result reuse skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            // The script never produced a verdict, so the item is completed as a manual review
+            // instead of a scored failure. It keeps the manual technique and NeedsReview outcome,
+            // so the WPF queue, the CLI/IDE review block and the manual CSV all pick it up
+            // unchanged. Steps come from the normal generator, which reuses
+            // ManualMigrationStepsStore and only calls the provider when nothing is stored.
+            async Task<ChecklistResult> BuildScriptExecutionFailureReviewAsync(
+                ChecklistItem it,
+                string[] files,
+                string note,
+                string? executionError,
+                SqlScriptOutcome? scriptOutcome)
+            {
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, ReadMappedScript(it), cancellationToken);
+                var instructions = manualPlan.Instructions;
+
+                // Queued without blocking the script pipeline; hosts that pass no callback
+                // (CLI, IDE) pick the item up from the persisted NeedsReview result instead.
+                if (requestUserInput != null)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try { await requestUserInput(it, instructions); }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+                        catch { }
+                    }, cancellationToken);
+                }
+
+                return new ChecklistResult(
+                    it.Id, it.Description, it.Verification, "NeedsReview",
+                    ScriptExecutionFailure.BuildEvidence(note, executionError, instructions),
+                    string.Join(';', files), "AI-Manual")
+                {
+                    Finding = note,
+                    DatabasesVerified = scriptOutcome?.DatabasesVerified,
+                };
+            }
+
+            async Task<ChecklistResult?> EvaluateScriptAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
+            {
+                var allRows = new System.Collections.Generic.List<SqlScriptRow>();
+                var textLog = new System.Text.StringBuilder();
+                string? execError = null;
+                var files = mapping[it.Id];
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var full = f;
+                        if (!Path.IsPathRooted(f)) full = Path.Combine(repoRoot, f.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(full))
+                        {
+                            var txt = await File.ReadAllTextAsync(full);
+                            if (IsDatabaseScopedSql(it, full, txt))
+                            {
+                                var (log, rows) = await ExecuteDatabaseScopedSqlAsync(
+                                    txt,
+                                    databaseTargets,
+                                    cancellationToken);
+                                allRows.AddRange(rows);
+                                if (!string.IsNullOrWhiteSpace(log)) textLog.AppendLine(log);
+                            }
+                            else if (pipelineConn != null && string.Equals(Path.GetExtension(full), ".sql", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var (log, rows) = await ExecuteSqlCaptureAsync(pipelineConn, txt, cancellationToken);
+                                allRows.AddRange(rows);
+                                if (!string.IsNullOrWhiteSpace(log))
+                                {
+                                    // The capture returns only error text and never throws, so a
+                                    // non-empty log is the execution error for this script.
+                                    execError ??= log.Trim();
+                                    textLog.AppendLine(log);
+                                }
+                            }
+                            else
+                            {
+                                textLog.AppendLine(await RunScriptFileAsync(full));
+                            }
+                        }
+                        else
+                        {
+                            var checks = Path.Combine(repoRoot, "SQL", "scripts", "checks");
+                            var match = Directory.Exists(checks) ? Directory.GetFiles(checks, it.Id + "_*", SearchOption.TopDirectoryOnly).FirstOrDefault() : null;
+                            if (match != null)
+                            {
+                                textLog.AppendLine(await RunScriptFileAsync(match));
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        execError = ex.Message;
+                        textLog.AppendLine("Script error: " + ex.Message);
+                    }
+                }
+
+                // The script's final SELECT (Result/Score/DatabaseQueried/Finding) is the
+                // factual source. Preserve the verdict and score it returned; only fall back
+                // to scraping the console text when the script exposed no structured result.
+                // Either way the verdict is Pass or Fail - a script item is never deferred to
+                // a reviewer; only the Not Applicable check below can move it off that verdict.
+                var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
+
+                // A script item only ever reports Pass, Fail or Not Applicable when it actually ran.
+                // When execution itself failed the control is unverified, which is a review task
+                // rather than an observed gap, so the item is routed to manual review.
+                if (ScriptOutcomeInvariants.IsTimeout(execError))
+                {
+                    LogDiagnostic($"[{it.Id}] Script timed out; deferred to manual review because the control was never verified.");
+                    return await BuildScriptExecutionFailureReviewAsync(
+                        it, files,
+                        $"The audit script for {it.Id} exceeded its command timeout, so the control could not be verified and needs manual verification.",
+                        execError, scriptOutcome);
+                }
+
+                // A script that returned no structured Result was never assessed. Scraping the
+                // console text for the words 'Pass' or 'Fail' previously invented a verdict here,
+                // which reported unaudited controls as compliant.
+                if (scriptOutcome.Result == null)
+                {
+                    // An error left no verdict behind, so the item is reviewed rather than failed.
+                    // A script that ran and simply returned no Result row is still a Fail.
+                    if (ScriptExecutionFailure.IsExecutionFailure(execError))
+                    {
+                        LogDiagnostic($"[{it.Id}] Script failed to execute ({execError}); deferred to manual review because the control was never verified.");
+                        return await BuildScriptExecutionFailureReviewAsync(
+                            it, files,
+                            $"The audit script for {it.Id} failed to execute, so the control could not be verified and needs manual verification.",
+                            execError, scriptOutcome);
+                    }
+
+                    LogDiagnostic($"[{it.Id}] Script returned no structured result; reported as Fail because the control was never verified.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        $"The audit script for {it.Id} returned no Result row, so the control could not be verified. Re-run it or verify this item manually.",
+                        scriptOutcome);
+                }
+
+                var outcome = scriptOutcome.Result;
+                var score = scriptOutcome.Score;
+
+                // The engine could not evaluate the target database - a per-database execution
+                // failure - so the control is unverified and goes to manual review. A script that
+                // ran and deliberately returned 'Review' is not a failure and keeps its handling.
+                if (string.Equals(outcome, SqlScriptResultParser.Unassessed, StringComparison.Ordinal))
+                {
+                    var databaseFailure = ScriptExecutionFailure.DatabaseFailureDetail(scriptOutcome.Rows);
+                    if (databaseFailure != null)
+                    {
+                        LogDiagnostic($"[{it.Id}] Database could not be evaluated; deferred to manual review because the control was never verified.");
+                        return await BuildScriptExecutionFailureReviewAsync(
+                            it, files,
+                            $"The audit script for {it.Id} could not evaluate its target database, so the control could not be verified and needs manual verification.",
+                            string.IsNullOrWhiteSpace(execError) ? databaseFailure : execError,
+                            scriptOutcome);
+                    }
+
+                    LogDiagnostic($"[{it.Id}] Script deferred the verdict to a reviewer; reported as Fail because the control was never verified.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        string.IsNullOrWhiteSpace(scriptOutcome.Finding)
+                            ? $"The audit script for {it.Id} could not evaluate its target database, so the control could not be verified."
+                            : scriptOutcome.Finding!,
+                        scriptOutcome);
+                }
+
+                if (ScriptOutcomeInvariants.IsContradictoryPass(outcome, score))
+                {
+                    LogDiagnostic($"[{it.Id}] Script returned Pass with score {score}; reported as Fail because the verdict is unreliable.");
+                    return BuildScriptDiagnosticResult(
+                        it, files, "Fail",
+                        $"The audit script for {it.Id} returned Pass with a score of {score}, which contradict each other. The control could not be reliably verified.",
+                        scriptOutcome);
+                }
+
+                // A script may now declare the control absent from this environment rather than
+                // unimplemented. That verdict is authoritative and needs no enrichment.
+                if (NotApplicableEvidence.IsNotApplicableOutcome(scriptOutcome.Result))
+                {
+                    var naFinding = string.IsNullOrWhiteSpace(scriptOutcome.Finding)
+                        ? $"Not applicable: {it.Description}."
+                        : scriptOutcome.Finding!;
+                    return new ChecklistResult(it.Id, it.Description, it.Verification, NotApplicableEvidence.Outcome,
+                        $"{NotApplicableEvidence.Marker}. {naFinding}", string.Join(';', files), "Script")
+                    {
+                        Score = null,
+                        Severity = "Informational",
+                        Finding = naFinding,
+                        Recommendation = null,
+                        RiskImpact = null,
+                        Effort = null,
+                        DatabasesVerified = scriptOutcome.DatabasesVerified,
+                        ScriptOutcome = scriptOutcome,
+                        NotApplicable = true,
+                        NotApplicableJustification = naFinding,
+                    };
+                }
+
+                // Turn the structured SQL result into audit-report wording (Finding, Evidence,
+                // RiskImpact, Recommendation, Severity) using only the values the script
+                // returned. When the provider is unavailable the enricher returns null: we then
+                // keep the script's own finding and leave the AI-authored fields null rather
+                // than emitting generic filler (Severity is still derived from the rubric by
+                // ChecklistResultEnricher during the post-pipeline back-fill).
+                ScriptResultAiEnricher.ScriptEnrichment? ai = null;
+                if (_scriptEnricher != null && scriptOutcome.HasStructuredResult)
+                {
+                    try
+                    {
+                        ai = await _scriptEnricher.EnrichAsync(it, outcome, score, scriptOutcome, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        ai = null;
+                    }
+                }
+
+                // Without this the only trace of a dead provider is enrichment_diagnostics.log,
+                // and the report silently ships with blank Finding/Evidence/Recommendation.
+                if (scriptOutcome.HasStructuredResult && ai == null)
+                {
+                    LogDiagnostic($"[{it.Id}] AI enrichment unavailable - Finding/Evidence/Recommendation/Risk Impact left empty (see enrichment_diagnostics.log).");
+                }
+
+                var finding = !string.IsNullOrWhiteSpace(ai?.Finding)
+                    ? ai!.Finding!
+                    : (scriptOutcome.Finding ?? string.Empty);
+
+                // Not Applicable is decided deterministically - by the platform rules before the
+                // run, or by the script's own Result column - never by inferring it from an
+                // absence of values here.
+                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, ai?.Evidence, string.Join(';', files), "Script")
+                {
+                    Score = score,
+                    Finding = finding,
+                    Severity = string.IsNullOrWhiteSpace(ai?.Severity) ? string.Empty : ai!.Severity!,
+                    RiskImpact = ai?.RiskImpact,
+                    Recommendation = ai?.Recommendation,
+                    DatabasesVerified = scriptOutcome.DatabasesVerified,
+                    ScriptOutcome = scriptOutcome,
+                };
+            }
+
+            // Deciding an item with MCP and writing its manual guidance are independent provider
+            // calls. Returning null defers the item to the manual stage instead of generating that
+            // guidance inline, so the next MCP evaluation can start immediately.
+            async Task<ChecklistResult?> TryEvaluateMcpAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? stageConn)
+            {
+                if (_mcpEvaluator == null || string.IsNullOrWhiteSpace(_connectionString)) return null;
+                if (IsDocumentationCheck(it) || IsAdminCheck(it)) return null;
+
+                try
+                {
+                    return stageConn != null
+                        ? await _mcpEvaluator.EvaluateAsync(it, stageConn, cancellationToken)
+                        : await _mcpEvaluator.EvaluateAsync(it, _connectionString, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    LogDiagnostic($"SQL MCP evaluation error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
+                    return null;
+                }
+            }
+
+            async Task<ChecklistResult?> EvaluateManualAsync(ChecklistItem it)
+            {
+                var manualStartingProgress = new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, it.ScriptFile, "AI-Manual");
+                progress?.Report(manualStartingProgress);
+
+                // An admin check keeps its generated script so the operator can run it themselves.
+                var auditScript = IsAdminCheck(it) && !IsDocumentationCheck(it) ? ReadMappedScript(it) : null;
+
+                // Only reached once MCP has declined or failed, so the guidance is never wasted work.
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, IsDocumentationCheck(it), cancellationToken);
+
+                // Attached artefacts are tried before the reviewer is asked, so a documentation or
+                // process item a repository or pipeline can settle never reaches the review queue.
+                // The criteria come from the deterministic builder, not from manualPlan: when an LLM
+                // generates the reviewer-facing steps it also rewrites the Pass/Fail wording, which
+                // would make the verdict differ between WPF and the CLI and between runs.
+                ChecklistResult? evidenceResult = null;
+                if (evidenceContext is { HasUsableEvidence: true })
+                {
+                    var criteria = await EvaluationDecisionService.BuildManualInstructionsAsync(it, IsDocumentationCheck(it));
+                    evidenceResult = await TryEvaluateFromEvidenceAsync(it, criteria, evidenceContext, cancellationToken);
+                }
+                if (evidenceResult != null) return evidenceResult;
+
+                if (requestUserInput != null && nonBlockingManualFallback)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await requestUserInput(it, manualPlan.Instructions);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                        catch
+                        {
+                            try { await requestUserInput(it, "Manual verification guidance could not be generated. Please validate this checklist item manually."); } catch { }
+                        }
+                    }, cancellationToken);
+
+                    return new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", "Manual review queued", it.ScriptFile, "AI-Manual");
+                }
+
+                var instructions = manualPlan.Instructions;
+                string BuildManualEvidence(string manualSteps, string operatorResponse)
+                {
+                    return $"Manual Steps:\n{manualSteps}\n\nOperator Response:\n{operatorResponse}";
+                }
+
+                if (requestUserInput != null)
+                {
+                    try
+                    {
+                        var userEvidence = await requestUserInput(it, instructions);
+                        if (!string.IsNullOrWhiteSpace(userEvidence))
+                        {
+                            // A bare verdict word is a decision; otherwise the reviewer must lead their
+                            // evidence with one, so wording alone can never flip the outcome.
+                            var outcome = ManualVerdict.Normalize(userEvidence)
+                                ?? EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
+
+                            var result = new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                            return NotApplicableEvidence.IsNotApplicableOutcome(outcome)
+                                ? result with { NotApplicable = true, NotApplicableJustification = userEvidence.Trim() }
+                                : result;
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch { }
+                }
+
+                return new ChecklistResult(it.Id, it.Description, it.Verification, ManualVerdict.NeedsReview, instructions, it.ScriptFile, "AI-Manual");
+            }
+
+            // One aborted command (a timeout, or a continuation starved while the host was busy)
+            // leaves the shared pipeline connection unusable. Every later script would then come
+            // back as "SQL ERROR" and be scored Fail without ever being evaluated, so the
+            // connection is probed before each item and transparently re-opened when broken.
+            async Task<Microsoft.Data.SqlClient.SqlConnection?> EnsureUsableConnectionAsync(Microsoft.Data.SqlClient.SqlConnection? conn)
+            {
+                if (string.IsNullOrWhiteSpace(_connectionString)) return null;
+
+                if (conn != null && conn.State == ConnectionState.Open)
+                {
+                    try
+                    {
+                        using var probe = new SqlCommand("SELECT 1", conn) { CommandTimeout = 15 };
+                        await probe.ExecuteScalarAsync(cancellationToken);
+                        return conn;
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch { }
+                }
+
+                if (conn != null)
+                {
+                    try { await conn.DisposeAsync(); } catch { }
+                }
+
+                try
+                {
+                    var fresh = CreateConnection();
+                    await fresh.OpenAsync(cancellationToken);
+                    return fresh;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    // Falling back to null makes the evaluators open their own short-lived
+                    // connection instead of reporting a fabricated failure.
+                    return null;
+                }
+            }
+
+            // Both AI stages are provider-bound, so each works on several items at once. Blocking
+            // manual review stays single-threaded: the operator is still asked about one item at a
+            // time, exactly as before.
+            var manualQueue = System.Threading.Channels.Channel.CreateUnbounded<ChecklistItem>();
+
+            bool CanTryMcp(ChecklistItem it) =>
+                mcpFeasibleItems.Contains(it.Id)
+                &&
+                _mcpEvaluator != null
+                && !string.IsNullOrWhiteSpace(_connectionString)
+                && !IsDocumentationCheck(it)
+                && !IsAdminCheck(it);
+
+            // Documentation and admin checks can never be decided by MCP, so they are handed over
+            // up front rather than queueing behind evaluations that cannot help them.
+            var mcpItems = new System.Collections.Generic.List<ChecklistItem>();
+            foreach (var it in aiItems)
+            {
+                if (CanTryMcp(it)) mcpItems.Add(it);
+                else manualQueue.Writer.TryWrite(it);
+            }
+
+            var mcpStageWidth = Math.Clamp(mcpItems.Count, 1, MaxAiStageWorkers);
+            var manualStageWidth = nonBlockingManualFallback ? Math.Clamp(aiItems.Count, 1, MaxAiStageWorkers) : 1;
+            var mcpQueue = new System.Collections.Concurrent.ConcurrentQueue<ChecklistItem>(mcpItems);
+
+            string StartingScriptFile(ChecklistItem it)
+            {
+                if (!IsDocumentationCheck(it)
+                    && mapping.TryGetValue(it.Id, out var mappedFiles)
+                    && mappedFiles != null
+                    && mappedFiles.Length > 0)
+                {
+                    return string.Join(';', mappedFiles);
+                }
+
+                return string.Empty;
+            }
+
+            async Task RunScriptPipelineAsync()
+            {
+                Microsoft.Data.SqlClient.SqlConnection? pipelineConn = await EnsureUsableConnectionAsync(null);
+
+                try
+                {
+                    foreach (var it in scriptItems)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        pipelineConn = await EnsureUsableConnectionAsync(pipelineConn);
+                        progress?.Report(new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, StartingScriptFile(it), "Script"));
+
+                        try
+                        {
+                            var result = await EvaluateScriptAsync(it, pipelineConn);
+                            if (result != null)
+                            {
+                                results.Add(result);
+                                progress?.Report(result);
+                            }
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            // The item never reached a verdict, so it is reviewed rather than failed.
+                            ChecklistResult err;
+                            try
+                            {
+                                err = await BuildScriptExecutionFailureReviewAsync(
+                                    it,
+                                    mapping.TryGetValue(it.Id, out var mapped) && mapped != null ? mapped : Array.Empty<string>(),
+                                    $"The audit script for {it.Id} failed to execute, so the control could not be verified and needs manual verification.",
+                                    ex.Message,
+                                    null);
+                            }
+                            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch
+                            {
+                                err = new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", "Error: " + ex.Message, it.ScriptFile, "AI-Manual");
+                            }
+                            results.Add(err);
+                            progress?.Report(err);
+                        }
+                    }
+                }
+                finally
+                {
+                    if (pipelineConn != null)
+                    {
+                        try { await pipelineConn.DisposeAsync(); } catch { }
+                    }
+                }
+            }
+
+            async Task RunMcpStageWorkerAsync()
+            {
+                // Each worker owns its connection: the shared pipeline connection cannot be used
+                // by more than one evaluation at a time.
+                Microsoft.Data.SqlClient.SqlConnection? stageConn = null;
+
+                try
+                {
+                    while (mcpQueue.TryDequeue(out var it))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        ChecklistResult? result = null;
+                        try
+                        {
+                            stageConn = await EnsureUsableConnectionAsync(stageConn);
+                            progress?.Report(new ChecklistResult(it.Id, it.Description, it.Verification, "Evaluating", string.Empty, StartingScriptFile(it), "AI-MCP"));
+                            result = await TryEvaluateMcpAsync(it, stageConn);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            LogDiagnostic($"MCP stage error for {it.Id}: {ex.GetType().Name}: {ex.Message}");
+                        }
+
+                        if (result != null)
+                        {
+                            results.Add(result);
+                            progress?.Report(result);
+                        }
+                        else
+                        {
+                            // Hand the item over and take the next one; the manual stage is already
+                            // running and picks this up in parallel.
+                            await manualQueue.Writer.WriteAsync(it, cancellationToken);
+                        }
+                    }
+                }
+                finally
+                {
+                    if (stageConn != null)
+                    {
+                        try { await stageConn.DisposeAsync(); } catch { }
+                    }
+                }
+            }
+
+            async Task RunManualStageWorkerAsync()
+            {
+                await foreach (var it in manualQueue.Reader.ReadAllAsync(cancellationToken))
+                {
+                    try
+                    {
+                        var result = await EvaluateManualAsync(it);
+                        if (result != null)
+                        {
+                            results.Add(result);
+                            progress?.Report(result);
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        var err = new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", "Error: " + ex.Message, it.ScriptFile, "AI-Manual");
+                        results.Add(err);
+                        progress?.Report(err);
+                    }
+                }
+            }
+
+            // The queue is closed only once every MCP worker has stopped producing, so no deferred
+            // item is lost and no manual worker waits forever.
+            async Task RunMcpStageAsync()
+            {
+                try
+                {
+                    await Task.WhenAll(Enumerable.Range(0, mcpStageWidth).Select(_ => RunMcpStageWorkerAsync()).ToArray());
+                }
+                finally
+                {
+                    manualQueue.Writer.TryComplete();
+                }
+            }
+
+            Task RunManualStageAsync() =>
+                Task.WhenAll(Enumerable.Range(0, manualStageWidth).Select(_ => RunManualStageWorkerAsync()).ToArray());
+
+            await Task.WhenAll(
+                RunScriptPipelineAsync(),
+                RunMcpStageAsync(),
+                RunManualStageAsync());
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Back-fill report-oriented fields so the persisted JSON is always
+            // schema-compatible with the Summary Report generator. Script items were
+            // already given their audit wording by the AI enricher inside the pipeline
+            // (WPF flow). In the CLI/IDE flows no provider is configured, so they keep the
+            // script-supplied Finding and leave Evidence/RiskImpact/Recommendation null for
+            // GitHub Copilot to author and write back via ApplyEnrichment.
+            var enrichedResults = results.Select(ChecklistResultEnricher.Enrich).ToArray();
+
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            try
+            {
+                Directory.CreateDirectory(resultsDir);
+                var payload = JsonSerializer.Serialize(enrichedResults, new JsonSerializerOptions { WriteIndented = true });
+                lock (ResultsFileLockFor(resultsDir))
+                {
+                    File.WriteAllText(jsonPath, payload);
+                }
+            }
+            catch { }
+
+            // Makes this run discoverable as the server's previous evaluation, and records the
+            // inputs needed to rerun or edit it later (never the password or API key).
+            try
+            {
+                var runInputs = (LastRunInputs ?? new RunInputs()) with
+                {
+                    Databases = databaseTargets?.ToList(),
+                    SelectedItemIds = selectedIds?
+                        .Where(id => !string.IsNullOrWhiteSpace(id))
+                        .Select(id => id.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                    EvidenceSources = evidenceContext?.Sources.ToList(),
+                    Platform = LastDetectedPlatform?.Platform,
+                    PlatformDisplay = LastDetectedPlatform?.Display,
+                    EngineEdition = LastDetectedPlatform?.EngineEdition,
+                    EditionName = LastDetectedPlatform?.EditionName,
+                    VersionYear = LastDetectedPlatform?.VersionYear,
+                };
+                PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now, runInputs);
+            }
+            catch { }
+
+            // Automatically produce the final Markdown summary report and the Excel workbook from
+            // the freshly written checklist_results.json. The historical manual results are NOT
+            // refreshed here: that happens only when the user explicitly asks for the report.
+            if (generateReports)
+            {
+                GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir);
+            }
+
+            return enrichedResults;
+        }
+
+        /// <summary>
+        /// Produces the five client-facing artifacts in <paramref name="runDirectory"/> (defaulting to
+        /// the active run) from its persisted checklist_results.json. Report generation is also the
+        /// moment historical_last_run.json is refreshed, so the historical file always mirrors the
+        /// manual results of the latest reported audit.
+        /// </summary>
+        public static string GenerateReports(bool refreshHistoricalManualResults = true, string? runDirectory = null)
+        {
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath))
+                return $"No results found at {jsonPath}. Run an evaluation first.";
+
+            using var scope = AuditOutputPaths.EnterRunScope(resultsDir);
+            var messages = new System.Collections.Generic.List<string>();
+
+            if (refreshHistoricalManualResults)
+            {
+                try
+                {
+                    var added = HistoricalManualResultsStore.RefreshFromResults();
+                    messages.Add($"{HistoricalManualResultsStore.FileName} refreshed ({added} new manual result(s) recorded).");
+                }
+                catch (Exception ex)
+                {
+                    messages.Add($"Historical manual results could not be refreshed: {ex.Message}");
+                }
+            }
+
+            var total = 0;
+            try
+            {
+                total = (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) as System.Text.Json.Nodes.JsonArray)?.Count ?? 0;
+            }
+            catch { }
+
+            var metadata = new SqlAuditor.Reporting.ReportMetadata
+            {
+                ReportDate = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                Auditors = "SQL Auditor Tool (automated)",
+                TotalChecklistItems = total,
+            };
+
+            foreach (var directory in new[] { resultsDir, AuditOutputPaths.RootDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                foreach (var legacyFileName in new[] { "final_report.md", "audit_report.xlsx" })
+                {
+                    try { File.Delete(Path.Combine(directory, legacyFileName)); }
+                    catch (Exception ex)
+                    {
+                        var message = $"Could not remove legacy report {Path.Combine(directory, legacyFileName)}: {ex.Message}";
+                        messages.Add(message);
+                        try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n"); } catch { }
+                    }
+                }
+            }
+
+            var suite = new SqlAuditor.Reporting.ReportSuiteGenerator();
+            foreach (var message in suite.GenerateFromFile(
+                jsonPath,
+                resultsDir,
+                metadata,
+                error =>
+                {
+                    try { File.AppendAllText(Path.Combine(resultsDir, "ui_log.txt"), $"{DateTime.UtcNow:O} {error}\r\n"); } catch { }
+                }))
+            {
+                messages.Add(message);
+            }
+
+            // Keeps the reusable run summary aligned with manual decisions made after the engine finished.
+            try { PreviousEvaluationStore.Refresh(resultsDir); }
+            catch { }
+
+            return string.Join(Environment.NewLine, messages);
+        }
+
+        // Marks a previously-evaluated checklist item as Pass/Fail/NeedsReview/Not Applicable in
+        // the persisted results and regenerates the report. Used by the CLI --interactive
+        // flow and the IDE 'resolve_review' tool so manual items can be decided by a
+        // human without re-running the evaluation. Patches the JSON in place so no
+        // enrichment fields are lost.
+        public bool ResolveReview(string id, string decision, string? notes, out string newOutcome, string? runDirectory = null)
+        {
+            newOutcome = string.Empty;
+            var outcome = ManualVerdict.Normalize(decision) ?? string.Empty;
+            if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
+
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
+            // Nothing about the control could be assessed, so it is excluded from every score -
+            // the same standing a script- or MCP-evaluated item gets when its evidence declares
+            // it not applicable.
+            var isNotApplicable = NotApplicableEvidence.IsNotApplicableOutcome(outcome);
+
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath)) return false;
+
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                return false;
+
+            System.Text.Json.Nodes.JsonObject? target = null;
+            foreach (var el in arr)
+            {
+                if (el is System.Text.Json.Nodes.JsonObject obj &&
+                    string.Equals(obj["Id"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = obj;
+                    break;
+                }
+            }
+            if (target == null) return false;
+
+            target["Outcome"] = outcome;
+
+            // A human verdict makes the item assessable again, so any earlier Not Applicable
+            // marking goes - unless the verdict itself is Not Applicable.
+            if (isNotApplicable) target["NotApplicable"] = true;
+            else target.Remove("NotApplicable");
+
+            // Score and severity follow the outcome, exactly as the desktop flow derives them
+            // through ChecklistResultEnricher; leaving them frozen would score a resolved Pass
+            // as the 1 it carried while it was NeedsReview.
+            int? previousScore = target["Score"] is System.Text.Json.Nodes.JsonValue scoreValue
+                && scoreValue.TryGetValue<int>(out var parsedScore)
+                    ? parsedScore
+                    : null;
+
+            // A Not Applicable item is outside the scored population, so it carries no score at
+            // all and no severity weight.
+            int? newScore = isNotApplicable ? null : ChecklistResultEnricher.DeriveScore(outcome);
+            target["Score"] = newScore;
+            target["Severity"] = ChecklistResultEnricher.DeriveSeverity(id, newScore, isNotApplicable);
+
+            // Only wording the enricher itself generated is refreshed, so anything
+            // Copilot authored through ApplyEnrichment survives untouched.
+            var description = target["Description"]?.GetValue<string>() ?? string.Empty;
+            if (Matches(target["Finding"], ChecklistResultEnricher.DefaultFinding(previousScore, description, false)))
+                target["Finding"] = ChecklistResultEnricher.DefaultFinding(newScore, description, isNotApplicable);
+            if (Matches(target["RiskImpact"], ChecklistResultEnricher.DefaultRiskImpact(previousScore)))
+                target["RiskImpact"] = isNotApplicable ? null : ChecklistResultEnricher.DefaultRiskImpact(newScore);
+            if (Matches(target["Recommendation"], ChecklistResultEnricher.DefaultRecommendation(previousScore, description)))
+                target["Recommendation"] = isNotApplicable ? null : ChecklistResultEnricher.DefaultRecommendation(newScore, description);
+
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                // A Not Applicable verdict leads the evidence with the marker, so the persisted
+                // evidence reads exactly as it does in the script and MCP flows.
+                var decisionLine = isNotApplicable
+                    ? $"{NotApplicableEvidence.Marker}. {notes}"
+                    : $"Manual decision: {outcome}. {notes}";
+                var existing = target["Evidence"]?.GetValue<string>() ?? string.Empty;
+                target["Evidence"] = string.IsNullOrWhiteSpace(existing)
+                    ? decisionLine
+                    : (isNotApplicable ? $"{decisionLine}\n\n{existing}" : $"{existing}\n\n{decisionLine}");
+                target["Finding"] = notes;
+            }
+
+            try
+            {
+                File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { return false; }
+
+            // Keep every generated artifact synchronized with the resolved decision.
+            try { GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir); } catch { }
+
+            newOutcome = outcome;
+            return true;
+        }
+
+        private static bool Matches(System.Text.Json.Nodes.JsonNode? node, string? expected)
+        {
+            if (expected is null) return node is null;
+            return node is System.Text.Json.Nodes.JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && string.Equals(text, expected, StringComparison.Ordinal);
+        }
+
+        // The CLI/IDE hosts stamp Not Applicable during Copilot's enrichment, after 'evaluate'
+        // has already printed its counts, so the final tally has to be read back from the
+        // persisted results.
+        public static string BuildOutcomeTally()
+        {
+            var jsonPath = AuditOutputPaths.GetCurrentFilePath("checklist_results.json");
+            if (!File.Exists(jsonPath)) return string.Empty;
+
+            try
+            {
+                if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                    return string.Empty;
+
+                var counts = new System.Collections.Generic.SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var el in arr)
+                {
+                    var outcome = (el as System.Text.Json.Nodes.JsonObject)?["Outcome"]?.GetValue<string>() ?? "Unknown";
+                    if (NotApplicableEvidence.IsNotApplicableOutcome(outcome)) outcome = NotApplicableEvidence.Outcome;
+                    counts[outcome] = counts.TryGetValue(outcome, out var c) ? c + 1 : 1;
+                }
+
+                return string.Join(", ", counts.Select(kv => $"{kv.Key}: {kv.Value}"));
+            }
+            catch { return string.Empty; }
+        }
+
+        // Records AI-authored wording for an already-evaluated item. Used by the CLI
+        // 'enrich_result' command and the IDE 'enrich_result' tool so GitHub Copilot can
+        // supply Finding/Evidence/RiskImpact/Recommendation in the flows where this engine
+        // makes no LLM calls. Outcome, Score, Severity and Databases Verified come from the
+        // SQL script and are never touched here. Patches the JSON in place so nothing is lost.
+        public bool ApplyEnrichment(string id, string? finding, string? evidence, string? riskImpact, string? recommendation, string? runDirectory = null)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return false;
+            if (string.IsNullOrWhiteSpace(finding) && string.IsNullOrWhiteSpace(evidence)
+                && string.IsNullOrWhiteSpace(riskImpact) && string.IsNullOrWhiteSpace(recommendation)) return false;
+
+            var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
+            var jsonPath = Path.Combine(resultsDir, "checklist_results.json");
+            if (!File.Exists(jsonPath)) return false;
+
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(jsonPath)) is not System.Text.Json.Nodes.JsonArray arr)
+                return false;
+
+            System.Text.Json.Nodes.JsonObject? target = null;
+            foreach (var el in arr)
+            {
+                if (el is System.Text.Json.Nodes.JsonObject obj &&
+                    string.Equals(obj["Id"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase))
+                {
+                    target = obj;
+                    break;
+                }
+            }
+            if (target == null) return false;
+
+            if (!string.IsNullOrWhiteSpace(finding)) target["Finding"] = finding;
+            if (!string.IsNullOrWhiteSpace(evidence)) target["Evidence"] = evidence;
+            if (!string.IsNullOrWhiteSpace(riskImpact)) target["RiskImpact"] = riskImpact;
+            if (!string.IsNullOrWhiteSpace(recommendation)) target["Recommendation"] = recommendation;
+
+            // Not Applicable is settled deterministically upstream; enrichment rewrites wording only.
+
+            try
+            {
+                File.WriteAllText(jsonPath, arr.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { return false; }
+
+            // Keep every generated artifact synchronized with the enriched wording and N/A state.
+            try { GenerateReports(refreshHistoricalManualResults: false, runDirectory: resultsDir); } catch { }
+
+            return true;
+        }
+
+        // Builds the block that asks GitHub Copilot to author the audit wording for
+        // script-evaluated items, for the CLI (--copilot) and IDE flows where this engine
+        // makes no LLM calls. Mirrors the field policy of the WPF flow's script enrichment
+        // prompt so the JSON reads the same whichever host produced it. <paramref
+        // name="commandFor"/> renders the host-specific write-back call for an item id.
+        public static string BuildScriptEnrichmentRequest(
+            System.Collections.Generic.IEnumerable<ChecklistResult> results,
+            Func<string, string> commandFor)
+        {
+            var pending = results
+                .Where(r => string.Equals(r.Technique, "Script", StringComparison.OrdinalIgnoreCase)
+                         && (string.IsNullOrWhiteSpace(r.Evidence)
+                             || string.IsNullOrWhiteSpace(r.RiskImpact)
+                             || string.IsNullOrWhiteSpace(r.Recommendation)))
+                .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("=== COPILOT ENRICHMENT REQUIRED ===");
+            if (pending.Count == 0)
+            {
+                sb.AppendLine("No script-evaluated items need audit wording.");
+                sb.AppendLine("=== END COPILOT ENRICHMENT REQUIRED ===");
+                return sb.ToString();
+            }
+
+            sb.AppendLine($"{pending.Count} script-evaluated item(s) have a verdict but no audit wording yet.");
+            sb.AppendLine("This tool performs NO AI/LLM calls — YOU (GitHub Copilot) write the wording. For EACH item below:");
+            sb.AppendLine("  1. Use ONLY the facts under 'Finding' and 'Script result'. Never invent objects, counts, databases or settings.");
+            sb.AppendLine("  2. Never change Outcome, Score, Severity or Databases Verified — the script already decided them.");
+            sb.AppendLine("  3. Produce these four values:");
+            sb.AppendLine("       finding        - 1-2 sentences on the ACTUAL state the script found (object/database names, counts). Do not restate the checklist description.");
+            sb.AppendLine("       evidence       - how that finding justifies the outcome, quoting the values returned. Under 120 words. When the script result holds no supporting artefact at all (every value NULL, empty, zero or 'not found'), the control does not exist to be assessed: start evidence with the exact words 'Not Applicable.' followed by one sentence of your own reasoning. A zero that itself proves compliance is real evidence, not 'Not Applicable'.");
+            sb.AppendLine("       riskImpact     - the specific business/security/operational consequence of THIS finding. Under 50 words, no generic phrases.");
+            sb.AppendLine("       recommendation - remediation targeted at this gap, consistent with the score. Leave empty when Score is 3 and the outcome is Pass.");
+            sb.AppendLine("  4. Record them with the command shown under the item, then move to the next. Do not write a final summary until every item is enriched.");
+
+            foreach (var r in pending)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"--- {r.Id}: {r.Description} ---");
+                sb.AppendLine($"Outcome: {r.Outcome} | Score: {r.Score?.ToString() ?? "unknown"} | Severity: {(string.IsNullOrWhiteSpace(r.Severity) ? "unset" : r.Severity)} | Databases Verified: {r.DatabasesVerified ?? "not reported"}");
+                sb.AppendLine($"Finding returned by the script: {r.ScriptOutcome?.Finding ?? r.Finding}");
+                sb.AppendLine("Script result (column=value per row):");
+                sb.AppendLine(r.ScriptOutcome?.ToFactSheet() ?? "(no structured result was captured)");
+                sb.AppendLine($"Record with: {commandFor(r.Id)}");
+            }
+            sb.AppendLine("=== END COPILOT ENRICHMENT REQUIRED ===");
+            return sb.ToString();
+        }
+
+        public async Task<bool> TestConnectionAsync()
+        {
+            if (string.IsNullOrWhiteSpace(_connectionString)) return false;
+            try
+            {
+                using var conn = CreateConnection();
+                await conn.OpenAsync();
+                await conn.CloseAsync();
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Try connection and, if initial attempt fails, try common localhost/transport variants.
+        // If a variant succeeds, update _connectionString so subsequent script runs reuse it.
+        public async Task<bool> TestAndNormalizeConnectionAsync()
+        {
+            if (string.IsNullOrWhiteSpace(_connectionString)) return false;
+
+            var firstError = await TryOpenAsync(_connectionString);
+            if (firstError is null) return true;
+
+            // A rejected sign-in is not a transport problem: retrying variants only re-prompts
+            // the user for MFA and burns lockout attempts.
+            if (IsAuthenticationFailure(firstError))
+            {
+                LogConnectionAttempt($"Authentication rejected ({AuthDescription}); not retrying transport variants: {firstError.Message}");
+                return false;
+            }
+
+            try
+            {
+                var baseBuilder = new SqlConnectionStringBuilder(_connectionString);
+                var server = baseBuilder.DataSource;
+                if (string.IsNullOrWhiteSpace(server)) return false;
+
+                // Azure SQL reaches only over TCP, so probing named-pipe variants cannot succeed
+                // and only multiplies the connect timeout. Retry the catalog instead.
+                if (SqlAuthProfile.IsAzureSqlEndpoint(server))
+                {
+                    try
+                    {
+                        using var azureConnection = await OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken.None);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendConnectionLog($"Azure endpoint {server} -> FAIL: {ex.Message}");
+                        return false;
+                    }
+                }
+
+                var unprefixedServer = Regex.Replace(
+                    server,
+                    @"^(tcp:|np:)",
+                    string.Empty,
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                // Transport variants keep the exact requested host/instance. Never fall back
+                // to a different local server after a remote connection fails. Named pipes
+                // cannot carry an Entra token, so Entra modes stay on TCP.
+                var variants = SqlAuthProfile.IsEntraMethod(AuthMethod)
+                    ? new[] { server, "tcp:" + unprefixedServer }
+                    : new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
+                foreach (var v in variants.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    var candidateBuilder = new SqlConnectionStringBuilder(_connectionString)
+                    {
+                        DataSource = v
+                    };
+                    var cs2 = candidateBuilder.ConnectionString;
+                    var error = await TryOpenAsync(cs2);
+                    if (error is null)
+                    {
+                        // adopt working connection string
+                        _connectionString = cs2;
+                        LogConnectionAttempt($"Adopted working connection variant: {v} -> SUCCESS");
+                        return true;
+                    }
+
+                    LogConnectionAttempt($"Variant: {v} -> FAIL: {error.Message}");
+                    if (IsAuthenticationFailure(error)) return false;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private async Task<Exception?> TryOpenAsync(string connectionString)
+        {
+            try
+            {
+                using var conn = CreateConnection(connectionString);
+                await conn.OpenAsync();
+                await conn.CloseAsync();
+                return null;
+            }
+            catch (Exception ex) { return ex; }
+        }
+
+        // Distinguishes "the server rejected who you are" from "the server could not be reached".
+        private static bool IsAuthenticationFailure(Exception error)
+        {
+            if (error is SqlException sql)
+            {
+                foreach (SqlError e in sql.Errors)
+                {
+                    // 18456 login failed, 18452 untrusted domain, 4060 no database access,
+                    // 40615 firewall rule missing.
+                    if (e.Number is 18456 or 18452 or 4060 or 40615) return true;
+                }
+            }
+
+            for (var ex = error; ex is not null; ex = ex.InnerException)
+            {
+                var message = ex.Message ?? string.Empty;
+                if (message.Contains("AADSTS", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("MSAL", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Login failed for user", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Failed to authenticate", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void LogConnectionAttempt(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
+        }
+
+        public async Task<ChecklistResult?> TryEvaluateViaMcpAsync(ChecklistItem item)
+        {
+            if (_mcpEvaluator == null) return null;
+            return await _mcpEvaluator.EvaluateAsync(item, _connectionString);
+        }
+
+        // Script generation and placeholder-writing functionality removed to prevent runtime modifications
+
+        public async Task<bool> IsAgentAvailableAsync(int timeoutMs = 5000)
+        {
+            if (_mcpEvaluator == null) return false;
+            return await _mcpEvaluator.IsAvailableAsync(timeoutMs);
+        }
+
+        public (string Provider, string Model, string Endpoint) GetAgentDetails()
+        {
+            if (_mcpEvaluator == null) return (string.Empty, string.Empty, string.Empty);
+            return (_mcpEvaluator.ProviderName, _mcpEvaluator.ModelName, _mcpEvaluator.Endpoint);
+        }
+
+        public async Task<string> GenerateManualInstructionsAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
+        {
+            var isDocumentationCheck = ChecklistItemClassification.IsDocumentationCheck(item.Id, FindRepoRoot());
+            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, isDocumentationCheck, cancellationToken);
+            return result.Instructions;
+        }
+
+        /// <summary>
+        /// Decides a manual item from the artefacts attached to the run. Returns null whenever the
+        /// evidence cannot settle it - no evidence attached, no provider (MCP/CLI hosts), no
+        /// relevant file, or an 'insufficient' verdict - so the caller falls back to human review.
+        /// </summary>
+        private async Task<ChecklistResult?> TryEvaluateFromEvidenceAsync(
+            ChecklistItem item,
+            string manualInstructions,
+            EvidenceContext? evidenceContext,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (evidenceContext == null || !evidenceContext.HasUsableEvidence) return null;
+            if (_evidenceAnalyzer == null) return null;
+
+            EvidenceAiAnalyzer.EvidenceVerdict? verdict;
+            try
+            {
+                verdict = await _evidenceAnalyzer.AnalyzeAsync(item, manualInstructions, evidenceContext, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogDiagnostic($"Evidence review failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+
+            if (verdict == null || !verdict.IsDecisive) return null;
+
+            var sourceLabel = evidenceContext.Manifest.Files
+                .FirstOrDefault(f => string.Equals(f.Path, verdict.CitedFiles[0], StringComparison.OrdinalIgnoreCase))?.SourceLabel
+                ?? evidenceContext.Sources.FirstOrDefault(s => s.IsResolved)?.Label;
+
+            var evidenceText = new System.Text.StringBuilder();
+            evidenceText.AppendLine(verdict.Evidence?.Trim());
+            evidenceText.AppendLine();
+            evidenceText.Append(EvidenceAttribution.EvidencePrefix).Append(' ')
+                        .AppendLine(EvidenceAttribution.Describe(sourceLabel, string.Join(", ", verdict.CitedFiles)));
+            if (!string.IsNullOrWhiteSpace(verdict.RequiredArtefact))
+                evidenceText.Append("Required artefact: ").AppendLine(verdict.RequiredArtefact.Trim());
+            if (!string.IsNullOrWhiteSpace(verdict.Confidence))
+                evidenceText.Append("Confidence: ").AppendLine(verdict.Confidence);
+
+            var result = new ChecklistResult(
+                item.Id, item.Description, item.Verification, verdict.Outcome,
+                evidenceText.ToString().TrimEnd(), item.ScriptFile, "AI-Manual")
+            {
+                Finding = verdict.Finding ?? string.Empty,
+                RiskImpact = verdict.RiskImpact,
+                Recommendation = verdict.Recommendation,
+                Severity = verdict.Severity ?? string.Empty,
+            };
+
+            LogDiagnostic($"Evidence review decided {item.Id} as {verdict.Outcome} ({verdict.Confidence}) from: {string.Join(", ", verdict.CitedFiles)}");
+            return result;
+        }
+
+        // Builds the persisted result for a manual item the reviewer has decided, turning
+        // their Input/Evidence text into audit wording. The reviewer's outcome is
+        // authoritative: the AI only authors Finding/Evidence/RiskImpact/Recommendation/
+        // Severity, and ChecklistResultEnricher back-fills whatever it did not supply.
+        public async Task<ChecklistResult> BuildManualResultAsync(
+            ChecklistItem item,
+            string outcome,
+            string manualSteps,
+            string reviewerInput,
+            System.Threading.CancellationToken cancellationToken = default)
+        {
+            var normalizedOutcome = outcome?.Trim().ToLowerInvariant() switch
+            {
+                "pass" => "Pass",
+                "fail" => "Fail",
+                _ => "NeedsReview",
+            };
+            var score = ChecklistResultEnricher.DeriveScore(normalizedOutcome);
+
+            ManualResultAiEnricher.ManualEnrichment? ai = null;
+            if (_manualResultEnricher != null)
+            {
+                try
+                {
+                    ai = await _manualResultEnricher.EnrichAsync(
+                        item, normalizedOutcome, score, manualSteps ?? string.Empty, reviewerInput ?? string.Empty, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    ai = null;
+                }
+            }
+
+            var result = new ChecklistResult(
+                item.Id,
+                item.Description,
+                item.Verification,
+                normalizedOutcome,
+                BuildManualEvidence(ai?.Evidence, manualSteps, reviewerInput, normalizedOutcome),
+                item.ScriptFile,
+                "AI-Manual")
+            {
+                Finding = ai?.Finding ?? string.Empty,
+                Severity = ai?.Severity ?? string.Empty,
+                RiskImpact = ai?.RiskImpact,
+                Recommendation = ai?.Recommendation,
+            };
+
+            return ChecklistResultEnricher.Enrich(result);
+        }
+
+        // The reviewer's own words are always kept verbatim so the finding stays auditable,
+        // whether or not the AI summary was produced.
+        private static string BuildManualEvidence(string? aiEvidence, string? manualSteps, string? reviewerInput, string outcome)
+        {
+            var remarks = string.IsNullOrWhiteSpace(reviewerInput) ? "(none provided)" : reviewerInput.Trim();
+
+            if (!string.IsNullOrWhiteSpace(aiEvidence))
+            {
+                return $"{aiEvidence.Trim()}\n\nReviewer Input / Evidence (verbatim):\n{remarks}\n\nSelected Outcome:\n{outcome}";
+            }
+
+            return $"Manual Steps:\n{manualSteps ?? string.Empty}\n\nOperator Remarks:\n{remarks}\n\nSelected Outcome:\n{outcome}";
+        }
+
+        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, bool isDocumentationCheck = false, System.Threading.CancellationToken cancellationToken = default)
+        {
+            if (ManualMigrationStepsStore.TryGet(item.Id, out var storedSteps))
+            {
+                LogDiagnostic($"Reused stored manual migration steps for {item.Id}; skipped LLM generation.");
+                return new ManualStepsGenerationResult(storedSteps, storedSteps, 0);
+            }
+
+            try
+            {
+                if (_manualStepsGenerator != null)
+                {
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, isDocumentationCheck, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(slm.Instructions))
+                    {
+                        ManualMigrationStepsStore.Store(item.Id, slm.Instructions);
+                        return slm;
+                    }
+
+                    LogDiagnostic($"Manual steps LLM returned an empty completion for {item.Id}; falling back to the offline template.");
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogDiagnostic($"Manual steps LLM call failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item, isDocumentationCheck);
+            if (!string.IsNullOrWhiteSpace(auditScript))
+            {
+                fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
+            }
+            ManualMigrationStepsStore.Store(item.Id, fallback);
+            return new ManualStepsGenerationResult(fallback, fallback, 0);
+        }
+
+        private static readonly object DiagnosticLogLock = new();
+
+        private static void LogDiagnostic(string message)
+        {
+            try
+            {
+                var dir = AuditOutputPaths.CurrentRunDirectory;
+                Directory.CreateDirectory(dir);
+                lock (DiagnosticLogLock)
+                {
+                    File.AppendAllText(Path.Combine(dir, "ui_log.txt"), $"{DateTime.UtcNow:O} {message}\r\n");
+                }
+            }
+            catch { }
+        }
+
+        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteDatabaseScopedSqlAsync(
+            string scriptText,
+            System.Collections.Generic.IReadOnlyList<string> databaseNames,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            var rows = new System.Collections.Generic.List<SqlScriptRow>();
+            var log = new System.Text.StringBuilder();
+
+            if (databaseNames.Count == 0)
+            {
+                rows.Add(CreateDatabaseExecutionFailureRow("None", "No database found to be queried"));
+                return (string.Empty, rows);
+            }
+
+            foreach (var databaseName in databaseNames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    using var connection = CreateConnection(GetDatabaseConnectionString(databaseName));
+                    await connection.OpenAsync(cancellationToken);
+                    var executableScript = await PrepareDatabaseScopedScriptAsync(
+                        connection,
+                        scriptText,
+                        cancellationToken);
+                    var (databaseLog, databaseRows) = await ExecuteSqlCaptureAsync(
+                        connection,
+                        executableScript,
+                        cancellationToken);
+
+                    var normalizedRows = NormalizeDatabaseResultRows(databaseRows, databaseName);
+
+                    rows.AddRange(normalizedRows);
+                    if (!string.IsNullOrWhiteSpace(databaseLog))
+                        log.AppendLine($"[{databaseName}] {databaseLog.Trim()}");
+
+                    var hasStructuredVerdict = normalizedRows.Any(row =>
+                        row.Get("Result", "Outcome", "Status", "PassFail") != null ||
+                        row.Get("Score", "DbScore", "ItemScore") != null ||
+                        row.Get("Finding", "Findings", "Detail", "Details", "Message") != null);
+                    if (!hasStructuredVerdict)
+                    {
+                        var reason = string.IsNullOrWhiteSpace(databaseLog)
+                            ? "Script returned no structured result"
+                            : databaseLog.Trim();
+                        rows.Add(CreateDatabaseExecutionFailureRow(databaseName, reason));
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    log.AppendLine($"[{databaseName}] SQL EXEC ERROR: {ex.Message}");
+                    rows.Add(CreateDatabaseExecutionFailureRow(databaseName, ex.Message));
+                }
+            }
+
+            return (log.ToString(), rows);
+        }
+
+        private static System.Collections.Generic.List<SqlScriptRow> NormalizeDatabaseResultRows(
+            System.Collections.Generic.IEnumerable<SqlScriptRow> sourceRows,
+            string databaseName)
+        {
+            var normalizedRows = new System.Collections.Generic.List<SqlScriptRow>();
+            foreach (var row in sourceRows)
+            {
+                var isVerdictRow = row.Get("Result", "Outcome", "Status", "PassFail") != null ||
+                    row.Get("Score", "DbScore", "ItemScore") != null ||
+                    row.Get("Finding", "Findings", "Detail", "Details", "Message") != null;
+                if (!isVerdictRow)
+                {
+                    normalizedRows.Add(row);
+                    continue;
+                }
+
+                var values = row.Values.ToArray();
+                for (var index = 0; index < row.Columns.Count && index < values.Length; index++)
+                {
+                    var column = row.Columns[index];
+                    if (string.Equals(column, "DatabaseQueried", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabasesQueried", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabasesVerified", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DbName", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "DatabaseName", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(column, "Database", StringComparison.OrdinalIgnoreCase))
+                    {
+                        values[index] = databaseName;
+                    }
+                }
+                normalizedRows.Add(new SqlScriptRow(row.Columns, values));
+            }
+            return normalizedRows;
+        }
+
+        private static SqlScriptRow CreateDatabaseExecutionFailureRow(string databaseName, string reason)
+        {
+            var finding = string.IsNullOrWhiteSpace(reason)
+                ? ScriptExecutionFailure.DatabaseFailureMarker
+                : $"{ScriptExecutionFailure.DatabaseFailureMarker}: {reason}";
+            // The control was never assessed here, so no Score is written: a fabricated 0 was
+            // previously indistinguishable from a control that genuinely failed.
+            return new SqlScriptRow(
+                new[] { "Result", "DatabaseQueried", "Finding" },
+                new[] { SqlScriptResultParser.Unassessed, databaseName, finding });
+        }
+
+        // Executes a (possibly multi-batch) SQL script and captures every returned row
+        // keyed by its column name, so the audit verdict can be read from the script's
+        // final SELECT (Result/Score/DatabaseQueried/Finding) rather than scraped from
+        // console text. Only error text is returned as the log; row data is structured.
+        private async Task<(string Text, System.Collections.Generic.List<SqlScriptRow> Rows)> ExecuteSqlCaptureAsync(
+            SqlConnection conn,
+            string txt,
+            System.Threading.CancellationToken cancellationToken = default)
+        {
+            var rows = new System.Collections.Generic.List<SqlScriptRow>();
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                var batches = Regex.Split(txt, @"^GO\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                foreach (var batch in batches)
+                {
+                    var script = batch.Trim();
+                    if (string.IsNullOrWhiteSpace(script)) continue;
+                    try
+                    {
+                        using var cmd = new SqlCommand(script, conn) { CommandTimeout = 120 };
+                        using var rdr = await cmd.ExecuteReaderAsync(cancellationToken);
+                        do
+                        {
+                            if (rdr.FieldCount == 0) continue;
+                            var names = new System.Collections.Generic.List<string>(rdr.FieldCount);
+                            for (int i = 0; i < rdr.FieldCount; i++) names.Add(rdr.GetName(i));
+                            while (await rdr.ReadAsync(cancellationToken))
+                            {
+                                var vals = new System.Collections.Generic.List<string>(rdr.FieldCount);
+                                for (int i = 0; i < rdr.FieldCount; i++)
+                                {
+                                    try { vals.Add(rdr.IsDBNull(i) ? "NULL" : rdr.GetValue(i)?.ToString() ?? string.Empty); }
+                                    catch { vals.Add("<err>"); }
+                                }
+                                rows.Add(new SqlScriptRow(names, vals));
+                            }
+                        } while (await rdr.NextResultAsync(cancellationToken));
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        sb.AppendLine("SQL ERROR: " + ex.Message);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("SQL EXEC ERROR: " + ex.Message);
+            }
+            return (sb.ToString(), rows);
+        }
+
+        private async Task<string> ExecuteSqlTextAsync(SqlConnection conn, string txt)
+        {            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var batches = Regex.Split(txt, @"^GO\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                int batchNo = 1;
+                foreach (var batch in batches)
+                {
+                    var script = batch.Trim();
+                    if (string.IsNullOrWhiteSpace(script)) { batchNo++; continue; }
+                    sb.AppendLine($"--- Batch {batchNo} ---");
+                    try
+                    {
+                        using var cmd = new SqlCommand(script, conn) { CommandTimeout = 120 };
+                        using var rdr = await cmd.ExecuteReaderAsync();
+                        int rowCount = 0;
+                        while (await rdr.ReadAsync())
+                        {
+                            rowCount++;
+                            var cols = new System.Collections.Generic.List<string>();
+                            for (int i = 0; i < rdr.FieldCount; i++)
+                            {
+                                try { cols.Add(rdr.IsDBNull(i) ? "NULL" : rdr.GetValue(i)?.ToString() ?? string.Empty); }
+                                catch { cols.Add("<err>"); }
+                            }
+                            sb.AppendLine(string.Join('\t', cols));
+                        }
+                        sb.AppendLine($"(rows: {rowCount})");
+                        while (await rdr.NextResultAsync()) { }
+                    }
+                    catch (Exception ex)
+                    {
+                        sb.AppendLine("SQL ERROR: " + ex.Message);
+                    }
+                    batchNo++;
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "SQL EXEC ERROR: " + ex.Message + "\n\nScript contents:\n" + txt;
+            }
+        }
+    }
+}
+
