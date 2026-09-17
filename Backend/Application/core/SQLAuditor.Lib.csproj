@@ -12,6 +12,10 @@
     <PackageReference Include="ClosedXML" Version="0.105.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SQLAuditor.Tests" />
+  </ItemGroup>
   <!-- Feature modules build into the engine library; the CLI and IDE hosts have their own projects. -->
   <ItemGroup>
     <Compile Include="..\..\Modules\**\*.cs" />

@@ -1139,6 +1139,43 @@ WHERE d.name = DB_NAME();";
                 }
             }
 
+            // The script never produced a verdict, so the item is completed as a manual review
+            // instead of a scored failure. It keeps the manual technique and NeedsReview outcome,
+            // so the WPF queue, the CLI/IDE review block and the manual CSV all pick it up
+            // unchanged. Steps come from the normal generator, which reuses
+            // ManualMigrationStepsStore and only calls the provider when nothing is stored.
+            async Task<ChecklistResult> BuildScriptExecutionFailureReviewAsync(
+                ChecklistItem it,
+                string[] files,
+                string note,
+                string? executionError,
+                SqlScriptOutcome? scriptOutcome)
+            {
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, ReadMappedScript(it), cancellationToken);
+                var instructions = manualPlan.Instructions;
+
+                // Queued without blocking the script pipeline; hosts that pass no callback
+                // (CLI, IDE) pick the item up from the persisted NeedsReview result instead.
+                if (requestUserInput != null)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try { await requestUserInput(it, instructions); }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+                        catch { }
+                    }, cancellationToken);
+                }
+
+                return new ChecklistResult(
+                    it.Id, it.Description, it.Verification, "NeedsReview",
+                    ScriptExecutionFailure.BuildEvidence(note, executionError, instructions),
+                    string.Join(';', files), "AI-Manual")
+                {
+                    Finding = note,
+                    DatabasesVerified = scriptOutcome?.DatabasesVerified,
+                };
+            }
+
             async Task<ChecklistResult?> EvaluateScriptAsync(ChecklistItem it, Microsoft.Data.SqlClient.SqlConnection? pipelineConn)
             {
                 var allRows = new System.Collections.Generic.List<SqlScriptRow>();
@@ -1167,7 +1204,13 @@ WHERE d.name = DB_NAME();";
                             {
                                 var (log, rows) = await ExecuteSqlCaptureAsync(pipelineConn, txt, cancellationToken);
                                 allRows.AddRange(rows);
-                                if (!string.IsNullOrWhiteSpace(log)) textLog.AppendLine(log);
+                                if (!string.IsNullOrWhiteSpace(log))
+                                {
+                                    // The capture returns only error text and never throws, so a
+                                    // non-empty log is the execution error for this script.
+                                    execError ??= log.Trim();
+                                    textLog.AppendLine(log);
+                                }
                             }
                             else
                             {
@@ -1202,16 +1245,16 @@ WHERE d.name = DB_NAME();";
                 // a reviewer; only the Not Applicable check below can move it off that verdict.
                 var scriptOutcome = SqlScriptResultParser.Parse(allRows, execError);
 
-                // A script item only ever reports Pass, Fail or Not Applicable. When the tool
-                // itself fails the control is unverified, which is reported as Fail; the note
-                // records that it was a tooling failure rather than an observed control gap.
+                // A script item only ever reports Pass, Fail or Not Applicable when it actually ran.
+                // When execution itself failed the control is unverified, which is a review task
+                // rather than an observed gap, so the item is routed to manual review.
                 if (ScriptOutcomeInvariants.IsTimeout(execError))
                 {
-                    LogDiagnostic($"[{it.Id}] Script timed out; reported as Fail because the control was never verified.");
-                    return BuildScriptDiagnosticResult(
-                        it, files, "Fail",
-                        $"The audit script for {it.Id} exceeded its command timeout, so the control could not be verified. Re-run it or verify this item manually.",
-                        scriptOutcome);
+                    LogDiagnostic($"[{it.Id}] Script timed out; deferred to manual review because the control was never verified.");
+                    return await BuildScriptExecutionFailureReviewAsync(
+                        it, files,
+                        $"The audit script for {it.Id} exceeded its command timeout, so the control could not be verified and needs manual verification.",
+                        execError, scriptOutcome);
                 }
 
                 // A script that returned no structured Result was never assessed. Scraping the
@@ -1219,6 +1262,17 @@ WHERE d.name = DB_NAME();";
                 // which reported unaudited controls as compliant.
                 if (scriptOutcome.Result == null)
                 {
+                    // An error left no verdict behind, so the item is reviewed rather than failed.
+                    // A script that ran and simply returned no Result row is still a Fail.
+                    if (ScriptExecutionFailure.IsExecutionFailure(execError))
+                    {
+                        LogDiagnostic($"[{it.Id}] Script failed to execute ({execError}); deferred to manual review because the control was never verified.");
+                        return await BuildScriptExecutionFailureReviewAsync(
+                            it, files,
+                            $"The audit script for {it.Id} failed to execute, so the control could not be verified and needs manual verification.",
+                            execError, scriptOutcome);
+                    }
+
                     LogDiagnostic($"[{it.Id}] Script returned no structured result; reported as Fail because the control was never verified.");
                     return BuildScriptDiagnosticResult(
                         it, files, "Fail",
@@ -1229,10 +1283,23 @@ WHERE d.name = DB_NAME();";
                 var outcome = scriptOutcome.Result;
                 var score = scriptOutcome.Score;
 
-                // The engine could not evaluate the target database, so the control is unverified.
+                // The engine could not evaluate the target database - a per-database execution
+                // failure - so the control is unverified and goes to manual review. A script that
+                // ran and deliberately returned 'Review' is not a failure and keeps its handling.
                 if (string.Equals(outcome, SqlScriptResultParser.Unassessed, StringComparison.Ordinal))
                 {
-                    LogDiagnostic($"[{it.Id}] Database could not be evaluated; reported as Fail because the control was never verified.");
+                    var databaseFailure = ScriptExecutionFailure.DatabaseFailureDetail(scriptOutcome.Rows);
+                    if (databaseFailure != null)
+                    {
+                        LogDiagnostic($"[{it.Id}] Database could not be evaluated; deferred to manual review because the control was never verified.");
+                        return await BuildScriptExecutionFailureReviewAsync(
+                            it, files,
+                            $"The audit script for {it.Id} could not evaluate its target database, so the control could not be verified and needs manual verification.",
+                            string.IsNullOrWhiteSpace(execError) ? databaseFailure : execError,
+                            scriptOutcome);
+                    }
+
+                    LogDiagnostic($"[{it.Id}] Script deferred the verdict to a reviewer; reported as Fail because the control was never verified.");
                     return BuildScriptDiagnosticResult(
                         it, files, "Fail",
                         string.IsNullOrWhiteSpace(scriptOutcome.Finding)
@@ -1544,7 +1611,25 @@ WHERE d.name = DB_NAME();";
                         }
                         catch (Exception ex)
                         {
-                            var err = new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", "Error: " + ex.Message, it.ScriptFile, "Script");
+                            // The item never reached a verdict, so it is reviewed rather than failed.
+                            ChecklistResult err;
+                            try
+                            {
+                                err = await BuildScriptExecutionFailureReviewAsync(
+                                    it,
+                                    mapping.TryGetValue(it.Id, out var mapped) && mapped != null ? mapped : Array.Empty<string>(),
+                                    $"The audit script for {it.Id} failed to execute, so the control could not be verified and needs manual verification.",
+                                    ex.Message,
+                                    null);
+                            }
+                            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch
+                            {
+                                err = new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", "Error: " + ex.Message, it.ScriptFile, "AI-Manual");
+                            }
                             results.Add(err);
                             progress?.Report(err);
                         }
@@ -2341,8 +2426,8 @@ WHERE d.name = DB_NAME();";
         private static SqlScriptRow CreateDatabaseExecutionFailureRow(string databaseName, string reason)
         {
             var finding = string.IsNullOrWhiteSpace(reason)
-                ? "Database evaluation failed"
-                : $"Database evaluation failed: {reason}";
+                ? ScriptExecutionFailure.DatabaseFailureMarker
+                : $"{ScriptExecutionFailure.DatabaseFailureMarker}: {reason}";
             // The control was never assessed here, so no Score is written: a fabricated 0 was
             // previously indistinguishable from a control that genuinely failed.
             return new SqlScriptRow(
