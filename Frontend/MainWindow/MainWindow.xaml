@@ -355,14 +355,47 @@
                                         <TextBox x:Name="FqdnText" />
 
                                         <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
-                                        <ComboBox x:Name="AuthMethodCombo" Width="220" HorizontalAlignment="Left">
+                                        <ComboBox x:Name="AuthMethodCombo" Width="260" HorizontalAlignment="Left">
                                             <ComboBoxItem IsSelected="True">Windows Authentication</ComboBoxItem>
                                             <ComboBoxItem>SQL Login</ComboBoxItem>
+                                            <ComboBoxItem>Microsoft Entra Multi-Factor Authentication (MFA)</ComboBoxItem>
+                                            <ComboBoxItem>Microsoft Entra Managed Identity</ComboBoxItem>
+                                            <ComboBoxItem>Microsoft Entra Service Principal</ComboBoxItem>
+                                            <ComboBoxItem>Connection String</ComboBoxItem>
                                         </ComboBox>
+                                        <StackPanel x:Name="ConnectionStringPanel" Visibility="Collapsed" Margin="0,10,0,0">
+                                            <TextBlock Text="Connection String" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <Grid Width="352" HorizontalAlignment="Left">
+                                                <TextBox x:Name="ConnectionStringBox"
+                                                         TextWrapping="Wrap" AcceptsReturn="False" MaxLines="4" />
+                                                <!-- Watermark: shows the expected shape until the user types. -->
+                                                <TextBlock IsHitTestVisible="False" FontSize="11" Margin="8,6,8,0"
+                                                           VerticalAlignment="Top" TextTrimming="CharacterEllipsis"
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           Text="Server=myserver.database.windows.net;Database=Sales;User ID=auditor;Password=...">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Text, ElementName=ConnectionStringBox}" Value="">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </Grid>
+                                        </StackPanel>
+                                        <StackPanel x:Name="ClientIdPanel" Visibility="Collapsed" Margin="0,10,0,0">
+                                            <TextBlock x:Name="ClientIdLabel" Text="Application (client) ID" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <TextBox x:Name="ClientIdBox" Width="352" HorizontalAlignment="Left" />
+                                        </StackPanel>
                                         <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                             <TextBox x:Name="SqlUserBox" Width="170" Visibility="Collapsed" />
                                             <PasswordBox x:Name="SqlPassBox" Width="170" Margin="12,0,0,0" Visibility="Collapsed" />
                                         </StackPanel>
+                                        <TextBlock x:Name="CredentialHint" Text="" Visibility="Collapsed" FontSize="11"
+                                                   Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
 
                                         <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                                         <StackPanel x:Name="DatabaseSelectorPanel" Visibility="Collapsed" Margin="0,14,0,0">

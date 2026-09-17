@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Targets on-premises SQL Server, SQL Server on an Azure VM, Azure SQL Database and Azure SQL Managed Instance via --auth windows|sql|entra-msi|entra-sp. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -116,10 +116,20 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    already recorded in `results/historical_last_run.json` are copied forward: they come back decided,
    never appear in the review block, and must not be re-reviewed or re-enriched. Manual items with no
    historical result still follow the normal review flow.
-2. Run **evaluate** with the checklist `--items` and `--server`. For SQL Login pass
-   `--user <name>`; the password comes from the `SQLAUDITOR_SQL_PASSWORD` session
-   environment variable — **never** ask for it in chat. Omit `--user` for Windows
-   Integrated authentication. The CLI runs the engine only; it never calls an LLM.
+2. Run **evaluate** with the checklist `--items` and `--server`. Choose the authentication with
+   `--auth windows|sql|entra-msi|entra-sp`; it defaults to `sql` when `--user` is passed and
+   `windows` otherwise. For SQL Login pass `--user <name>`; the password comes from the
+   `SQLAUDITOR_SQL_PASSWORD` session environment variable. For a Microsoft Entra service
+   principal pass `--auth entra-sp --client-id <app-id>`; the secret comes from
+   `SQLAUDITOR_CLIENT_SECRET`. **Never** ask for a secret in chat and never pass one as a
+   command-line argument. Azure SQL endpoints (`*.database.windows.net`) cannot use `windows`,
+   and `entra-mfa` (Multi-Factor Authentication) is rejected in `--copilot` mode because it needs
+   an interactive browser prompt.
+   If the user needs connection options the flags cannot express (custom port with specific TLS
+   settings, `ApplicationIntent=ReadOnly`, a failover partner, a longer `Connect Timeout`), have
+   them set `SQLAUDITOR_CONNECTION_STRING` in the session instead; it is used verbatim and
+   overrides `--server`, `--auth`, `--user` and `--client-id`.
+   The CLI runs the engine only; it never calls an LLM.
 2b. **Ask which databases to audit.** Without `--databases`, `evaluate --copilot` prints a
    `=== DATABASE SELECTION REQUIRED ===` block listing the user databases on the instance and
    stops. Show that list to the user, let them pick one, several or all, and run `evaluate`

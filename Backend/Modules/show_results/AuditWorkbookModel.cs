@@ -68,8 +68,8 @@ public sealed class AuditWorkbookModel
     public double? OverallScore { get; init; }
     public required RiskRating OverallRating { get; init; }
 
-    /// <summary>Not captured by the evaluation engine; surfaced as N/A rather than guessed.</summary>
-    public string DeploymentMode => AuditWorkbookBuilder.NotAvailable;
+    /// <summary>Platform detected during the run; N/A for runs recorded before it was captured.</summary>
+    public string DeploymentMode { get; init; } = AuditWorkbookBuilder.NotAvailable;
 
     public string CategoryLabel(string categoryId)
     {
@@ -181,7 +181,26 @@ public static class AuditWorkbookBuilder
             Coverage = BuildCoverage(items),
             OverallScore = overall,
             OverallRating = calculator.GetRiskRating(overall),
+            DeploymentMode = ResolveDeploymentMode(outputDirectory),
         };
+    }
+
+    /// <summary>Reads the platform recorded by the run, without re-querying the instance.</summary>
+    private static string ResolveDeploymentMode(string outputDirectory)
+    {
+        try
+        {
+            var recorded = SQLAuditor.Lib.PreviousEvaluationStore.Read(outputDirectory);
+            var display = recorded?.PlatformDisplay;
+            if (string.IsNullOrWhiteSpace(display)) return NotAvailable;
+            return recorded!.EngineEdition is > 0
+                ? $"{display} (EngineEdition {recorded.EngineEdition})"
+                : display!;
+        }
+        catch
+        {
+            return NotAvailable;
+        }
     }
 
     /// <summary>The audited target, taken from the timestamped run directory name.</summary>

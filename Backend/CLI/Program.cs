@@ -20,6 +20,13 @@ namespace SQLAuditor
                 return await RunEvaluateCommandAsync(args);
             }
 
+            // Offline verification of the connection and platform layers. Touches no SQL Server
+            // and no network, so the Azure behaviour can be checked without an Azure subscription.
+            if (args.Length > 0 && string.Equals(args[0], "selftest", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunSelfTestCommandAsync(args);
+            }
+
             // List the most recent evaluation runs across all servers.
             if (args.Length > 0 && string.Equals(args[0], "history", StringComparison.OrdinalIgnoreCase))
             {
@@ -103,21 +110,29 @@ namespace SQLAuditor
                 return 0;
             }
 
-            string fqdn = args.Length > 0 ? args[0] : Prompt("Enter SQL Server FQDN (host[,port]):");
-            Console.WriteLine($"Target: {fqdn}");
-
-            string authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-            string connectionString;
-            if (authChoice.Trim() == "2")
+            var menuRawConnection = SQLAuditor.Lib.SqlConnectionProfile.ReadConnectionStringFromEnvironment();
+            string fqdn;
+            if (menuRawConnection != null)
             {
-                string user = Prompt("SQL username:");
-                string pass = PromptSecret("SQL password:");
-                connectionString = $"Server={fqdn};User Id={user};Password={pass};TrustServerCertificate=true;";
+                if (!SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString(menuRawConnection, out var menuRawProfile, out var menuRawError))
+                {
+                    Console.Error.WriteLine($"Error: {menuRawError}");
+                    return 2;
+                }
+                fqdn = menuRawProfile.Server;
             }
             else
             {
-                connectionString = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
+                fqdn = args.Length > 0 ? args[0] : Prompt("Enter SQL Server FQDN (host[,port]):");
             }
+            Console.WriteLine($"Target: {fqdn}");
+
+            if (!TryResolveConnectionProfile(new System.Collections.Generic.Dictionary<string, string>(), fqdn, copilotMode: false, out var menuProfile, out var menuAuthError))
+            {
+                Console.Error.WriteLine($"Error: {menuAuthError}");
+                return 2;
+            }
+            string connectionString = menuProfile.BuildConnectionString();
 
             var auditor = new SQLAuditor.Lib.Auditor(connectionString);
 
@@ -292,21 +307,34 @@ namespace SQLAuditor
                 return 2;
             }
 
-            string? user = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? meta.SqlUser : null;
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-            if (!string.IsNullOrWhiteSpace(user) && string.IsNullOrWhiteSpace(pass))
+            // The stored auth method is replayed as-is; only the checklist items may be overridden.
+            var storedMode = SQLAuditor.Lib.SqlConnectionProfile.FromDisplayName(meta.AuthMethod);
+            var rerunOpts = new System.Collections.Generic.Dictionary<string, string>
             {
-                if (copilotMode)
+                ["auth"] = storedMode switch
                 {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' requires a password. Set SQLAUDITOR_SQL_PASSWORD in your session.");
-                    return 2;
-                }
-                pass = PromptSecret($"SQL password for '{user}':");
+                    SQLAuditor.Lib.SqlAuthMode.SqlLogin => "sql",
+                    SQLAuditor.Lib.SqlAuthMode.EntraMfa => "entra-mfa",
+                    SQLAuditor.Lib.SqlAuthMode.EntraManagedIdentity => "entra-msi",
+                    SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal => "entra-sp",
+                    _ => "windows",
+                },
+            };
+            if (storedMode == SQLAuditor.Lib.SqlAuthMode.SqlLogin && !string.IsNullOrWhiteSpace(meta.SqlUser))
+                rerunOpts["user"] = meta.SqlUser!;
+            if (!string.IsNullOrWhiteSpace(meta.ClientId))
+                rerunOpts["client-id"] = meta.ClientId!;
+            var storedPassword = GetOption(opts, "password");
+            if (!string.IsNullOrWhiteSpace(storedPassword))
+                rerunOpts["password"] = storedPassword!;
+
+            if (!TryResolveConnectionProfile(rerunOpts, server, copilotMode, out var rerunProfile, out var rerunAuthError))
+            {
+                Console.Error.WriteLine($"Error: {rerunAuthError}");
+                return 2;
             }
 
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            string connectionString = rerunProfile.BuildConnectionString();
 
             // Items: override with --items, else reuse the stored selection.
             var itemsCsv = GetOption(opts, "items");
@@ -344,8 +372,9 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SQLAuditor.Lib.SqlConnectionProfile.ToDisplayName(rerunProfile.AuthMode),
+                SqlUser = rerunProfile.UserId,
+                ClientId = rerunProfile.ClientId,
             };
 
             using var cts = new System.Threading.CancellationTokenSource();
@@ -498,6 +527,20 @@ namespace SQLAuditor
 
             // --- Step 1: SQL Server ---
             string? server = GetOption(opts, "server") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SERVER");
+
+            // A supplied connection string already names the server, so neither is prompted for.
+            var rawConnectionString = SQLAuditor.Lib.SqlConnectionProfile.ReadConnectionStringFromEnvironment();
+            if (rawConnectionString != null)
+            {
+                if (!SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString(rawConnectionString, out var rawProfile, out var rawError))
+                {
+                    Console.Error.WriteLine($"Error: {rawError}");
+                    return 2;
+                }
+                server = rawProfile.Server;
+                Console.WriteLine($"Using the connection string from {SQLAuditor.Lib.SqlConnectionProfile.ConnectionStringVariable} (server: {server}).");
+            }
+
             if (string.IsNullOrWhiteSpace(server))
                 server = PromptRequired("Enter SQL Server FQDN (host[,port]):", "A SQL Server is required.");
             if (string.IsNullOrWhiteSpace(server))
@@ -507,38 +550,13 @@ namespace SQLAuditor
             }
 
             // --- Step 2: Authentication / login details ---
-            string? user = GetOption(opts, "user") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-
-            if (string.IsNullOrWhiteSpace(user))
+            if (!TryResolveConnectionProfile(opts, server, copilotMode, out var profile, out var authError))
             {
-                // No username supplied. In Copilot mode we never prompt: default to
-                // Windows Integrated auth (pass --user for SQL Login instead).
-                if (!copilotMode)
-                {
-                    var authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-                    if (authChoice.Trim() == "2")
-                    {
-                        user = Prompt("SQL username:");
-                        pass = PromptSecret("SQL password:");
-                    }
-                }
-            }
-            else if (string.IsNullOrWhiteSpace(pass))
-            {
-                // Username provided up front but no password. In Copilot mode the password
-                // must come from the SQLAUDITOR_SQL_PASSWORD session env var (never chat).
-                if (copilotMode)
-                {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' supplied but no password. Set SQLAUDITOR_SQL_PASSWORD in your session, or omit --user for Windows auth.");
-                    return 2;
-                }
-                pass = PromptSecret($"SQL password for '{user}':");
+                Console.Error.WriteLine($"Error: {authError}");
+                return 2;
             }
 
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            string connectionString = profile.BuildConnectionString();
 
             // --- Step 3: Checklist IDs to evaluate ---
             if (!opts.TryGetValue("items", out var itemsCsv) || string.IsNullOrWhiteSpace(itemsCsv))
@@ -660,8 +678,9 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SQLAuditor.Lib.SqlConnectionProfile.ToDisplayName(profile.AuthMode),
+                SqlUser = profile.UserId,
+                ClientId = profile.ClientId,
             };
 
             SQLAuditor.Lib.ChecklistResult[] results;
@@ -822,12 +841,29 @@ namespace SQLAuditor
             Console.WriteLine("                      recorded in the latest run's historical_last_run.json, or evaluate");
             Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
-            Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
+            Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port], or an Azure SQL endpoint.");
+            Console.WriteLine("                      Or set SQLAUDITOR_SERVER.");
             Console.WriteLine("  --databases <names> Comma-separated user databases the database-scoped checks");
             Console.WriteLine("                      run against, or 'all'. System databases are never audited.");
+            Console.WriteLine("  --auth <method>     windows | sql | entra-mfa | entra-msi | entra-sp.");
+            Console.WriteLine("                      Defaults to 'sql' when --user is given, else 'windows'.");
+            Console.WriteLine("                      Azure SQL requires 'sql' or an 'entra-*' method.");
+            Console.WriteLine("                      Or set SQLAUDITOR_AUTH.");
             Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
             Console.WriteLine("                      Omit for Windows Integrated authentication.");
             Console.WriteLine("  --password <pw>     SQL login password. Or set SQLAUDITOR_SQL_PASSWORD.");
+            Console.WriteLine("  --client-id <id>    Microsoft Entra application (client) ID for entra-sp, or the");
+            Console.WriteLine("                      user-assigned identity ID for entra-msi (omit for the");
+            Console.WriteLine("                      system-assigned identity). Or set SQLAUDITOR_CLIENT_ID.");
+            Console.WriteLine("                      The entra-sp secret is read ONLY from SQLAUDITOR_CLIENT_SECRET.");
+            Console.WriteLine();
+            Console.WriteLine("  Full connection string: set SQLAUDITOR_CONNECTION_STRING to use a complete");
+            Console.WriteLine("                      connection string. It overrides --server, --auth, --user and");
+            Console.WriteLine("                      --client-id. Your options are kept: Encrypt, TrustServerCertificate,");
+            Console.WriteLine("                      timeouts, ports and ApplicationIntent are NOT overridden as they");
+            Console.WriteLine("                      are for the other methods. Omitting Database connects to master.");
+            Console.WriteLine("                      Never accepted as a command-line argument, and never written to");
+            Console.WriteLine("                      run metadata.");
             Console.WriteLine("  --json <path>       Also copy results JSON to this path.");
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
@@ -842,6 +878,10 @@ namespace SQLAuditor
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
             Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --databases Sales --fresh");
+            Console.WriteLine("  sqlauditor evaluate --items all --server myserver.database.windows.net \\");
+            Console.WriteLine("                      --auth entra-sp --client-id <app-id> --databases all --fresh");
+            Console.WriteLine("  $env:SQLAUDITOR_CONNECTION_STRING='Server=...;Database=...;...'");
+            Console.WriteLine("  sqlauditor evaluate --items all --databases all --fresh     (server read from it)");
         }
 
         // ---------------------------------------------------------------------
@@ -1567,6 +1607,366 @@ namespace SQLAuditor
 
         static string? GetOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
             => opts.TryGetValue(key, out var v) ? v : null;
+
+        // ---------------------------------------------------------------------
+        // selftest: verifies the connection-string builder and the platform
+        // applicability rules entirely offline. No SQL Server, no network, no
+        // Azure subscription - so the Azure paths can be checked for free.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunSelfTestCommandAsync(string[] args)
+        {
+            var failures = 0;
+            var checks = 0;
+
+            void Check(string name, bool passed, string detail)
+            {
+                checks++;
+                if (passed)
+                {
+                    Console.WriteLine($"  PASS  {name}");
+                }
+                else
+                {
+                    failures++;
+                    Console.WriteLine($"  FAIL  {name}");
+                    Console.WriteLine($"        {detail}");
+                }
+            }
+
+            static bool Has(string connectionString, string fragment) =>
+                connectionString.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // SqlConnectionStringBuilder serialises Authentication as the bare enum name
+            // ("ActiveDirectoryInteractive"), while the documented form is spaced.
+            static bool HasAuth(string connectionString, string method) =>
+                connectionString.Replace(" ", string.Empty)
+                    .IndexOf("Authentication=" + method.Replace(" ", string.Empty), StringComparison.OrdinalIgnoreCase) >= 0;
+
+            const string AzureHost = "myserver.database.windows.net";
+            const string OnPremHost = @"SQLPROD01\INST1";
+
+            Console.WriteLine();
+            Console.WriteLine("=== 1. Azure endpoint detection ===");
+            Check("Azure SQL DB host detected",
+                SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint(AzureHost), AzureHost);
+            Check("Managed Instance host detected (multi-part DNS zone)",
+                SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint("mymi.abc123def.database.windows.net"),
+                "MI hostnames embed a DNS zone before the suffix");
+            Check("Host with tcp: prefix and port detected",
+                SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint("tcp:myserver.database.windows.net,1433"),
+                "prefix/port must be stripped before matching");
+            Check("Sovereign cloud host detected",
+                SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint("myserver.database.usgovcloudapi.net"),
+                "US Gov suffix");
+            Check("On-premises named instance NOT treated as Azure",
+                !SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint(OnPremHost), OnPremHost);
+            Check("Lookalike host NOT treated as Azure",
+                !SQLAuditor.Lib.SqlConnectionProfile.IsAzureSqlEndpoint("database.windows.net.evil.example"),
+                "suffix match must be anchored at the end");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 2. Connection strings per authentication mode ===");
+
+            var windows = new SQLAuditor.Lib.SqlConnectionProfile
+            { Server = OnPremHost, AuthMode = SQLAuditor.Lib.SqlAuthMode.WindowsIntegrated }.BuildConnectionString();
+            Check("Windows Integrated sets Integrated Security",
+                Has(windows, "Integrated Security=True"), windows);
+            Check("On-premises keeps TrustServerCertificate=True (no regression)",
+                Has(windows, "Trust Server Certificate=True"), windows);
+
+            var sqlLogin = new SQLAuditor.Lib.SqlConnectionProfile
+            {
+                Server = AzureHost,
+                AuthMode = SQLAuditor.Lib.SqlAuthMode.SqlLogin,
+                UserId = "auditor",
+                Password = "p@ss",
+            }.BuildConnectionString();
+            Check("SQL Login sets User ID and Password",
+                Has(sqlLogin, "User ID=auditor") && Has(sqlLogin, "Password=p@ss"), sqlLogin);
+            Check("Azure endpoint enforces Encrypt=True",
+                Has(sqlLogin, "Encrypt=True"), sqlLogin);
+            Check("Azure endpoint enforces certificate validation",
+                Has(sqlLogin, "Trust Server Certificate=False"), sqlLogin);
+            Check("Azure endpoint sets connect retry",
+                Has(sqlLogin, "Connect Retry Count=3"), sqlLogin);
+
+            var mfa = new SQLAuditor.Lib.SqlConnectionProfile
+            { Server = AzureHost, AuthMode = SQLAuditor.Lib.SqlAuthMode.EntraMfa }.BuildConnectionString();
+            Check("Entra MFA maps to ActiveDirectoryInteractive",
+                HasAuth(mfa, "Active Directory Interactive"), mfa);
+
+            var msiSystem = new SQLAuditor.Lib.SqlConnectionProfile
+            { Server = AzureHost, AuthMode = SQLAuditor.Lib.SqlAuthMode.EntraManagedIdentity }.BuildConnectionString();
+            Check("Managed Identity maps to ActiveDirectoryManagedIdentity",
+                HasAuth(msiSystem, "Active Directory Managed Identity"), msiSystem);
+            Check("System-assigned identity sends no User ID",
+                !Has(msiSystem, "User ID="), msiSystem);
+
+            var msiUser = new SQLAuditor.Lib.SqlConnectionProfile
+            {
+                Server = AzureHost,
+                AuthMode = SQLAuditor.Lib.SqlAuthMode.EntraManagedIdentity,
+                ClientId = "11111111-1111-1111-1111-111111111111",
+            }.BuildConnectionString();
+            Check("User-assigned identity puts the client id in User ID",
+                Has(msiUser, "User ID=11111111-1111-1111-1111-111111111111"), msiUser);
+
+            var servicePrincipal = new SQLAuditor.Lib.SqlConnectionProfile
+            {
+                Server = AzureHost,
+                AuthMode = SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal,
+                ClientId = "22222222-2222-2222-2222-222222222222",
+                Password = "client-secret",
+            }.BuildConnectionString();
+            Check("Service Principal maps to ActiveDirectoryServicePrincipal",
+                HasAuth(servicePrincipal, "Active Directory Service Principal"), servicePrincipal);
+            Check("Service Principal puts client id in User ID, secret in Password",
+                Has(servicePrincipal, "User ID=22222222-2222-2222-2222-222222222222")
+                && Has(servicePrincipal, "Password=client-secret"), servicePrincipal);
+
+            Console.WriteLine();
+            Console.WriteLine("=== 3. Supplied connection string is not rewritten ===");
+            const string raw = "Server=tcp:myserver.database.windows.net,1433;Database=Sales;"
+                             + "Integrated Security=true;Encrypt=false;TrustServerCertificate=true;"
+                             + "Connect Timeout=90;ApplicationIntent=ReadOnly";
+            if (!SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString(raw, out var rawProfile, out var rawError))
+            {
+                Check("Connection string parses", false, rawError);
+            }
+            else
+            {
+                Check("Connection string returned verbatim",
+                    rawProfile.BuildConnectionString() == raw, rawProfile.BuildConnectionString());
+                Check("Server is read out of the connection string",
+                    rawProfile.Server == "tcp:myserver.database.windows.net,1433", rawProfile.Server);
+                Check("Database is read out of the connection string",
+                    rawProfile.Database == "Sales", rawProfile.Database ?? "(null)");
+                Check("Encrypt=false is NOT overridden on an Azure host",
+                    Has(rawProfile.BuildConnectionString(), "Encrypt=false"),
+                    "the operator's own transport settings must win");
+            }
+
+            Check("Malformed connection string is rejected",
+                !SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString("=;;not valid==x", out _, out _),
+                "expected a parse failure");
+            Check("Connection string without a server is rejected",
+                !SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString("Database=foo;", out _, out _),
+                "expected a missing Data Source failure");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 4. Auth token parsing ===");
+            foreach (var (token, expected) in new[]
+            {
+                ("windows", SQLAuditor.Lib.SqlAuthMode.WindowsIntegrated),
+                ("sql", SQLAuditor.Lib.SqlAuthMode.SqlLogin),
+                ("entra-mfa", SQLAuditor.Lib.SqlAuthMode.EntraMfa),
+                ("entra-interactive", SQLAuditor.Lib.SqlAuthMode.EntraMfa),
+                ("entra-msi", SQLAuditor.Lib.SqlAuthMode.EntraManagedIdentity),
+                ("entra-sp", SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal),
+            })
+            {
+                var ok = SQLAuditor.Lib.SqlConnectionProfile.TryParseAuthMode(token, out var parsed, out _)
+                         && parsed == expected;
+                Check($"'{token}' parses as {expected}", ok, "token mapping");
+            }
+            Check("Unknown token is rejected",
+                !SQLAuditor.Lib.SqlConnectionProfile.TryParseAuthMode("nonsense", out _, out _), "expected rejection");
+            Check("Display name round-trips through metadata",
+                SQLAuditor.Lib.SqlConnectionProfile.FromDisplayName(
+                    SQLAuditor.Lib.SqlConnectionProfile.ToDisplayName(SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal))
+                == SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal, "rerun replays the stored AuthMethod");
+            Check("Legacy 'Microsoft Entra Interactive' metadata still maps to MFA",
+                SQLAuditor.Lib.SqlConnectionProfile.FromDisplayName("Microsoft Entra Interactive")
+                == SQLAuditor.Lib.SqlAuthMode.EntraMfa, "runs recorded before the rename must still rerun");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 5. Platform applicability matrix (simulated EngineEditions) ===");
+            var report = await BuildPlatformMatrixAsync(Check);
+
+            Console.WriteLine();
+            Console.WriteLine(report);
+            Console.WriteLine($"{checks - failures}/{checks} checks passed.");
+            if (failures > 0)
+            {
+                Console.WriteLine($"{failures} FAILED.");
+                return 1;
+            }
+            Console.WriteLine("All offline checks passed. No SQL Server or Azure subscription was used.");
+            return 0;
+        }
+
+        // Runs the real applicability rules against simulated platform profiles so the Azure
+        // Not-Applicable behaviour can be inspected without an Azure instance.
+        static async Task<string> BuildPlatformMatrixAsync(Action<string, bool, string> check)
+        {
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            var structure = await auditor.GetChecklistStructureAsync();
+            var allIds = structure.SelectMany(s => s.Items).Select(i => i.Id).ToArray();
+
+            var repoRoot = Directory.GetCurrentDirectory();
+            var probe = new DirectoryInfo(repoRoot);
+            while (probe != null && !File.Exists(Path.Combine(probe.FullName, "Backend", "checklists", "platform-applicability.json")))
+                probe = probe.Parent;
+            var applicability = SQLAuditor.Lib.PlatformApplicability.Load(probe?.FullName);
+
+            check("platform-applicability.json loaded", applicability.RuleCount > 0,
+                  "no rules found - the matrix below would be meaningless");
+            check("checklist items loaded", allIds.Length > 0, "no checklist items found");
+
+            var platforms = new[]
+            {
+                ("SQL Server 2022 Enterprise", SQLAuditor.Lib.PlatformApplicability.BuildProfile(3, "Enterprise Edition", "16")),
+                ("SQL Server 2022 Express",    SQLAuditor.Lib.PlatformApplicability.BuildProfile(4, "Express Edition", "16")),
+                ("Azure SQL Database",         SQLAuditor.Lib.PlatformApplicability.BuildProfile(5, "GeneralPurpose", null, "GP_Gen5_2")),
+                ("Azure SQL Managed Instance", SQLAuditor.Lib.PlatformApplicability.BuildProfile(8, "GeneralPurpose", null, "GP_Gen5_4")),
+            };
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Platform                       Evaluated   Not Applicable");
+            sb.AppendLine("---------------------------------------------------------");
+
+            var azureDbExcluded = new System.Collections.Generic.List<string>();
+            foreach (var (label, profile) in platforms)
+            {
+                var na = 0;
+                foreach (var id in allIds)
+                {
+                    if (!applicability.IsApplicable(id, profile, out _))
+                    {
+                        na++;
+                        if (profile.EngineEdition == 5) azureDbExcluded.Add(id);
+                    }
+                }
+                sb.AppendLine($"{label,-30} {allIds.Length - na,9}   {na,14}");
+            }
+
+            var enterprise = SQLAuditor.Lib.PlatformApplicability.BuildProfile(3, "Enterprise Edition", "16");
+            var azureDb = SQLAuditor.Lib.PlatformApplicability.BuildProfile(5, "GeneralPurpose", null, "GP_Gen5_2");
+
+            check("Azure SQL DB excludes at least one item Enterprise evaluates",
+                allIds.Any(id => applicability.IsApplicable(id, enterprise, out _)
+                              && !applicability.IsApplicable(id, azureDb, out _)),
+                "expected SQL Server-only controls to be excluded on Azure SQL Database");
+            check("Azure SQL DB evaluates at least one item that does not apply on-premises",
+                allIds.Any(id => !applicability.IsApplicable(id, enterprise, out _)
+                              && applicability.IsApplicable(id, azureDb, out _)),
+                "expected Azure-only controls (service tier, public network access) to become applicable");
+            check("Every Azure exclusion carries a justification",
+                azureDbExcluded.All(id => { applicability.IsApplicable(id, azureDb, out var j); return !string.IsNullOrWhiteSpace(j); }),
+                "an excluded item with no reason would show a blank Not Applicable in the report");
+
+            return sb.ToString();
+        }
+
+        // Single place the CLI turns flags/env/prompts into a connection profile.
+        // Secrets are never accepted as command-line arguments in Copilot mode.
+        static bool TryResolveConnectionProfile(
+            System.Collections.Generic.Dictionary<string, string> opts,
+            string server,
+            bool copilotMode,
+            out SQLAuditor.Lib.SqlConnectionProfile profile,
+            out string error)
+        {
+            profile = null!;
+            error = string.Empty;
+
+            // A supplied connection string wins over every other input and is used verbatim.
+            var rawConnection = SQLAuditor.Lib.SqlConnectionProfile.ReadConnectionStringFromEnvironment();
+            if (rawConnection != null)
+                return SQLAuditor.Lib.SqlConnectionProfile.TryParseConnectionString(rawConnection, out profile, out error);
+
+            var user = GetOption(opts, "user") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
+            var pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+            var clientId = GetOption(opts, "client-id") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_CLIENT_ID");
+            var clientSecret = Environment.GetEnvironmentVariable("SQLAUDITOR_CLIENT_SECRET");
+
+            var authToken = GetOption(opts, "auth") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_AUTH");
+            SQLAuditor.Lib.SqlAuthMode mode;
+
+            if (!string.IsNullOrWhiteSpace(authToken))
+            {
+                if (!SQLAuditor.Lib.SqlConnectionProfile.TryParseAuthMode(authToken, out mode, out error))
+                    return false;
+            }
+            else if (!string.IsNullOrWhiteSpace(user))
+            {
+                mode = SQLAuditor.Lib.SqlAuthMode.SqlLogin;
+            }
+            else if (copilotMode)
+            {
+                mode = SQLAuditor.Lib.SqlAuthMode.WindowsIntegrated;
+            }
+            else
+            {
+                Console.WriteLine("Auth method?");
+                Console.WriteLine("  1 = Windows Integrated");
+                Console.WriteLine("  2 = SQL Login");
+                Console.WriteLine("  3 = Microsoft Entra Multi-Factor Authentication (MFA, browser sign-in)");
+                Console.WriteLine("  4 = Microsoft Entra Managed Identity");
+                Console.WriteLine("  5 = Microsoft Entra Service Principal");
+                mode = Prompt("Select [1-5]:").Trim() switch
+                {
+                    "2" => SQLAuditor.Lib.SqlAuthMode.SqlLogin,
+                    "3" => SQLAuditor.Lib.SqlAuthMode.EntraMfa,
+                    "4" => SQLAuditor.Lib.SqlAuthMode.EntraManagedIdentity,
+                    "5" => SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal,
+                    _ => SQLAuditor.Lib.SqlAuthMode.WindowsIntegrated,
+                };
+            }
+
+            if (mode == SQLAuditor.Lib.SqlAuthMode.EntraMfa && copilotMode)
+            {
+                error = "Microsoft Entra Multi-Factor Authentication (MFA) needs an interactive browser sign-in "
+                      + "prompt and cannot run in this non-interactive session. Use --auth entra-sp (with "
+                      + "SQLAUDITOR_CLIENT_SECRET set) or --auth entra-msi instead.";
+                return false;
+            }
+
+            if (mode == SQLAuditor.Lib.SqlAuthMode.SqlLogin)
+            {
+                if (string.IsNullOrWhiteSpace(user))
+                {
+                    if (copilotMode) { error = "SQL Login requires --user."; return false; }
+                    user = Prompt("SQL username:");
+                }
+                if (string.IsNullOrWhiteSpace(pass))
+                {
+                    if (copilotMode)
+                    {
+                        error = $"SQL Login user '{user}' supplied but no password. "
+                              + "Set SQLAUDITOR_SQL_PASSWORD in your session, or omit --user for Windows auth.";
+                        return false;
+                    }
+                    pass = PromptSecret($"SQL password for '{user}':");
+                }
+            }
+
+            if (mode == SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal)
+            {
+                if (string.IsNullOrWhiteSpace(clientId))
+                {
+                    if (copilotMode) { error = "Microsoft Entra Service Principal requires --client-id."; return false; }
+                    clientId = PromptRequired("Entra application (client) ID:", "A client ID is required.");
+                }
+                if (string.IsNullOrWhiteSpace(clientSecret))
+                {
+                    error = "Microsoft Entra Service Principal requires a client secret. Set it in the session "
+                          + "environment (PowerShell: $env:SQLAUDITOR_CLIENT_SECRET='<secret>'). "
+                          + "Secrets are never accepted as command-line arguments.";
+                    return false;
+                }
+            }
+
+            profile = new SQLAuditor.Lib.SqlConnectionProfile
+            {
+                Server = server,
+                AuthMode = mode,
+                UserId = mode == SQLAuditor.Lib.SqlAuthMode.SqlLogin ? user : null,
+                Password = mode == SQLAuditor.Lib.SqlAuthMode.EntraServicePrincipal ? clientSecret : pass,
+                ClientId = clientId,
+            };
+            return true;
+        }
 
         // Wording that quotes script values is passed by file so no shell can mangle it.
         static string? ReadValueOption(System.Collections.Generic.Dictionary<string, string> opts, string key)

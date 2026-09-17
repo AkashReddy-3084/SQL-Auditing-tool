@@ -1,5 +1,4 @@
 using System.Text.Json.Serialization;
-using Microsoft.Data.SqlClient;
 
 namespace SQLAuditor.Lib;
 
@@ -32,26 +31,11 @@ public sealed class ServerTarget
 
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Server : Name!;
 
-    public string BuildConnectionString()
+    public string BuildConnectionString() => new SqlConnectionProfile
     {
-        var builder = new SqlConnectionStringBuilder
-        {
-            DataSource = Server,
-            InitialCatalog = "master",
-            TrustServerCertificate = true,
-        };
-
-        if (AuthMode == ServerAuthMode.Sql)
-        {
-            builder.IntegratedSecurity = false;
-            builder.UserID = User ?? string.Empty;
-            builder.Password = Password ?? string.Empty;
-        }
-        else
-        {
-            builder.IntegratedSecurity = true;
-        }
-
-        return builder.ConnectionString;
-    }
+        Server = Server,
+        AuthMode = AuthMode == ServerAuthMode.Sql ? SqlAuthMode.SqlLogin : SqlAuthMode.WindowsIntegrated,
+        UserId = User,
+        Password = Password,
+    }.BuildConnectionString();
 }

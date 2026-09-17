@@ -139,22 +139,15 @@ namespace SQLAuditor.Wpf
             // wire auth selection UI
             AuthMethodCombo.SelectionChanged += (s, e) =>
             {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                if (sel == "SQL Login")
-                {
-                    SqlUserBox.Visibility = Visibility.Visible;
-                    SqlPassBox.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    SqlUserBox.Visibility = Visibility.Collapsed;
-                    SqlPassBox.Visibility = Visibility.Collapsed;
-                }
+                ApplyAuthMethodVisibility();
                 InvalidateSqlVerification();
             };
+            ApplyAuthMethodVisibility();
             FqdnText.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
+            ClientIdBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            ConnectionStringBox.TextChanged += (s, e) => InvalidateSqlVerification();
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
@@ -581,13 +574,20 @@ namespace SQLAuditor.Wpf
                 label = $"{fqdn} #{copy++}";
             }
 
-            var isSqlLogin = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var isSqlLogin = SelectedAuthMode == SqlAuthMode.SqlLogin;
 
-            if (isSqlLogin && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            if (!TryValidateAuthInputs(out var authError))
             {
-                MessageBox.Show(this, "SQL Login needs both a username and a password.", "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, authError, "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (!isSqlLogin && SelectedAuthMode != SqlAuthMode.WindowsIntegrated)
+            {
+                MessageBox.Show(this,
+                    "Multi-server runs support Windows Authentication and SQL Login only. "
+                    + "Audit Microsoft Entra targets one at a time.",
+                    "Authentication Not Supported", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
@@ -2541,12 +2541,13 @@ namespace SQLAuditor.Wpf
             _resumeDatabases = meta.Databases?.ToList();
             _resumeSelectedItemIds = meta.SelectedItemIds?.ToList();
 
-            var isSqlAuth = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(meta.AuthMethod, "SQL", StringComparison.OrdinalIgnoreCase);
+            var storedMode = SqlConnectionProfile.FromDisplayName(meta.AuthMethod);
 
             if (!string.IsNullOrWhiteSpace(meta.Fqdn)) FqdnText.Text = meta.Fqdn;
-            SelectAuthMethod(isSqlAuth);
-            SqlUserBox.Text = isSqlAuth ? (meta.SqlUser ?? string.Empty) : string.Empty;
+            // AuthMethodCombo lists the modes in SqlAuthMode declaration order.
+            AuthMethodCombo.SelectedIndex = (int)storedMode;
+            SqlUserBox.Text = storedMode == SqlAuthMode.SqlLogin ? (meta.SqlUser ?? string.Empty) : string.Empty;
+            ClientIdBox.Text = meta.ClientId ?? string.Empty;
             SqlPassBox.Password = string.Empty;
             if (!string.IsNullOrWhiteSpace(meta.LlmBaseUrl)) LlmBaseUrlText.Text = meta.LlmBaseUrl;
             if (!string.IsNullOrWhiteSpace(meta.LlmModel)) LlmModelText.Text = meta.LlmModel;
@@ -2573,7 +2574,107 @@ namespace SQLAuditor.Wpf
                 MessageBoxImage.Information);
         }
 
-        private void SelectAuthMethod(bool sqlLogin) => AuthMethodCombo.SelectedIndex = sqlLogin ? 1 : 0;
+        private SqlAuthMode SelectedAuthMode => SqlConnectionProfile.FromDisplayName(
+            (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString());
+
+        // Builds the profile for the current Login-page inputs. The SQL password box doubles as
+        // the client secret box for a service principal.
+        private SqlConnectionProfile BuildConnectionProfile(string fqdn)
+        {
+            var mode = SelectedAuthMode;
+            if (mode == SqlAuthMode.ConnectionString
+                && SqlConnectionProfile.TryParseConnectionString(ConnectionStringBox.Text, out var parsed, out _))
+            {
+                return parsed;
+            }
+
+            return new SqlConnectionProfile
+            {
+                Server = fqdn,
+                AuthMode = mode,
+                UserId = mode == SqlAuthMode.SqlLogin ? SqlUserBox.Text?.Trim() : null,
+                Password = SqlConnectionProfile.RequiresSecret(mode) ? SqlPassBox.Password : null,
+                ClientId = string.IsNullOrWhiteSpace(ClientIdBox.Text) ? null : ClientIdBox.Text.Trim(),
+            };
+        }
+
+        private void ApplyAuthMethodVisibility()
+        {
+            var mode = SelectedAuthMode;
+            SqlUserBox.Visibility = mode == SqlAuthMode.SqlLogin ? Visibility.Visible : Visibility.Collapsed;
+            SqlPassBox.Visibility = SqlConnectionProfile.RequiresSecret(mode) ? Visibility.Visible : Visibility.Collapsed;
+            ClientIdPanel.Visibility = mode is SqlAuthMode.EntraServicePrincipal or SqlAuthMode.EntraManagedIdentity
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            ClientIdLabel.Text = mode == SqlAuthMode.EntraManagedIdentity
+                ? "User-assigned client ID (leave blank for the system-assigned identity)"
+                : "Application (client) ID";
+            ConnectionStringPanel.Visibility = mode == SqlAuthMode.ConnectionString
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            // The server name comes out of the connection string itself.
+            FqdnText.IsEnabled = mode != SqlAuthMode.ConnectionString;
+
+            CredentialHint.Text = mode switch
+            {
+                SqlAuthMode.SqlLogin => "Enter your SQL login username and password.",
+                SqlAuthMode.EntraMfa => "A sign-in page opens in your browser when you click Verify Access. Approve any MFA prompt there.",
+                SqlAuthMode.EntraManagedIdentity => "Signs in as this machine's own Azure identity. Nothing to enter.",
+                SqlAuthMode.EntraServicePrincipal => "Enter the app's client ID above, and its client secret in the password box.",
+                SqlAuthMode.ConnectionString => "Paste the full connection string for your server — the same one an application would use. "
+                                              + "Your own settings are kept as typed. Leave out Database to start from master. "
+                                              + "It is used for this run only and is never saved.",
+                _ => "Uses your current Windows account. This does not work with Azure SQL — pick SQL Login or a Microsoft Entra option for those.",
+            };
+            CredentialHint.Visibility = Visibility.Visible;
+        }
+
+        // Validates that every credential the selected method needs has been supplied.
+        private bool TryValidateAuthInputs(out string error)
+        {
+            error = string.Empty;
+            var mode = SelectedAuthMode;
+
+            if (mode == SqlAuthMode.ConnectionString)
+            {
+                if (!SqlConnectionProfile.TryParseConnectionString(ConnectionStringBox.Text, out _, out var parseError))
+                {
+                    error = parseError;
+                    return false;
+                }
+                return true;
+            }
+
+            if (mode == SqlAuthMode.SqlLogin
+                && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            {
+                error = "SQL Login needs both a username and a password.";
+                return false;
+            }
+
+            if (mode == SqlAuthMode.EntraServicePrincipal)
+            {
+                if (string.IsNullOrWhiteSpace(ClientIdBox.Text))
+                {
+                    error = "Microsoft Entra Service Principal needs an application (client) ID.";
+                    return false;
+                }
+                if (string.IsNullOrEmpty(SqlPassBox.Password))
+                {
+                    error = "Microsoft Entra Service Principal needs a client secret in the password box.";
+                    return false;
+                }
+            }
+
+            if (mode == SqlAuthMode.WindowsIntegrated && SqlConnectionProfile.IsAzureSqlEndpoint(FqdnText.Text))
+            {
+                error = "Windows Authentication cannot be used against an Azure SQL endpoint. "
+                      + "Choose SQL Login or one of the Microsoft Entra methods.";
+                return false;
+            }
+
+            return true;
+        }
 
         // The SQL password stays editable (it is never stored and must be re-entered for SQL auth).
         private void SetServerInputsLocked(bool locked)
@@ -2581,6 +2682,7 @@ namespace SQLAuditor.Wpf
             FqdnText.IsEnabled = !locked;
             AuthMethodCombo.IsEnabled = !locked;
             SqlUserBox.IsEnabled = !locked;
+            ClientIdBox.IsEnabled = !locked;
 
             // A rerun/edit targets one historical run folder, so a fleet run is not available
             // while it is armed.
@@ -2600,14 +2702,13 @@ namespace SQLAuditor.Wpf
         // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
         private SQLAuditor.Lib.RunInputs BuildRunInputs()
         {
-            var isSqlAuth = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var mode = SelectedAuthMode;
             return new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = string.IsNullOrWhiteSpace(FqdnText.Text) ? null : FqdnText.Text.Trim(),
-                AuthMethod = isSqlAuth ? "SQL Login" : "Windows Authentication",
-                SqlUser = isSqlAuth && !string.IsNullOrWhiteSpace(SqlUserBox.Text) ? SqlUserBox.Text.Trim() : null,
+                AuthMethod = SqlConnectionProfile.ToDisplayName(mode),
+                SqlUser = mode == SqlAuthMode.SqlLogin && !string.IsNullOrWhiteSpace(SqlUserBox.Text) ? SqlUserBox.Text.Trim() : null,
+                ClientId = string.IsNullOrWhiteSpace(ClientIdBox.Text) ? null : ClientIdBox.Text.Trim(),
                 LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrlText.Text) ? null : LlmBaseUrlText.Text.Trim(),
                 LlmModel = string.IsNullOrWhiteSpace(LlmModelText.Text) ? null : LlmModelText.Text.Trim(),
             };
@@ -2695,29 +2796,7 @@ namespace SQLAuditor.Wpf
         {
             if (_auditor != null) return;
 
-            // Build connection string according to auth selection
-            string cs;
-            try
-            {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                sel = sel.Trim();
-                if (string.Equals(sel, "SQL Login", StringComparison.OrdinalIgnoreCase))
-                {
-                    var user = SqlUserBox.Text ?? "";
-                    var pass = SqlPassBox.Password ?? "";
-                    cs = $"Server={fqdn};Database=master;User Id={user};Password={pass};TrustServerCertificate=true;";
-                }
-                else
-                {
-                    // default to Windows Authentication
-                    cs = $"Server={fqdn};Database=master;Integrated Security=true;TrustServerCertificate=true;";
-                }
-            }
-            catch
-            {
-                cs = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
-            }
-            _auditor = new Auditor(cs);
+            _auditor = new Auditor(BuildConnectionProfile(fqdn).BuildConnectionString());
             // Attempt to normalize the connection (try common server variants) so UI verification and later runs use a working connection string
             try
             {
@@ -2923,6 +3002,13 @@ namespace SQLAuditor.Wpf
         private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
         {
             var fqdn = FqdnText.Text.Trim();
+            if (!TryValidateAuthInputs(out var authError)) { AccessStatus.Text = authError; return; }
+            if (SelectedAuthMode == SqlAuthMode.ConnectionString
+                && SqlConnectionProfile.TryParseConnectionString(ConnectionStringBox.Text, out var csProfile, out _))
+            {
+                fqdn = csProfile.Server;
+                FqdnText.Text = fqdn;
+            }
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
             _isVerified = false;
             _auditor = null;

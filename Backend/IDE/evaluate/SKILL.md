@@ -16,9 +16,12 @@ CLI `evaluate` command and reuses the same evaluation engine.
 |---------|----------|----------------------------------------------------------|
 | manualResults | Yes | `last-runs` or `fresh`. Must come from the user; decides whether manual/AI-Manual results in `results/historical_last_run.json` are copied forward. |
 | items   | Yes      | Comma-separated checklist IDs (e.g. `1.1.2,3.1.2`).      |
-| server  | Yes*     | SQL Server host[,port]. From arg/env `SQLAUDITOR_SERVER`.|
+| server  | Yes*     | SQL Server host[,port], or an Azure SQL endpoint. From arg/env `SQLAUDITOR_SERVER`.|
+| authMethod | Yes   | `windows`, `sql`, `entra-msi` or `entra-sp`. Azure SQL requires `sql` or an `entra-*` method. `entra-mfa` (Multi-Factor Authentication) is rejected — this server is headless. |
 | user    | No       | SQL login user. Omit for Windows Integrated auth.        |
-| password| No       | SQL login password (never logged/echoed).                |
+| password| No       | SQL login password, read only from `SQLAUDITOR_SQL_PASSWORD` (never logged/echoed). |
+| clientId| No       | Entra application (client) ID for `entra-sp`, or the user-assigned identity ID for `entra-msi`. The `entra-sp` secret is read only from `SQLAUDITOR_CLIENT_SECRET`. |
+| *(env only)* | No | `SQLAUDITOR_CONNECTION_STRING` supplies a full connection string, used verbatim. When set it answers both `server` and `authMethod`, and those arguments are ignored. |
 
 \* May be supplied via environment/VS Code settings rather than per-call.
 

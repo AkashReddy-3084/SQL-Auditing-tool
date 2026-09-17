@@ -85,8 +85,16 @@ that question, then call `evaluate` again with the answer plus everything gather
   - *Option 2 — Fresh Evaluation:* "Do you want to evaluate the checklist items fresh (do not copy
     manual results from previous runs)?"
 - **Never guess the server name** or use a default such as `localhost`.
-- **Never ask for a password in chat.** For SQL Login the tool needs only the username; the
+- **Never ask for a secret in chat.** For SQL Login the tool needs only the username; the
   password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched VS Code.
+  For a Microsoft Entra service principal the tool needs only `clientId`; the secret is read
+  from `SQLAUDITOR_CLIENT_SECRET` in that same session.
+- **Pick an authentication method that works for the target.** `authMethod` accepts `windows`,
+  `sql`, `entra-msi` (managed identity) and `entra-sp` (service principal). Azure SQL endpoints
+  (`*.database.windows.net`) cannot use `windows` — offer `sql`, `entra-msi` or `entra-sp`.
+  `entra-mfa` (Multi-Factor Authentication) is not available through MCP because the server is
+  headless; tell the
+  user to run that sign-in from the desktop app instead.
 - **Never choose the databases.** Once the connection details are known, `evaluate` returns a
   `STEP 4b of 6 — DATABASE SELECTION REQUIRED` block listing the user databases on the instance.
   Show that list, let the user pick one, several or all of them, then call `evaluate` again with
