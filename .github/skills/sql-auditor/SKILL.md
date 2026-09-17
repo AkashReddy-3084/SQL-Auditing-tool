@@ -126,10 +126,13 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    already recorded in `results/historical_last_run.json` are copied forward: they come back decided,
    never appear in the review block, and must not be re-reviewed or re-enriched. Manual items with no
    historical result still follow the normal review flow.
-2. Run **evaluate** with the checklist `--items` and `--server`. For SQL Login pass
-   `--user <name>`; the password comes from the `SQLAUDITOR_SQL_PASSWORD` session
-   environment variable — **never** ask for it in chat. Omit `--user` for Windows
-   Integrated authentication. The CLI runs the engine only; it never calls an LLM.
+2. Run **evaluate** with the checklist `--items` and `--server`. Pass `--auth` to pick the
+   authentication method: `windows` (the default), `sql`, `entra-interactive`,
+   `entra-service-principal` or `entra-managed-identity`. Pass the identity with
+   `--user <name>` (SQL login name or client ID). Secrets come from the
+   `SQLAUDITOR_SQL_PASSWORD` session environment variable, or
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal — **never** ask for one in chat.
+   The CLI runs the engine only; it never calls an LLM.
 2b. **Ask which databases to audit.** Without `--databases`, `evaluate --copilot` prints a
    `=== DATABASE SELECTION REQUIRED ===` block listing the user databases on the instance and
    stops. Show that list to the user, let them pick one, several or all, and run `evaluate`

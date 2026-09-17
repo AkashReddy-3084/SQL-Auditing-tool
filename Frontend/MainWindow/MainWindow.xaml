@@ -355,14 +355,27 @@
                                         <TextBox x:Name="FqdnText" />
 
                                         <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
-                                        <ComboBox x:Name="AuthMethodCombo" Width="220" HorizontalAlignment="Left">
-                                            <ComboBoxItem IsSelected="True">Windows Authentication</ComboBoxItem>
-                                            <ComboBoxItem>SQL Login</ComboBoxItem>
-                                        </ComboBox>
-                                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                            <TextBox x:Name="SqlUserBox" Width="170" Visibility="Collapsed" />
-                                            <PasswordBox x:Name="SqlPassBox" Width="170" Margin="12,0,0,0" Visibility="Collapsed" />
+                                        <ComboBox x:Name="AuthMethodCombo" Width="260" HorizontalAlignment="Left" />
+
+                                        <StackPanel x:Name="AuthUserPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock x:Name="AuthUserLabel" Text="Username" Margin="0,0,0,4" />
+                                            <TextBox x:Name="SqlUserBox" />
                                         </StackPanel>
+                                        <StackPanel x:Name="AuthSecretPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock x:Name="AuthSecretLabel" Text="Password" Margin="0,0,0,4" />
+                                            <PasswordBox x:Name="SqlPassBox" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="AuthTenantPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock Text="Tenant ID (optional)" Margin="0,0,0,4" />
+                                            <TextBox x:Name="TenantIdBox" />
+                                        </StackPanel>
+
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <CheckBox x:Name="EncryptCheck" Content="Encrypt" IsChecked="True" />
+                                            <CheckBox x:Name="TrustServerCertCheck" Content="Trust server certificate" Margin="18,0,0,0" IsChecked="True" />
+                                        </StackPanel>
+
+                                        <TextBlock x:Name="AuthHintText" Margin="0,10,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
 
                                         <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                                         <StackPanel x:Name="DatabaseSelectorPanel" Visibility="Collapsed" Margin="0,14,0,0">

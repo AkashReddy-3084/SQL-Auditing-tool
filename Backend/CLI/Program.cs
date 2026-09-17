@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using SQLAuditor.Lib;
 
 namespace SQLAuditor
 {
@@ -112,20 +113,18 @@ namespace SQLAuditor
             string fqdn = args.Length > 0 ? args[0] : Prompt("Enter SQL Server FQDN (host[,port]):");
             Console.WriteLine($"Target: {fqdn}");
 
-            string authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-            string connectionString;
-            if (authChoice.Trim() == "2")
+            var (interactiveProfile, interactiveAuthError) = ResolveAuthProfile(
+                new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                fqdn,
+                nonInteractive: false);
+            if (interactiveProfile is null)
             {
-                string user = Prompt("SQL username:");
-                string pass = PromptSecret("SQL password:");
-                connectionString = $"Server={fqdn};User Id={user};Password={pass};TrustServerCertificate=true;";
+                Console.Error.WriteLine(interactiveAuthError);
+                return 2;
             }
-            else
-            {
-                connectionString = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
-            }
+            Console.WriteLine($"Authentication: {interactiveProfile.Describe()}");
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var auditor = new SQLAuditor.Lib.Auditor(interactiveProfile);
 
             while (true)
             {
@@ -298,21 +297,45 @@ namespace SQLAuditor
                 return 2;
             }
 
-            string? user = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? meta.SqlUser : null;
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-            if (!string.IsNullOrWhiteSpace(user) && string.IsNullOrWhiteSpace(pass))
+            // Replay the authentication method recorded with the original run.
+            if (!SqlAuthProfile.TryParseMethod(meta.AuthMethod, out var rerunMethod))
+                rerunMethod = SqlAuthMethod.WindowsIntegrated;
+            string? user = meta.SqlUser;
+            var rerunShell = new SqlAuthProfile { Method = rerunMethod };
+            string? pass = null;
+            if (rerunShell.RequiresSecret)
             {
-                if (copilotMode)
+                var secretEnv = rerunMethod == SqlAuthMethod.EntraServicePrincipal
+                    ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                    : "SQLAUDITOR_SQL_PASSWORD";
+                pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable(secretEnv);
+                if (string.IsNullOrWhiteSpace(pass))
                 {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' requires a password. Set SQLAUDITOR_SQL_PASSWORD in your session.");
-                    return 2;
+                    var secretLabel = SqlAuthProfile.SecretLabelFor(rerunMethod);
+                    if (copilotMode)
+                    {
+                        Console.Error.WriteLine($"Error: {SqlAuthProfile.DisplayNameFor(rerunMethod)} identity '{user}' requires a {secretLabel.ToLowerInvariant()}. Set {secretEnv} in your session.");
+                        return 2;
+                    }
+                    pass = PromptSecret($"{secretLabel} for '{user}':");
                 }
-                pass = PromptSecret($"SQL password for '{user}':");
             }
 
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            var rerunProfile = new SqlAuthProfile
+            {
+                Method = rerunMethod,
+                Server = server!,
+                Database = "master",
+                UserId = string.IsNullOrWhiteSpace(user) ? null : user.Trim(),
+                Secret = pass,
+            };
+
+            var rerunAuthError = rerunProfile.Validate();
+            if (rerunAuthError is not null)
+            {
+                Console.Error.WriteLine($"Error: stored authentication for this run is unusable: {rerunAuthError}");
+                return 2;
+            }
 
             // Items: override with --items, else reuse the stored selection.
             var itemsCsv = GetOption(opts, "items");
@@ -321,7 +344,7 @@ namespace SQLAuditor
                 : (meta.SelectedItemIds ?? Array.Empty<string>()).ToArray();
             if (ids.Length == 0) { Console.Error.WriteLine("Error: this run has no stored checklist items; pass --items."); return 2; }
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var auditor = new SQLAuditor.Lib.Auditor(rerunProfile);
             var structure = await auditor.GetChecklistStructureAsync();
             var knownIds = new System.Collections.Generic.HashSet<string>(
                 structure.SelectMany(s => s.Items).Select(i => i.Id), StringComparer.OrdinalIgnoreCase);
@@ -350,8 +373,8 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(rerunMethod),
+                SqlUser = rerunProfile.UserId,
             };
 
             using var cts = new System.Threading.CancellationTokenSource();
@@ -513,38 +536,13 @@ namespace SQLAuditor
             }
 
             // --- Step 2: Authentication / login details ---
-            string? user = GetOption(opts, "user") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-
-            if (string.IsNullOrWhiteSpace(user))
+            var (authProfile, authError) = ResolveAuthProfile(opts, server!, copilotMode);
+            if (authProfile is null)
             {
-                // No username supplied. In Copilot mode we never prompt: default to
-                // Windows Integrated auth (pass --user for SQL Login instead).
-                if (!copilotMode)
-                {
-                    var authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-                    if (authChoice.Trim() == "2")
-                    {
-                        user = Prompt("SQL username:");
-                        pass = PromptSecret("SQL password:");
-                    }
-                }
+                Console.Error.WriteLine(authError);
+                return 2;
             }
-            else if (string.IsNullOrWhiteSpace(pass))
-            {
-                // Username provided up front but no password. In Copilot mode the password
-                // must come from the SQLAUDITOR_SQL_PASSWORD session env var (never chat).
-                if (copilotMode)
-                {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' supplied but no password. Set SQLAUDITOR_SQL_PASSWORD in your session, or omit --user for Windows auth.");
-                    return 2;
-                }
-                pass = PromptSecret($"SQL password for '{user}':");
-            }
-
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            Console.WriteLine($"Authentication: {authProfile.Describe()}");
 
             // --- Step 3: Checklist IDs to evaluate ---
             if (!opts.TryGetValue("items", out var itemsCsv) || string.IsNullOrWhiteSpace(itemsCsv))
@@ -560,7 +558,7 @@ namespace SQLAuditor
                 return 2;
             }
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var auditor = new SQLAuditor.Lib.Auditor(authProfile);
 
             // --- Step 4: Databases to audit ---
             // The desktop app makes the user pick the databases, so the CLI must ask too:
@@ -679,8 +677,8 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(authProfile.Method),
+                SqlUser = authProfile.UserId,
             };
 
             SQLAuditor.Lib.ChecklistResult[] results;
@@ -844,6 +842,129 @@ namespace SQLAuditor
             return anyFail ? 1 : 0;
         }
 
+        // ---------------------------------------------------------------------
+        // Authentication. Flags and environment variables win; anything still
+        // missing is prompted for. Secrets come only from the environment or a
+        // masked prompt, never from an echoed argument in non-interactive mode.
+        // ---------------------------------------------------------------------
+        static (SqlAuthProfile? Profile, string? Error) ResolveAuthProfile(
+            System.Collections.Generic.Dictionary<string, string> opts,
+            string server,
+            bool nonInteractive)
+        {
+            var token = GetOption(opts, "auth")
+                ?? GetOption(opts, "auth-method")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_AUTH_METHOD");
+
+            var user = GetOption(opts, "user")
+                ?? GetOption(opts, "client-id")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
+
+            SqlAuthMethod method;
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                if (!SqlAuthProfile.TryParseMethod(token, out method))
+                    return (null, $"Error: unknown --auth value '{token}'. Supported: {SqlAuthProfile.SupportedTokens}.");
+            }
+            else if (!string.IsNullOrWhiteSpace(user))
+            {
+                // Back-compat: a username with no --auth has always meant SQL Login.
+                method = SqlAuthMethod.SqlLogin;
+            }
+            else if (nonInteractive)
+            {
+                method = SqlAuthMethod.WindowsIntegrated;
+            }
+            else
+            {
+                method = PromptAuthMethod();
+            }
+
+            var shell = new SqlAuthProfile { Method = method };
+            var display = SqlAuthProfile.DisplayNameFor(method);
+            var userLabel = SqlAuthProfile.UserIdLabelFor(method);
+
+            if (method == SqlAuthMethod.WindowsIntegrated)
+            {
+                user = null;
+            }
+            else if (string.IsNullOrWhiteSpace(user) && shell.RequiresSecret)
+            {
+                if (nonInteractive)
+                    return (null, $"Error: {display} requires {userLabel}. Pass --user (or --client-id), or set SQLAUDITOR_SQL_USER.");
+                user = PromptRequired($"{userLabel}:", $"{userLabel} is required.");
+            }
+            else if (string.IsNullOrWhiteSpace(user) && !nonInteractive && method != SqlAuthMethod.EntraInteractive)
+            {
+                user = Prompt($"{userLabel} (press Enter to skip):");
+            }
+
+            string? secret = null;
+            if (shell.RequiresSecret)
+            {
+                if (method == SqlAuthMethod.EntraServicePrincipal)
+                    secret = Environment.GetEnvironmentVariable("SQLAUDITOR_ENTRA_CLIENT_SECRET");
+                secret ??= GetOption(opts, "password")
+                    ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+
+                if (string.IsNullOrEmpty(secret))
+                {
+                    var secretLabel = SqlAuthProfile.SecretLabelFor(method);
+                    if (nonInteractive)
+                    {
+                        var envName = method == SqlAuthMethod.EntraServicePrincipal
+                            ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                            : "SQLAUDITOR_SQL_PASSWORD";
+                        return (null, $"Error: {display} for '{user}' has no {secretLabel.ToLowerInvariant()}. Set {envName} in your session.");
+                    }
+                    secret = PromptSecret($"{secretLabel} for '{user}':");
+                }
+            }
+
+            var tenantId = GetOption(opts, "tenant-id")
+                ?? GetOption(opts, "tenant")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_TENANT_ID");
+
+            var profile = new SqlAuthProfile
+            {
+                Method = method,
+                Server = server,
+                Database = "master",
+                UserId = string.IsNullOrWhiteSpace(user) ? null : user.Trim(),
+                Secret = string.IsNullOrEmpty(secret) ? null : secret,
+                TenantId = SqlAuthProfile.IsEntraMethod(method) && !string.IsNullOrWhiteSpace(tenantId) ? tenantId.Trim() : null,
+                Encrypt = ParseBoolOption(opts, "encrypt"),
+                TrustServerCertificate = ParseBoolOption(opts, "trust-server-certificate")
+                    ?? ParseBoolOption(opts, "trust"),
+            };
+
+            var error = profile.Validate();
+            return error is null ? (profile, null) : (null, "Error: " + error);
+        }
+
+        static SqlAuthMethod PromptAuthMethod()
+        {
+            Console.WriteLine("Authentication method:");
+            for (var i = 0; i < SqlAuthProfile.AllMethods.Count; i++)
+                Console.WriteLine($"  {i + 1}) {SqlAuthProfile.DisplayNameFor(SqlAuthProfile.AllMethods[i])}");
+
+            while (true)
+            {
+                var answer = Prompt($"Choose [1-{SqlAuthProfile.AllMethods.Count}]:");
+                if (string.IsNullOrWhiteSpace(answer)) return SqlAuthMethod.WindowsIntegrated;
+                if (SqlAuthProfile.TryParseMethod(answer, out var parsed)) return parsed;
+                Console.WriteLine("  Unrecognised choice. Please try again.");
+            }
+        }
+
+        static bool? ParseBoolOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
+        {
+            var raw = GetOption(opts, key);
+            if (raw is null) return null;
+            if (string.IsNullOrWhiteSpace(raw)) return true;
+            return raw.Trim().ToLowerInvariant() is "1" or "true" or "yes" or "y" or "on";
+        }
+
         static void PrintEvaluateUsage()
         {
             Console.WriteLine();
@@ -861,9 +982,21 @@ namespace SQLAuditor
             Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
             Console.WriteLine("  --databases <names> Comma-separated user databases the database-scoped checks");
             Console.WriteLine("                      run against, or 'all'. System databases are never audited.");
-            Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
-            Console.WriteLine("                      Omit for Windows Integrated authentication.");
+            Console.WriteLine("  --auth <method>     Authentication method. Or set SQLAUDITOR_AUTH_METHOD. One of:");
+            Console.WriteLine("                        windows                  Windows Integrated (default)");
+            Console.WriteLine("                        sql                      SQL Login");
+            Console.WriteLine("                        entra-interactive        Entra browser sign-in (MFA)");
+            Console.WriteLine("                        entra-service-principal  Client ID + client secret");
+            Console.WriteLine("                        entra-managed-identity   Managed identity of this host");
+            Console.WriteLine("  --user <name>       SQL login name, Entra UPN, or client ID (alias: --client-id).");
+            Console.WriteLine("                      Or set SQLAUDITOR_SQL_USER. Omitting it with no --auth means");
+            Console.WriteLine("                      Windows Integrated authentication.");
             Console.WriteLine("  --password <pw>     SQL login password. Or set SQLAUDITOR_SQL_PASSWORD.");
+            Console.WriteLine("                      Service principal secrets: set SQLAUDITOR_ENTRA_CLIENT_SECRET.");
+            Console.WriteLine("  --tenant-id <guid>  Entra tenant, recorded in the run metadata. Or set SQLAUDITOR_TENANT_ID.");
+            Console.WriteLine("  --encrypt <bool>    Encrypt the connection. Defaults to true.");
+            Console.WriteLine("  --trust-server-certificate <bool>");
+            Console.WriteLine("                      Defaults to true for Windows/SQL auth and false for Entra.");
             Console.WriteLine("  --json <path>       Also copy results JSON to this path.");
             Console.WriteLine("  --evidence-path <folders>");
             Console.WriteLine("                      Comma-separated local folders (a cloned repo, a docs folder) to");

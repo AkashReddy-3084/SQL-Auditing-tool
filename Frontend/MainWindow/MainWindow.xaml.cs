@@ -147,24 +147,29 @@ namespace SQLAuditor.Wpf
             _servers.CollectionChanged += (s, e) => UpdateServerListSummary();
             UpdateServerListSummary();
             // wire auth selection UI
+            foreach (var method in SqlAuthProfile.AllMethods)
+            {
+                AuthMethodCombo.Items.Add(new System.Windows.Controls.ComboBoxItem
+                {
+                    Content = SqlAuthProfile.DisplayNameFor(method),
+                    Tag = method,
+                });
+            }
+            AuthMethodCombo.SelectedIndex = 0;
             AuthMethodCombo.SelectionChanged += (s, e) =>
             {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                if (sel == "SQL Login")
-                {
-                    SqlUserBox.Visibility = Visibility.Visible;
-                    SqlPassBox.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    SqlUserBox.Visibility = Visibility.Collapsed;
-                    SqlPassBox.Visibility = Visibility.Collapsed;
-                }
+                ApplyAuthMode();
                 InvalidateSqlVerification();
             };
+            ApplyAuthMode();
             FqdnText.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
+            TenantIdBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            EncryptCheck.Checked += (s, e) => InvalidateSqlVerification();
+            EncryptCheck.Unchecked += (s, e) => InvalidateSqlVerification();
+            TrustServerCertCheck.Checked += (s, e) => InvalidateSqlVerification();
+            TrustServerCertCheck.Unchecked += (s, e) => InvalidateSqlVerification();
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
@@ -2813,33 +2818,67 @@ namespace SQLAuditor.Wpf
             HandleExitNavigation();
         }
 
+        private SqlAuthMethod SelectedAuthMethod =>
+            (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag is SqlAuthMethod m
+                ? m
+                : SqlAuthMethod.WindowsIntegrated;
+
+        // Shows only the credential fields the selected method actually uses.
+        private void ApplyAuthMode()
+        {
+            var method = SelectedAuthMethod;
+            var isEntra = SqlAuthProfile.IsEntraMethod(method);
+
+            var showUser = method != SqlAuthMethod.WindowsIntegrated;
+            var showSecret = method is SqlAuthMethod.SqlLogin or SqlAuthMethod.EntraServicePrincipal;
+
+            AuthUserPanel.Visibility = showUser ? Visibility.Visible : Visibility.Collapsed;
+            AuthSecretPanel.Visibility = showSecret ? Visibility.Visible : Visibility.Collapsed;
+            AuthTenantPanel.Visibility = isEntra ? Visibility.Visible : Visibility.Collapsed;
+
+            AuthUserLabel.Text = SqlAuthProfile.UserIdLabelFor(method);
+            AuthSecretLabel.Text = SqlAuthProfile.SecretLabelFor(method);
+
+            if (!showUser) SqlUserBox.Text = string.Empty;
+            if (!showSecret) SqlPassBox.Password = string.Empty;
+            if (!isEntra) TenantIdBox.Text = string.Empty;
+
+            // Handing an Entra token to an unverified server defeats the point of the token.
+            EncryptCheck.IsChecked = true;
+            TrustServerCertCheck.IsChecked = !isEntra;
+
+            var hint = method switch
+            {
+                SqlAuthMethod.EntraInteractive => "A browser window will open for sign-in, including MFA.",
+                SqlAuthMethod.EntraManagedIdentity => "Uses the managed identity of the machine this app runs on.",
+                _ => string.Empty,
+            };
+            AuthHintText.Text = hint;
+            AuthHintText.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private SqlAuthProfile BuildAuthProfile(string fqdn) => new()
+        {
+            Method = SelectedAuthMethod,
+            Server = fqdn,
+            Database = "master",
+            UserId = AuthUserPanel.Visibility == Visibility.Visible ? SqlUserBox.Text?.Trim() : null,
+            Secret = AuthSecretPanel.Visibility == Visibility.Visible ? SqlPassBox.Password : null,
+            TenantId = AuthTenantPanel.Visibility == Visibility.Visible ? TenantIdBox.Text?.Trim() : null,
+            Encrypt = EncryptCheck.IsChecked == true,
+            TrustServerCertificate = TrustServerCertCheck.IsChecked == true,
+        };
+
         private async Task EnsureAuditor(string fqdn)
         {
             if (_auditor != null) return;
 
-            // Build connection string according to auth selection
-            string cs;
-            try
-            {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                sel = sel.Trim();
-                if (string.Equals(sel, "SQL Login", StringComparison.OrdinalIgnoreCase))
-                {
-                    var user = SqlUserBox.Text ?? "";
-                    var pass = SqlPassBox.Password ?? "";
-                    cs = $"Server={fqdn};Database=master;User Id={user};Password={pass};TrustServerCertificate=true;";
-                }
-                else
-                {
-                    // default to Windows Authentication
-                    cs = $"Server={fqdn};Database=master;Integrated Security=true;TrustServerCertificate=true;";
-                }
-            }
-            catch
-            {
-                cs = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
-            }
-            _auditor = new Auditor(cs);
+            var profile = BuildAuthProfile(fqdn);
+            var validationError = profile.Validate();
+            if (validationError != null) throw new InvalidOperationException(validationError);
+
+            _auditor = new Auditor(profile);
+            Log($"Connecting to {fqdn} using {profile.Describe()}.");
             // Attempt to normalize the connection (try common server variants) so UI verification and later runs use a working connection string
             try
             {
@@ -3261,7 +3300,9 @@ namespace SQLAuditor.Wpf
             ResetDatabaseSelection();
             var verificationVersion = _sqlConnectionInputsVersion;
             _isVerifyingSql = true;
-            AccessStatus.Text = "Testing connection...";
+            AccessStatus.Text = SelectedAuthMethod == SqlAuthMethod.EntraInteractive
+                ? "Testing connection... complete the sign-in in the browser window."
+                : "Testing connection...";
             VerifyBtn.IsEnabled = false;
             try
             {
@@ -3301,6 +3342,12 @@ namespace SQLAuditor.Wpf
                     AccessStatus.Text = "Failed to connect.";
                     Log($"Failed to connect to {fqdn}.");
                 }
+            }
+            catch (InvalidOperationException ex)
+            {
+                _isVerified = false;
+                AccessStatus.Text = ex.Message;
+                Log("Verify error: " + ex.Message);
             }
             catch (Exception ex)
             {

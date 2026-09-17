@@ -35,14 +35,15 @@ public static class AuditTools
     public static Task<string> EvaluateAsync(
         [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
         [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
-        [Description("STEP 3: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
-        [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
+        [Description("STEP 3: Authentication method — 'windows' (Windows Integrated), 'sql' (SQL Login), 'entra-service-principal' or 'entra-managed-identity'. 'entra-interactive' cannot be used here because this server has no browser.")] string? authMethod = null,
+        [Description("STEP 3b: The identity for the chosen method — SQL login name for 'sql', application (client) ID for 'entra-service-principal', optional user-assigned client ID for 'entra-managed-identity'. Passwords and secrets are NEVER passed here; they are read at runtime from session environment variables and must NEVER be typed in chat.")] string? sqlUser = null,
         [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         [Description("STEP 4b: Which user databases the database-scoped checks run against — a comma-separated list of database names ('Sales,Warehouse') or 'all' for every accessible user database. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the list of databases on the instance to present to the user.")] string? databases = null,
         [Description("STEP 4c: Evidence for documentation and process checklist items — comma-separated local folder paths, individual file paths, and/or one https Git CLONE url (not a browser page url). Pass 'none' when the user has no evidence to attach. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the question to put to them.")] string? evidence = null,
         [Description("STEP 4c (optional): Branch or tag to clone when 'evidence' contains a Git clone url. Omitted means the repository's default branch.")] string? evidenceRef = null,
+        [Description("Optional Entra tenant ID. Recorded with the run for the audit trail; the server itself resolves the tenant.")] string? tenantId = null,
         CancellationToken cancellationToken = default)
-        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases, evidence, evidenceRef,
+        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases, evidence, evidenceRef, tenantId,
                              reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
 
     // Shared core used by both `evaluate` (fresh run) and `rerun_evaluation` (same folder).
@@ -57,6 +58,7 @@ public static class AuditTools
         string? databaseSpec,
         string? evidenceSpec,
         string? evidenceRef,
+        string? tenantId,
         bool reuseActiveRunDirectory,
         string[]? targetDatabases,
         CancellationToken cancellationToken)
@@ -92,19 +94,39 @@ public static class AuditTools
                  + "Retain any checklist IDs the user already mentioned and pass them as 'items' later.";
 
         // STEP 3 — Authentication method.
-        var method = authMethod?.Trim().ToLowerInvariant();
-        if (method != "windows" && method != "sql")
+        if (!SqlAuthProfile.TryParseMethod(authMethod, out var method))
             return $"STEP 3 of 6 — AUTHENTICATION METHOD REQUIRED for server '{server}'.\n"
-                 + "Ask the user: \"Which authentication method should I use — 'windows' (Windows Integrated) or 'sql' (SQL Login)?\"\n"
+                 + "Ask the user which authentication method to use:\n"
+                 + "  windows                  — Windows Integrated (the account running VS Code)\n"
+                 + "  sql                      — SQL Login (username here, password from the environment)\n"
+                 + "  entra-service-principal  — Client ID here, client secret from the environment\n"
+                 + "  entra-managed-identity   — Managed identity of the machine running this server\n"
                  + "Then call evaluate again with 'server' and 'authMethod' set.";
 
-        // STEP 3b — SQL login username (password stays in the session environment, never in chat).
-        if (method == "sql" && string.IsNullOrWhiteSpace(sqlUser))
-            return $"STEP 3b — SQL LOGIN USERNAME REQUIRED for server '{server}'.\n"
-                 + "Ask the user for the SQL login username. For security, the password must NOT be typed in chat: "
-                 + "the user sets it once in their terminal session before launching VS Code "
-                 + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), and the server reads it at runtime.\n"
-                 + "Then call evaluate again with 'server', authMethod='sql', and 'sqlUser' set.";
+        if (method == SqlAuthMethod.EntraInteractive)
+            return $"STEP 3 of 6 — 'entra-interactive' IS NOT AVAILABLE for server '{server}'.\n"
+                 + "This MCP server runs headless, so a browser sign-in prompt would hang the evaluation. "
+                 + "Ask the user to pick one of these instead:\n"
+                 + "  entra-service-principal  — with SQLAUDITOR_ENTRA_CLIENT_SECRET set in the session\n"
+                 + "  entra-managed-identity   — when this machine has a managed identity\n"
+                 + "The WPF desktop app does support interactive browser sign-in if they need MFA.";
+
+        var shell = new SqlAuthProfile { Method = method };
+        var display = SqlAuthProfile.DisplayNameFor(method);
+
+        // STEP 3b — the identity (secrets stay in the session environment, never in chat).
+        if (shell.RequiresSecret && string.IsNullOrWhiteSpace(sqlUser))
+        {
+            var secretEnv = method == SqlAuthMethod.EntraServicePrincipal
+                ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                : "SQLAUDITOR_SQL_PASSWORD";
+            return $"STEP 3b — {SqlAuthProfile.UserIdLabelFor(method).ToUpperInvariant()} REQUIRED for {display} on server '{server}'.\n"
+                 + $"Ask the user for the {SqlAuthProfile.UserIdLabelFor(method).ToLowerInvariant()}. For security the "
+                 + $"{SqlAuthProfile.SecretLabelFor(method).ToLowerInvariant()} must NOT be typed in chat: the user sets it once "
+                 + $"in the terminal session before launching VS Code (PowerShell: $env:{secretEnv}='<value>'), "
+                 + "and the server reads it at runtime.\n"
+                 + $"Then call evaluate again with 'server', authMethod='{SqlAuthProfile.TokenFor(method)}', and 'sqlUser' set.";
+        }
 
         // STEP 4 — Checklist items.
         if (string.IsNullOrWhiteSpace(items))
@@ -114,26 +136,44 @@ public static class AuditTools
                  + "If the user already provided items earlier in the conversation, use those instead of asking again.\n"
                  + "Then call evaluate again with 'server', 'authMethod', and 'items' set.";
 
-        // Build the connection string from the chosen method. The SQL Login password
-        // is read only from the environment, never passed through tool arguments.
-        string connectionString;
-        if (method == "sql")
+        // Build the auth profile from the chosen method. Secrets are read only from the
+        // environment, never passed through tool arguments.
+        string? secret = null;
+        if (shell.RequiresSecret)
         {
-            var pass = Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-            if (string.IsNullOrEmpty(pass))
-                return $"STEP 3b \u2014 SQL PASSWORD NOT AVAILABLE for user '{sqlUser}' on server '{server}'.\n"
-                     + "The SQLAUDITOR_SQL_PASSWORD session environment variable is not set, so no SQL login can be made. "
-                     + "Do NOT ask for the password in chat. Ask the user to set it in the terminal session that launched VS Code "
-                     + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), restart the MCP server, then run evaluate again. "
-                     + "Alternatively, they can choose Windows authentication instead.";
-            connectionString = $"Server={server};User Id={sqlUser};Password={pass};TrustServerCertificate=true;";
-        }
-        else
-        {
-            connectionString = $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            var secretEnv = method == SqlAuthMethod.EntraServicePrincipal
+                ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                : "SQLAUDITOR_SQL_PASSWORD";
+            secret = Environment.GetEnvironmentVariable(secretEnv);
+            if (string.IsNullOrEmpty(secret) && method == SqlAuthMethod.EntraServicePrincipal)
+                secret = Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                var secretLabel = SqlAuthProfile.SecretLabelFor(method).ToUpperInvariant();
+                return $"STEP 3b \u2014 {secretLabel} NOT AVAILABLE for '{sqlUser}' on server '{server}'.\n"
+                     + $"The {secretEnv} session environment variable is not set, so {display} cannot be used. "
+                     + "Do NOT ask for it in chat. Ask the user to set it in the terminal session that launched VS Code "
+                     + $"(PowerShell: $env:{secretEnv}='<value>'), restart the MCP server, then run evaluate again. "
+                     + "Alternatively they can choose windows or entra-managed-identity, which need no secret.";
+            }
         }
 
-        var auditor = new Auditor(connectionString);
+        var authProfile = new SqlAuthProfile
+        {
+            Method = method,
+            Server = server!,
+            Database = "master",
+            UserId = string.IsNullOrWhiteSpace(sqlUser) ? null : sqlUser.Trim(),
+            Secret = secret,
+            TenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId.Trim(),
+        };
+
+        var authError = authProfile.Validate();
+        if (authError is not null)
+            return $"STEP 3 \u2014 AUTHENTICATION DETAILS INVALID for server '{server}': {authError}";
+
+        var auditor = new Auditor(authProfile);
 
         // STEP 4b — database scope. The desktop app makes the user pick the databases, so the
         // IDE must ask too: auditing every database (including system databases) silently
@@ -278,8 +318,8 @@ public static class AuditTools
         auditor.LastRunInputs = new RunInputs
         {
             Fqdn = server,
-            AuthMethod = method == "sql" ? "SQL Login" : "Windows Authentication",
-            SqlUser = method == "sql" ? sqlUser : null,
+            AuthMethod = SqlAuthProfile.DisplayNameFor(method),
+            SqlUser = authProfile.UserId,
         };
 
         var results = await auditor.RunChecklistAsync(
@@ -475,7 +515,9 @@ public static class AuditTools
         // Server and authentication are always reused from the original run and cannot be changed
         // on rerun/edit; only the checklist items may be overridden.
         var server = meta.Fqdn;
-        var authMethod = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? "sql" : "windows";
+        var authMethod = SqlAuthProfile.TryParseMethod(meta.AuthMethod, out var storedMethod)
+            ? SqlAuthProfile.TokenFor(storedMethod)
+            : "windows";
         var sqlUser = meta.SqlUser;
         if (string.IsNullOrWhiteSpace(items) && meta.SelectedItemIds is { Count: > 0 })
             items = string.Join(",", meta.SelectedItemIds);
@@ -512,7 +554,7 @@ public static class AuditTools
         AuditOutputPaths.ResumeRun(selected.RunDirectory);
 
         return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databaseSpec: null,
-            evidenceSpec: evidence, evidenceRef: evidenceRef,
+            evidenceSpec: evidence, evidenceRef: evidenceRef, tenantId: null,
             reuseActiveRunDirectory: true, targetDatabases: targetDatabases, cancellationToken);
     }
 

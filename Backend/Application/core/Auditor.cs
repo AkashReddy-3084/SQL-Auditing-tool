@@ -137,6 +137,7 @@ namespace SQLAuditor.Lib
             ResultsFileLocks.GetOrAdd(Path.GetFullPath(runDirectory), _ => new object());
 
         private string _connectionString;
+        private SqlAuthProfile? _authProfile;
         private SqlServerMcpEvaluator? _mcpEvaluator;
         private ManualStepsGenerator? _manualStepsGenerator;
         private ScriptResultAiEnricher? _scriptEnricher;
@@ -178,11 +179,31 @@ namespace SQLAuditor.Lib
                 };
                 _connectionString = builder.ConnectionString;
             }
+            _authProfile = null;
             // Evaluators are created tolerantly so the auditor can be built for SQL-only
             // operations (connection verification, checklist loading) before the user has
             // supplied LLM settings at runtime.
             EnsureLlmEvaluators();
         }
+
+        public Auditor(SqlAuthProfile authProfile)
+            : this(SqlConnectionStringFactory.Build(
+                (authProfile ?? throw new ArgumentNullException(nameof(authProfile))) with { Database = "master" }))
+        {
+            _authProfile = authProfile;
+        }
+
+        // How this run authenticated. Inferred for the legacy connection-string ctor so the
+        // engine can still make auth-aware decisions.
+        public SqlAuthMethod AuthMethod => _authProfile?.Method ?? SqlAuthProfile.InferMethod(_connectionString);
+
+        // Redacted description of the authentication in use; safe for logs and reports.
+        public string AuthDescription => _authProfile?.Describe() ?? SqlAuthProfile.DisplayNameFor(AuthMethod);
+
+        // Single place every SQL connection in this auditor is created, so an access-token
+        // provider can later be attached without touching each call site.
+        private SqlConnection CreateConnection(string? connectionString = null)
+            => new SqlConnection(connectionString ?? _connectionString);
 
         // Creates the LLM evaluators if they don't exist yet. Safe to call repeatedly;
         // it is a no-op once the evaluators exist and silently skips when LLM settings
@@ -236,7 +257,7 @@ namespace SQLAuditor.Lib
                 return Array.Empty<string>();
 
             var databases = new System.Collections.Generic.List<string>();
-            using var conn = new SqlConnection(_connectionString);
+            using var conn = CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var editionCommand = new SqlCommand(
                 "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition'));",
@@ -279,7 +300,7 @@ namespace SQLAuditor.Lib
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
-                        using var databaseConnection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                        using var databaseConnection = CreateConnection(GetDatabaseConnectionString(databaseName));
                         await databaseConnection.OpenAsync(cancellationToken);
                         accessibleDatabases.Add(databaseName);
                     }
@@ -744,7 +765,7 @@ WHERE d.name = DB_NAME();";
                         var sb = new System.Text.StringBuilder();
                         // Split batches by standalone GO on its own line
                         var batches = System.Text.RegularExpressions.Regex.Split(txt, @"^GO\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
-                        using var conn = new SqlConnection(_connectionString);
+                        using var conn = CreateConnection();
                         await conn.OpenAsync();
                         int batchNo = 1;
                         foreach (var batch in batches)
@@ -897,6 +918,7 @@ WHERE d.name = DB_NAME();";
             EnsureLlmEvaluators();
             var runStartedAt = DateTime.Now;
             var resultsDir = BeginRunDirectory(reuseActiveRunDirectory);
+            LogConnectionAttempt($"Run started using {AuthDescription}.");
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
@@ -1469,7 +1491,7 @@ WHERE d.name = DB_NAME();";
 
                 try
                 {
-                    var fresh = new Microsoft.Data.SqlClient.SqlConnection(_connectionString);
+                    var fresh = CreateConnection();
                     await fresh.OpenAsync(cancellationToken);
                     return fresh;
                 }
@@ -2024,7 +2046,7 @@ WHERE d.name = DB_NAME();";
             if (string.IsNullOrWhiteSpace(_connectionString)) return false;
             try
             {
-                using var conn = new SqlConnection(_connectionString);
+                using var conn = CreateConnection();
                 await conn.OpenAsync();
                 await conn.CloseAsync();
                 return true;
@@ -2036,7 +2058,19 @@ WHERE d.name = DB_NAME();";
         // If a variant succeeds, update _connectionString so subsequent script runs reuse it.
         public async Task<bool> TestAndNormalizeConnectionAsync()
         {
-            if (await TestConnectionAsync()) return true;
+            if (string.IsNullOrWhiteSpace(_connectionString)) return false;
+
+            var firstError = await TryOpenAsync(_connectionString);
+            if (firstError is null) return true;
+
+            // A rejected sign-in is not a transport problem: retrying variants only re-prompts
+            // the user for MFA and burns lockout attempts.
+            if (IsAuthenticationFailure(firstError))
+            {
+                LogConnectionAttempt($"Authentication rejected ({AuthDescription}); not retrying transport variants: {firstError.Message}");
+                return false;
+            }
+
             try
             {
                 var baseBuilder = new SqlConnectionStringBuilder(_connectionString);
@@ -2048,8 +2082,11 @@ WHERE d.name = DB_NAME();";
                     string.Empty,
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 // Transport variants keep the exact requested host/instance. Never fall back
-                // to a different local server after a remote connection fails.
-                var variants = new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
+                // to a different local server after a remote connection fails. Named pipes
+                // cannot carry an Entra token, so Entra modes stay on TCP.
+                var variants = SqlAuthProfile.IsEntraMethod(AuthMethod)
+                    ? new[] { server, "tcp:" + unprefixedServer }
+                    : new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
                 foreach (var v in variants.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     var candidateBuilder = new SqlConnectionStringBuilder(_connectionString)
@@ -2057,37 +2094,70 @@ WHERE d.name = DB_NAME();";
                         DataSource = v
                     };
                     var cs2 = candidateBuilder.ConnectionString;
-                    try
+                    var error = await TryOpenAsync(cs2);
+                    if (error is null)
                     {
-                        using var conn = new SqlConnection(cs2);
-                        await conn.OpenAsync();
-                        await conn.CloseAsync();
                         // adopt working connection string
                         _connectionString = cs2;
-                        try
-                        {
-                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
-                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
-                            File.AppendAllText(log, $"{DateTime.UtcNow:O} Adopted working connection variant: {v} -> SUCCESS\n");
-                        }
-                        catch { }
+                        LogConnectionAttempt($"Adopted working connection variant: {v} -> SUCCESS");
                         return true;
                     }
-                    catch (Exception ex)
-                    {
-                        try
-                        {
-                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
-                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
-                            File.AppendAllText(log, $"{DateTime.UtcNow:O} Variant: {v} -> FAIL: {ex.Message}\n");
-                        }
-                        catch { }
-                        // try next
-                    }
+
+                    LogConnectionAttempt($"Variant: {v} -> FAIL: {error.Message}");
+                    if (IsAuthenticationFailure(error)) return false;
                 }
             }
             catch { }
             return false;
+        }
+
+        private async Task<Exception?> TryOpenAsync(string connectionString)
+        {
+            try
+            {
+                using var conn = CreateConnection(connectionString);
+                await conn.OpenAsync();
+                await conn.CloseAsync();
+                return null;
+            }
+            catch (Exception ex) { return ex; }
+        }
+
+        // Distinguishes "the server rejected who you are" from "the server could not be reached".
+        private static bool IsAuthenticationFailure(Exception error)
+        {
+            if (error is SqlException sql)
+            {
+                foreach (SqlError e in sql.Errors)
+                {
+                    // 18456 login failed, 18452 untrusted domain, 4060 no database access,
+                    // 40615 firewall rule missing.
+                    if (e.Number is 18456 or 18452 or 4060 or 40615) return true;
+                }
+            }
+
+            for (var ex = error; ex is not null; ex = ex.InnerException)
+            {
+                var message = ex.Message ?? string.Empty;
+                if (message.Contains("AADSTS", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("MSAL", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Login failed for user", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Failed to authenticate", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void LogConnectionAttempt(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
         }
 
         public async Task<ChecklistResult?> TryEvaluateViaMcpAsync(ChecklistItem item)
@@ -2320,7 +2390,7 @@ WHERE d.name = DB_NAME();";
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    using var connection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                    using var connection = CreateConnection(GetDatabaseConnectionString(databaseName));
                     await connection.OpenAsync(cancellationToken);
                     var executableScript = await PrepareDatabaseScopedScriptAsync(
                         connection,

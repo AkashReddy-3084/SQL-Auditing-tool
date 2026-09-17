@@ -16,7 +16,8 @@ High-level architecture and flow documentation: see `ARCHITECTURE.md`.
 
 You will also need:
 
-- A Windows account or SQL login on the target instance with at least `VIEW SERVER STATE`.
+- A Windows account, SQL login or Microsoft Entra principal on the target instance with at
+  least `VIEW SERVER STATE`.
 - An OpenAI-compatible LLM endpoint and API key **for the desktop app only**, which asks for
   them at runtime — no config file is required. The CLI and the MCP server use GitHub Copilot
   as their AI instead and need no provider settings at all
@@ -73,7 +74,7 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 
 ## Using the application
 
-1. **Login** — enter the SQL Server FQDN, choose Windows Authentication or SQL Login, and click *Verify Access*. Named instances such as `localhost\SQLEXPRESS` are supported. After verification, choose one or more accessible user databases from the database dropdown, or choose *All Databases*. Nothing is selected by default.
+1. **Login** — enter the SQL Server FQDN, choose an authentication method, and click *Verify Access*. Windows Authentication, SQL Login and three Microsoft Entra ID modes are supported: Entra Interactive (browser sign-in, satisfies MFA), Entra Service Principal and Entra Managed Identity. The form shows only the fields the chosen method needs. Named instances such as `localhost\SQLEXPRESS` are supported. After verification, choose one or more accessible user databases from the database dropdown, or choose *All Databases*. Nothing is selected by default.
 2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
 3. **Checklist** — select the controls to evaluate.
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
@@ -128,8 +129,12 @@ checklist IDs).
 | --- | --- |
 | `--items <ids>` | Comma-separated checklist IDs to evaluate, e.g. `1.1.2,3.1.2` |
 | `--server <host>` | SQL Server FQDN / `host[,port]`. Or set `SQLAUDITOR_SERVER` |
-| `--user <name>` | SQL login username. Or set `SQLAUDITOR_SQL_USER`. Omit for Windows Integrated auth |
-| `--password <pw>` | SQL login password. Or set `SQLAUDITOR_SQL_PASSWORD` |
+| `--auth <method>` | `windows`, `sql`, `entra-interactive`, `entra-service-principal` or `entra-managed-identity`. Or set `SQLAUDITOR_AUTH_METHOD`. Defaults to `sql` when `--user` is given, otherwise `windows` |
+| `--user <name>` | SQL login name, Entra UPN, or application (client) ID. Alias `--client-id`. Or set `SQLAUDITOR_SQL_USER` |
+| `--password <pw>` | SQL login password. Or set `SQLAUDITOR_SQL_PASSWORD`. Service principal secrets come from `SQLAUDITOR_ENTRA_CLIENT_SECRET` |
+| `--tenant-id <guid>` | Entra tenant, recorded in the run log. Or set `SQLAUDITOR_TENANT_ID` |
+| `--encrypt <bool>` | Encrypt the connection. Defaults to `true` |
+| `--trust-server-certificate <bool>` | Defaults to `true` for Windows/SQL auth and `false` for Entra |
 | `--json <path>` | Also copy the results JSON to this path |
 | `--interactive` | Force prompting to mark manual-review items Pass/Fail (auto-enabled in an interactive terminal) |
 | `--copilot` | Non-interactive; emit `Needs Review` items in a `COPILOT REVIEW REQUIRED` block for the GitHub Copilot CLI skill to review and decide via `resolve_review` |
@@ -218,9 +223,10 @@ Workflow:
 
 1. `/login` to GitHub Copilot CLI, then invoke the `sql-auditor` skill's `evaluate` command
    (it runs `SQLAuditor.exe evaluate --copilot`).
-2. The CLI asks for the **SQL Server** and **authentication** (Windows Integrated, or SQL
-   Login via `--user` with the password in the `SQLAUDITOR_SQL_PASSWORD` session environment
-   variable — never typed in chat), then evaluates the requested checklist items.
+2. The CLI asks for the **SQL Server** and **authentication** (`--auth`, defaulting to Windows
+   Integrated). Secrets are never typed in chat: the SQL login password comes from the
+   `SQLAUDITOR_SQL_PASSWORD` session environment variable, service principal secrets from
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET`. It then evaluates the requested checklist items.
 3. Script-based controls are decided deterministically. **Needs Review** items are emitted in
    a `COPILOT REVIEW REQUIRED` block.
 4. For each item, **Copilot CLI generates the item-specific manual verification guidance**,
@@ -260,9 +266,11 @@ the IDE flow.
 2. Configure `.vscode/mcp.json` (at the workspace root). It launches the built server and
    sets the working directory to `SQL-Auditing-tool` so the engine can find the checklist
    and write `results/`. No LLM key and no SQL credentials are stored here. Windows
-   Integrated auth needs nothing extra; for SQL Login, set `SQLAUDITOR_SQL_PASSWORD` in the
-   terminal session that launches VS Code (PowerShell: `$env:SQLAUDITOR_SQL_PASSWORD='...'`)
-   so the server reads it at runtime without it ever living in this file or in chat:
+   Integrated and `entra-managed-identity` need nothing extra. For SQL Login, set
+   `SQLAUDITOR_SQL_PASSWORD` in the terminal session that launches VS Code (PowerShell:
+   `$env:SQLAUDITOR_SQL_PASSWORD='...'`); for a service principal set
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET` the same way, so the server reads it at runtime without
+   it ever living in this file or in chat:
 
    ```jsonc
    {
@@ -285,9 +293,12 @@ Open Copilot Chat in **Agent** mode and ask it to run an audit. The workflow mir
 
 1. Copilot asks whether to **use the last runs' manual results** or run a **fresh evaluation**.
 2. Copilot asks for the **SQL Server name**.
-3. Then the **authentication method** (`windows` or `sql`; for SQL Login it asks the
-   username — the password is read from the `SQLAUDITOR_SQL_PASSWORD` session environment
-   variable you set in your terminal, never typed in chat or stored in `mcp.json`).
+3. Then the **authentication method** — `windows`, `sql`, `entra-service-principal` or
+   `entra-managed-identity`. Copilot asks for the username / client ID only; secrets are read
+   from the `SQLAUDITOR_SQL_PASSWORD` or `SQLAUDITOR_ENTRA_CLIENT_SECRET` session environment
+   variable you set in your terminal, never typed in chat or stored in `mcp.json`.
+   `entra-interactive` is unavailable here because the MCP server is headless — use the
+   desktop app when MFA is required.
 4. Then **which checklist items** to evaluate (e.g. `1.2.1, 3.1.2`).
 5. Copilot calls `evaluate`; script-based controls are decided deterministically, and manual
    items reused from a previous run come back already decided.
