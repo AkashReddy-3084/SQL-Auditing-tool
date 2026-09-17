@@ -104,6 +104,14 @@ namespace SQLAuditor.Lib
 
     public class Auditor
     {
+        /// <summary>
+        /// Non-null when the AI provider rejected this run outright (expired key, unknown model),
+        /// which disables evidence review and every AI-written field.
+        /// </summary>
+        public static string? ProviderFault => ProviderChatClient.PermanentFaultMessage;
+
+        public static void ClearProviderFault() => ProviderChatClient.ClearPermanentFault();
+
         private const string RuntimeDatabasesTable = "#SqlAuditorDatabases";
 
         // MCP evaluation and manual-step generation are both provider-bound, so each stage works
@@ -129,10 +137,12 @@ namespace SQLAuditor.Lib
             ResultsFileLocks.GetOrAdd(Path.GetFullPath(runDirectory), _ => new object());
 
         private string _connectionString;
+        private SqlAuthProfile? _authProfile;
         private SqlServerMcpEvaluator? _mcpEvaluator;
         private ManualStepsGenerator? _manualStepsGenerator;
         private ScriptResultAiEnricher? _scriptEnricher;
         private ManualResultAiEnricher? _manualResultEnricher;
+        private EvidenceAiAnalyzer? _evidenceAnalyzer;
 
         /// <summary>The normalized connection string this auditor runs against.</summary>
         public string ConnectionString => _connectionString;
@@ -163,17 +173,38 @@ namespace SQLAuditor.Lib
             }
             else
             {
-                var builder = new SqlConnectionStringBuilder(connectionString)
-                {
-                    InitialCatalog = "master"
-                };
+                var builder = new SqlConnectionStringBuilder(connectionString);
+                // An explicit catalog is honoured: on Azure SQL Database the login is often
+                // scoped to one user database and cannot open master.
+                if (string.IsNullOrWhiteSpace(builder.InitialCatalog))
+                    builder.InitialCatalog = "master";
                 _connectionString = builder.ConnectionString;
             }
+            _authProfile = null;
             // Evaluators are created tolerantly so the auditor can be built for SQL-only
             // operations (connection verification, checklist loading) before the user has
             // supplied LLM settings at runtime.
             EnsureLlmEvaluators();
         }
+
+        public Auditor(SqlAuthProfile authProfile)
+            : this(SqlConnectionStringFactory.Build(
+                (authProfile ?? throw new ArgumentNullException(nameof(authProfile))) with { Database = "master" }))
+        {
+            _authProfile = authProfile;
+        }
+
+        // How this run authenticated. Inferred for the legacy connection-string ctor so the
+        // engine can still make auth-aware decisions.
+        public SqlAuthMethod AuthMethod => _authProfile?.Method ?? SqlAuthProfile.InferMethod(_connectionString);
+
+        // Redacted description of the authentication in use; safe for logs and reports.
+        public string AuthDescription => _authProfile?.Describe() ?? SqlAuthProfile.DisplayNameFor(AuthMethod);
+
+        // Single place every SQL connection in this auditor is created, so an access-token
+        // provider can later be attached without touching each call site.
+        private SqlConnection CreateConnection(string? connectionString = null)
+            => new SqlConnection(connectionString ?? _connectionString);
 
         // Creates the LLM evaluators if they don't exist yet. Safe to call repeatedly;
         // it is a no-op once the evaluators exist and silently skips when LLM settings
@@ -185,6 +216,7 @@ namespace SQLAuditor.Lib
             try { _manualStepsGenerator ??= ManualStepsGenerator.CreateFromEnvironment(); } catch { }
             try { _scriptEnricher ??= ScriptResultAiEnricher.CreateFromEnvironment(); } catch { }
             try { _manualResultEnricher ??= ManualResultAiEnricher.CreateFromEnvironment(); } catch { }
+            try { _evidenceAnalyzer ??= EvidenceAiAnalyzer.CreateFromEnvironment(); } catch { }
         }
 
         // When set, the auditor never creates LLM evaluators (even if .env or env vars
@@ -220,14 +252,69 @@ namespace SQLAuditor.Lib
             catch (Exception ex) { return (false, ex.Message); }
         }
 
+        // Set when master could not be opened on an Azure endpoint and the audit was pinned
+        // to the login's default database instead.
+        private bool _singleDatabaseMode;
+
+        public bool IsSingleDatabaseMode => _singleDatabaseMode;
+
+        // On Azure SQL Database a login is frequently scoped to one user database and cannot open
+        // master. Falling back to the login's default database keeps the audit runnable there.
+        private async Task<SqlConnection> OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken cancellationToken)
+        {
+            try
+            {
+                var connection = CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                return connection;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var builder = new SqlConnectionStringBuilder(_connectionString);
+                if (!SqlAuthProfile.IsAzureSqlEndpoint(builder.DataSource) ||
+                    !string.Equals(builder.InitialCatalog, "master", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw;
+                }
+
+                builder.InitialCatalog = string.Empty;
+                var fallbackConnectionString = builder.ConnectionString;
+                var connection = CreateConnection(fallbackConnectionString);
+                await connection.OpenAsync(cancellationToken);
+
+                _connectionString = fallbackConnectionString;
+                _singleDatabaseMode = true;
+                AppendConnectionLog(
+                    $"master unreachable on Azure endpoint ({ex.Message}); pinned to default database '{connection.Database}'.");
+                return connection;
+            }
+        }
+
+        private static void AppendConnectionLog(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
+        }
+
         public async Task<string[]> GetAvailableDatabasesAsync(System.Threading.CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(_connectionString))
                 return Array.Empty<string>();
 
             var databases = new System.Collections.Generic.List<string>();
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync(cancellationToken);
+            using var conn = await OpenWithAzureCatalogFallbackAsync(cancellationToken);
+            if (_singleDatabaseMode)
+                return new[] { conn.Database };
+
             using var editionCommand = new SqlCommand(
                 "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition'));",
                 conn)
@@ -269,7 +356,7 @@ namespace SQLAuditor.Lib
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
-                        using var databaseConnection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                        using var databaseConnection = CreateConnection(GetDatabaseConnectionString(databaseName));
                         await databaseConnection.OpenAsync(cancellationToken);
                         accessibleDatabases.Add(databaseName);
                     }
@@ -734,7 +821,7 @@ WHERE d.name = DB_NAME();";
                         var sb = new System.Text.StringBuilder();
                         // Split batches by standalone GO on its own line
                         var batches = System.Text.RegularExpressions.Regex.Split(txt, @"^GO\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
-                        using var conn = new SqlConnection(_connectionString);
+                        using var conn = CreateConnection();
                         await conn.OpenAsync();
                         int batchNo = 1;
                         foreach (var batch in batches)
@@ -867,6 +954,11 @@ WHERE d.name = DB_NAME();";
         /// User databases on which DATABASE-scope SQL scripts run. Null means all currently
         /// accessible online user databases; an explicit empty selection is rejected.
         /// </param>
+        /// <param name="evidenceContext">
+        /// Repository, pipeline and documentation artefacts attached to the run. When supplied and
+        /// the provider is configured, documentation items are decided from it before falling back
+        /// to reviewer input. Ignored when LLM evaluators are disabled (MCP and CLI hosts).
+        /// </param>
         public async Task<ChecklistResult[]> RunChecklistAsync(
             IProgress<ChecklistResult>? progress,
             Func<ChecklistItem, string, Task<string?>>? requestUserInput,
@@ -875,12 +967,14 @@ WHERE d.name = DB_NAME();";
             bool useHistoricalManualResults,
             bool generateReports,
             System.Collections.Generic.IEnumerable<string>? targetDatabases,
-            bool reuseActiveRunDirectory = false)
+            bool reuseActiveRunDirectory = false,
+            EvidenceContext? evidenceContext = null)
         {
             // Ensure LLM evaluators reflect any runtime configuration provided after construction.
             EnsureLlmEvaluators();
             var runStartedAt = DateTime.Now;
             var resultsDir = BeginRunDirectory(reuseActiveRunDirectory);
+            LogConnectionAttempt($"Run started using {AuthDescription}.");
             _mcpEvaluator?.ResetSnapshotCache();
             var structure = await GetChecklistStructureAsync();
             var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
@@ -1423,7 +1517,20 @@ WHERE d.name = DB_NAME();";
                 var auditScript = IsAdminCheck(it) && !IsDocumentationCheck(it) ? ReadMappedScript(it) : null;
 
                 // Only reached once MCP has declined or failed, so the guidance is never wasted work.
-                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, cancellationToken);
+                var manualPlan = await GenerateManualInstructionsWithMetadataAsync(it, auditScript, IsDocumentationCheck(it), cancellationToken);
+
+                // Attached artefacts are tried before the reviewer is asked, so a documentation or
+                // process item a repository or pipeline can settle never reaches the review queue.
+                // The criteria come from the deterministic builder, not from manualPlan: when an LLM
+                // generates the reviewer-facing steps it also rewrites the Pass/Fail wording, which
+                // would make the verdict differ between WPF and the CLI and between runs.
+                ChecklistResult? evidenceResult = null;
+                if (evidenceContext is { HasUsableEvidence: true })
+                {
+                    var criteria = await EvaluationDecisionService.BuildManualInstructionsAsync(it, IsDocumentationCheck(it));
+                    evidenceResult = await TryEvaluateFromEvidenceAsync(it, criteria, evidenceContext, cancellationToken);
+                }
+                if (evidenceResult != null) return evidenceResult;
 
                 if (requestUserInput != null && nonBlockingManualFallback)
                 {
@@ -1459,32 +1566,15 @@ WHERE d.name = DB_NAME();";
                         var userEvidence = await requestUserInput(it, instructions);
                         if (!string.IsNullOrWhiteSpace(userEvidence))
                         {
-                            if (string.Equals(userEvidence, "PASS", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Pass", BuildManualEvidence(instructions, "PASS"), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
-                            if (string.Equals(userEvidence, "FAIL", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, "Fail", BuildManualEvidence(instructions, "FAIL"), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
+                            // A bare verdict word is a decision; otherwise the reviewer must lead their
+                            // evidence with one, so wording alone can never flip the outcome.
+                            var outcome = ManualVerdict.Normalize(userEvidence)
+                                ?? EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
 
-                            var outcome = EvaluationDecisionService.EvaluateEvidenceOutcome(userEvidence);
-                            if (string.Equals(outcome, "Fail", StringComparison.OrdinalIgnoreCase) || string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase))
-                                return new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
-                                // {
-                                //     RawOutput = manualPlan.RawOutput,
-                                //     SlmTokensUsed = manualPlan.TotalTokens
-                                // };
-
-                            return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
-                            // {
-                            //     RawOutput = manualPlan.RawOutput,
-                            //     SlmTokensUsed = manualPlan.TotalTokens
-                            // };
+                            var result = new ChecklistResult(it.Id, it.Description, it.Verification, outcome, BuildManualEvidence(instructions, userEvidence), it.ScriptFile, "AI-Manual");
+                            return NotApplicableEvidence.IsNotApplicableOutcome(outcome)
+                                ? result with { NotApplicable = true, NotApplicableJustification = userEvidence.Trim() }
+                                : result;
                         }
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1494,11 +1584,7 @@ WHERE d.name = DB_NAME();";
                     catch { }
                 }
 
-                return new ChecklistResult(it.Id, it.Description, it.Verification, "NeedsReview", instructions, it.ScriptFile, "AI-Manual");
-                // {
-                //     RawOutput = manualPlan.RawOutput,
-                //     SlmTokensUsed = manualPlan.TotalTokens
-                // };
+                return new ChecklistResult(it.Id, it.Description, it.Verification, ManualVerdict.NeedsReview, instructions, it.ScriptFile, "AI-Manual");
             }
 
             // One aborted command (a timeout, or a continuation starved while the host was busy)
@@ -1528,7 +1614,7 @@ WHERE d.name = DB_NAME();";
 
                 try
                 {
-                    var fresh = new Microsoft.Data.SqlClient.SqlConnection(_connectionString);
+                    var fresh = CreateConnection();
                     await fresh.OpenAsync(cancellationToken);
                     return fresh;
                 }
@@ -1775,6 +1861,12 @@ WHERE d.name = DB_NAME();";
                         .Select(id => id.Trim())
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList(),
+                    EvidenceSources = evidenceContext?.Sources.ToList(),
+                    Platform = LastDetectedPlatform?.Platform,
+                    PlatformDisplay = LastDetectedPlatform?.Display,
+                    EngineEdition = LastDetectedPlatform?.EngineEdition,
+                    EditionName = LastDetectedPlatform?.EditionName,
+                    VersionYear = LastDetectedPlatform?.VersionYear,
                 };
                 PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now, runInputs);
             }
@@ -1876,16 +1968,7 @@ WHERE d.name = DB_NAME();";
         public bool ResolveReview(string id, string decision, string? notes, out string newOutcome, string? runDirectory = null)
         {
             newOutcome = string.Empty;
-            var norm = decision?.Trim().ToLowerInvariant();
-            var outcome = norm switch
-            {
-                "pass" or "p" or "yes" or "y" => "Pass",
-                "fail" or "f" or "no" or "n" => "Fail",
-                "needsreview" or "review" or "r" => "NeedsReview",
-                "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a"
-                    => NotApplicableEvidence.Outcome,
-                _ => string.Empty
-            };
+            var outcome = ManualVerdict.Normalize(decision) ?? string.Empty;
             if (string.IsNullOrEmpty(outcome) || string.IsNullOrWhiteSpace(id)) return false;
 
             var resultsDir = runDirectory ?? AuditOutputPaths.CurrentRunDirectory;
@@ -2109,7 +2192,7 @@ WHERE d.name = DB_NAME();";
             if (string.IsNullOrWhiteSpace(_connectionString)) return false;
             try
             {
-                using var conn = new SqlConnection(_connectionString);
+                using var conn = CreateConnection();
                 await conn.OpenAsync();
                 await conn.CloseAsync();
                 return true;
@@ -2121,20 +2204,52 @@ WHERE d.name = DB_NAME();";
         // If a variant succeeds, update _connectionString so subsequent script runs reuse it.
         public async Task<bool> TestAndNormalizeConnectionAsync()
         {
-            if (await TestConnectionAsync()) return true;
+            if (string.IsNullOrWhiteSpace(_connectionString)) return false;
+
+            var firstError = await TryOpenAsync(_connectionString);
+            if (firstError is null) return true;
+
+            // A rejected sign-in is not a transport problem: retrying variants only re-prompts
+            // the user for MFA and burns lockout attempts.
+            if (IsAuthenticationFailure(firstError))
+            {
+                LogConnectionAttempt($"Authentication rejected ({AuthDescription}); not retrying transport variants: {firstError.Message}");
+                return false;
+            }
+
             try
             {
                 var baseBuilder = new SqlConnectionStringBuilder(_connectionString);
                 var server = baseBuilder.DataSource;
                 if (string.IsNullOrWhiteSpace(server)) return false;
+
+                // Azure SQL reaches only over TCP, so probing named-pipe variants cannot succeed
+                // and only multiplies the connect timeout. Retry the catalog instead.
+                if (SqlAuthProfile.IsAzureSqlEndpoint(server))
+                {
+                    try
+                    {
+                        using var azureConnection = await OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken.None);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendConnectionLog($"Azure endpoint {server} -> FAIL: {ex.Message}");
+                        return false;
+                    }
+                }
+
                 var unprefixedServer = Regex.Replace(
                     server,
                     @"^(tcp:|np:)",
                     string.Empty,
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 // Transport variants keep the exact requested host/instance. Never fall back
-                // to a different local server after a remote connection fails.
-                var variants = new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
+                // to a different local server after a remote connection fails. Named pipes
+                // cannot carry an Entra token, so Entra modes stay on TCP.
+                var variants = SqlAuthProfile.IsEntraMethod(AuthMethod)
+                    ? new[] { server, "tcp:" + unprefixedServer }
+                    : new[] { server, "np:" + unprefixedServer, "tcp:" + unprefixedServer };
                 foreach (var v in variants.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     var candidateBuilder = new SqlConnectionStringBuilder(_connectionString)
@@ -2142,37 +2257,70 @@ WHERE d.name = DB_NAME();";
                         DataSource = v
                     };
                     var cs2 = candidateBuilder.ConnectionString;
-                    try
+                    var error = await TryOpenAsync(cs2);
+                    if (error is null)
                     {
-                        using var conn = new SqlConnection(cs2);
-                        await conn.OpenAsync();
-                        await conn.CloseAsync();
                         // adopt working connection string
                         _connectionString = cs2;
-                        try
-                        {
-                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
-                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
-                            File.AppendAllText(log, $"{DateTime.UtcNow:O} Adopted working connection variant: {v} -> SUCCESS\n");
-                        }
-                        catch { }
+                        LogConnectionAttempt($"Adopted working connection variant: {v} -> SUCCESS");
                         return true;
                     }
-                    catch (Exception ex)
-                    {
-                        try
-                        {
-                            Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
-                            var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
-                            File.AppendAllText(log, $"{DateTime.UtcNow:O} Variant: {v} -> FAIL: {ex.Message}\n");
-                        }
-                        catch { }
-                        // try next
-                    }
+
+                    LogConnectionAttempt($"Variant: {v} -> FAIL: {error.Message}");
+                    if (IsAuthenticationFailure(error)) return false;
                 }
             }
             catch { }
             return false;
+        }
+
+        private async Task<Exception?> TryOpenAsync(string connectionString)
+        {
+            try
+            {
+                using var conn = CreateConnection(connectionString);
+                await conn.OpenAsync();
+                await conn.CloseAsync();
+                return null;
+            }
+            catch (Exception ex) { return ex; }
+        }
+
+        // Distinguishes "the server rejected who you are" from "the server could not be reached".
+        private static bool IsAuthenticationFailure(Exception error)
+        {
+            if (error is SqlException sql)
+            {
+                foreach (SqlError e in sql.Errors)
+                {
+                    // 18456 login failed, 18452 untrusted domain, 4060 no database access,
+                    // 40615 firewall rule missing.
+                    if (e.Number is 18456 or 18452 or 4060 or 40615) return true;
+                }
+            }
+
+            for (var ex = error; ex is not null; ex = ex.InnerException)
+            {
+                var message = ex.Message ?? string.Empty;
+                if (message.Contains("AADSTS", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("MSAL", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Login failed for user", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Failed to authenticate", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void LogConnectionAttempt(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
         }
 
         public async Task<ChecklistResult?> TryEvaluateViaMcpAsync(ChecklistItem item)
@@ -2197,8 +2345,68 @@ WHERE d.name = DB_NAME();";
 
         public async Task<string> GenerateManualInstructionsAsync(ChecklistItem item, System.Threading.CancellationToken cancellationToken = default)
         {
-            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, cancellationToken);
+            var isDocumentationCheck = ChecklistItemClassification.IsDocumentationCheck(item.Id, FindRepoRoot());
+            var result = await GenerateManualInstructionsWithMetadataAsync(item, null, isDocumentationCheck, cancellationToken);
             return result.Instructions;
+        }
+
+        /// <summary>
+        /// Decides a manual item from the artefacts attached to the run. Returns null whenever the
+        /// evidence cannot settle it - no evidence attached, no provider (MCP/CLI hosts), no
+        /// relevant file, or an 'insufficient' verdict - so the caller falls back to human review.
+        /// </summary>
+        private async Task<ChecklistResult?> TryEvaluateFromEvidenceAsync(
+            ChecklistItem item,
+            string manualInstructions,
+            EvidenceContext? evidenceContext,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (evidenceContext == null || !evidenceContext.HasUsableEvidence) return null;
+            if (_evidenceAnalyzer == null) return null;
+
+            EvidenceAiAnalyzer.EvidenceVerdict? verdict;
+            try
+            {
+                verdict = await _evidenceAnalyzer.AnalyzeAsync(item, manualInstructions, evidenceContext, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogDiagnostic($"Evidence review failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+
+            if (verdict == null || !verdict.IsDecisive) return null;
+
+            var sourceLabel = evidenceContext.Manifest.Files
+                .FirstOrDefault(f => string.Equals(f.Path, verdict.CitedFiles[0], StringComparison.OrdinalIgnoreCase))?.SourceLabel
+                ?? evidenceContext.Sources.FirstOrDefault(s => s.IsResolved)?.Label;
+
+            var evidenceText = new System.Text.StringBuilder();
+            evidenceText.AppendLine(verdict.Evidence?.Trim());
+            evidenceText.AppendLine();
+            evidenceText.Append(EvidenceAttribution.EvidencePrefix).Append(' ')
+                        .AppendLine(EvidenceAttribution.Describe(sourceLabel, string.Join(", ", verdict.CitedFiles)));
+            if (!string.IsNullOrWhiteSpace(verdict.RequiredArtefact))
+                evidenceText.Append("Required artefact: ").AppendLine(verdict.RequiredArtefact.Trim());
+            if (!string.IsNullOrWhiteSpace(verdict.Confidence))
+                evidenceText.Append("Confidence: ").AppendLine(verdict.Confidence);
+
+            var result = new ChecklistResult(
+                item.Id, item.Description, item.Verification, verdict.Outcome,
+                evidenceText.ToString().TrimEnd(), item.ScriptFile, "AI-Manual")
+            {
+                Finding = verdict.Finding ?? string.Empty,
+                RiskImpact = verdict.RiskImpact,
+                Recommendation = verdict.Recommendation,
+                Severity = verdict.Severity ?? string.Empty,
+            };
+
+            LogDiagnostic($"Evidence review decided {item.Id} as {verdict.Outcome} ({verdict.Confidence}) from: {string.Join(", ", verdict.CitedFiles)}");
+            return result;
         }
 
         // Builds the persisted result for a manual item the reviewer has decided, turning
@@ -2270,7 +2478,7 @@ WHERE d.name = DB_NAME();";
             return $"Manual Steps:\n{manualSteps ?? string.Empty}\n\nOperator Remarks:\n{remarks}\n\nSelected Outcome:\n{outcome}";
         }
 
-        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, System.Threading.CancellationToken cancellationToken = default)
+        private async Task<ManualStepsGenerationResult> GenerateManualInstructionsWithMetadataAsync(ChecklistItem item, string? auditScript = null, bool isDocumentationCheck = false, System.Threading.CancellationToken cancellationToken = default)
         {
             if (ManualMigrationStepsStore.TryGet(item.Id, out var storedSteps))
             {
@@ -2282,7 +2490,7 @@ WHERE d.name = DB_NAME();";
             {
                 if (_manualStepsGenerator != null)
                 {
-                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, cancellationToken);
+                    var slm = await _manualStepsGenerator.GenerateWithMetadataAsync(item, auditScript, isDocumentationCheck, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(slm.Instructions))
                     {
                         ManualMigrationStepsStore.Store(item.Id, slm.Instructions);
@@ -2301,7 +2509,7 @@ WHERE d.name = DB_NAME();";
                 LogDiagnostic($"Manual steps LLM call failed for {item.Id}: {ex.GetType().Name}: {ex.Message}");
             }
 
-            var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item);
+            var fallback = await EvaluationDecisionService.BuildManualInstructionsAsync(item, isDocumentationCheck);
             if (!string.IsNullOrWhiteSpace(auditScript))
             {
                 fallback += "\n\n## Audit script to run in SSMS\n\n```sql\n" + auditScript.Trim() + "\n```";
@@ -2345,7 +2553,7 @@ WHERE d.name = DB_NAME();";
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    using var connection = new SqlConnection(GetDatabaseConnectionString(databaseName));
+                    using var connection = CreateConnection(GetDatabaseConnectionString(databaseName));
                     await connection.OpenAsync(cancellationToken);
                     var executableScript = await PrepareDatabaseScopedScriptAsync(
                         connection,

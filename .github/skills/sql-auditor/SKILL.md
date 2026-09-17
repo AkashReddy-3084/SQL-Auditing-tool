@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Targets on-premises SQL Server, SQL Server on an Azure VM, Azure SQL Database and Azure SQL Managed Instance via --auth windows|sql|entra-msi|entra-sp. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -86,6 +86,16 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> --notes "<rationale>"
   ```
+  When the verdict came from attached evidence rather than from the user, add
+  `--evidence-source "<label>"` and `--evidence-files "<manifest paths you read>"`.
+- **evidence** — attach or show the artefacts that decide documentation and process items:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evidence add --path <folder> | --git <https url> | --file <path> [--ref <branch>]
+  powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 evidence show
+  ```
+  Resolves and indexes the sources and writes `evidence-manifest.json` into the run directory.
+  Private HTTPS repositories authenticate from `SQLAUDITOR_GIT_TOKEN` — **never ask for a token in
+  chat** and never accept one inside the URL. The CLI makes no AI calls: **you** read the files.
 - **enrich_result** — record the audit wording you authored for one script-evaluated item:
   ```powershell
   powershell -ExecutionPolicy Bypass -File Backend\CLI\sql-auditor.ps1 enrich_result --id <id> --finding "<finding>" --evidence-file "<path>" --risk "<riskImpact>" --recommendation "<recommendation>"
@@ -116,10 +126,21 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    already recorded in `results/historical_last_run.json` are copied forward: they come back decided,
    never appear in the review block, and must not be re-reviewed or re-enriched. Manual items with no
    historical result still follow the normal review flow.
-2. Run **evaluate** with the checklist `--items` and `--server`. For SQL Login pass
-   `--user <name>`; the password comes from the `SQLAUDITOR_SQL_PASSWORD` session
-   environment variable — **never** ask for it in chat. Omit `--user` for Windows
-   Integrated authentication. The CLI runs the engine only; it never calls an LLM.
+2. Run **evaluate** with the checklist `--items` and `--server`. Pass `--auth` to pick the
+   authentication method: `windows` (the default), `sql`, `entra-interactive`,
+   `entra-service-principal` or `entra-managed-identity`. The short forms `entra-mfa`,
+   `entra-sp` and `entra-msi` are accepted as aliases. Pass the identity with
+   `--user <name>` (SQL login name or client ID); `--client-id` is an alias. Secrets come from
+   the `SQLAUDITOR_SQL_PASSWORD` session environment variable, or
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal — **never** ask for one in chat and
+   never pass one as a command-line argument. Azure SQL endpoints (`*.database.windows.net`)
+   cannot use `windows`, and `entra-interactive` is rejected in `--copilot` mode because it needs
+   an interactive browser prompt.
+   If the user needs connection options the flags cannot express (custom port with specific TLS
+   settings, `ApplicationIntent=ReadOnly`, a failover partner, a longer `Connect Timeout`), have
+   them set `SQLAUDITOR_CONNECTION_STRING` in the session instead; it is used verbatim and
+   overrides `--server`, `--auth`, `--user` and `--client-id`.
+   The CLI runs the engine only; it never calls an LLM.
 2b. **Ask which databases to audit.** Without `--databases`, `evaluate --copilot` prints a
    `=== DATABASE SELECTION REQUIRED ===` block listing the user databases on the instance and
    stops. Show that list to the user, let them pick one, several or all, and run `evaluate`
@@ -144,7 +165,33 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    passing `--evidence-file` so the quotes it contains survive. When the command replies that the
    item moved to Outcome `Not Applicable`, that item is excluded from every score and is listed on
    the workbook's "Not Applicable Items" sheet — report it as **Not Applicable**, never as Pass or Fail.
-4. Read the `=== COPILOT REVIEW REQUIRED ===` block, then **first ask the user which they want** —
+4. Read the `=== EVIDENCE REVIEW AVAILABLE ===` / `=== ACTION REQUIRED: EVIDENCE REVIEW ===` block.
+   Many review items are **documentation or process controls** (source control, pipelines, runbooks,
+   architecture docs, environment separation, secrets handling, compliance records). They cannot be
+   answered from the SQL Server instance, and interviewing the user about each one is slow and
+   imprecise.
+   - **If no evidence is attached, ask once:** "Do you have a Git repository, deployment pipeline or
+     documentation folder I can read as evidence? Give me a local folder path, a file path, or an
+     https Git URL — or say 'no' to review these manually." If they provide one, run
+     `evidence add`. If they decline, go straight to step 5.
+   - **Read the files yourself** under the resolved paths the command printed. For each item, first
+     identify **the artefact the control requires**, then check whether it is actually in the
+     attached evidence.
+   - **Record each verdict you can justify** with `resolve_review --id <id> --decision <pass|fail>
+     --notes-file <file with what the files show> --evidence-source "<label>" --evidence-files
+     "<paths you read>"`, then `enrich_result` for the same item.
+   - **Rules you must not break:** if the required artefact is **not** in the attached evidence,
+     leave the item as NeedsReview — the evidence set is a partial view, so its absence is not proof
+     the control is missing and is **not** grounds for `fail`; cite only files you actually opened;
+     `fail` requires you to hold the artefact and for it to evidence a gap; **never record
+     `notapplicable` from evidence** (the CLI rejects it when `--evidence-source` or
+     `--evidence-files` is set) — whether a control has nothing to assess is the user's call, so
+     leave it as NeedsReview and explain why you think it may not apply; and if the evidence is
+     **silent, partial or ambiguous, do not decide**. Items needing an interview, a live instance
+     setting, or proof that an event happened (a failover test was run, an approval was given) are
+     almost never answerable from a repository.
+   - Afterwards, report which items you resolved from evidence and which still need the user.
+5. Read the `=== COPILOT REVIEW REQUIRED ===` block, then **first ask the user which they want** —
    do not export or import anything until they answer:
    - **(a) Import an already-filled CSV** they have (for example one they filled during a previous
      run). Ask for its path and run **import_manual_csv** with `--file <path>`. A CSV from an earlier
@@ -177,6 +224,11 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    ## Recommended Actions (if failed)
    - ...
    ```
+
+   For a **documentation or process item** the baseline guidance is artefact-oriented — which
+   document, repository or record to obtain — and it also states what Not Applicable means. Render
+   it as it stands; do **not** turn it into SSMS or T-SQL steps, and keep its Not Applicable
+   criteria in the Pass/Fail section.
 6. When the user gives you a filled CSV (whether an existing one or the one just exported), run
    **import_manual_csv** with `--file <path>`. Accept their entries as given — do not judge whether
    the evidence is sufficient and do not ask for more detail. Report back only the rows the import

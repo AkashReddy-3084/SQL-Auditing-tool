@@ -35,12 +35,16 @@ public static class AuditTools
     public static Task<string> EvaluateAsync(
         [Description("STEP 1: How manual/AI-Manual checklist items are handled — 'last-runs' to copy the results recorded in results/historical_last_run.json, or 'fresh' to evaluate every manual item again. This MUST come from the user; never choose it yourself. Call with it empty to get the exact question to ask.")] string? manualResults = null,
         [Description("STEP 2: SQL Server name/host[,port]. REQUIRED and must come from the user. If you don't have it yet, call with server empty to get the exact prompt to show the user.")] string? server = null,
-        [Description("STEP 3: Authentication method — 'windows' for Windows Integrated, or 'sql' for SQL Login.")] string? authMethod = null,
-        [Description("STEP 3b: SQL login username (only when authMethod='sql'). The password is NOT passed here; it is read at runtime from the SQLAUDITOR_SQL_PASSWORD session environment variable and must NEVER be typed in chat.")] string? sqlUser = null,
+        [Description("STEP 3: Authentication method — 'windows' (Windows Integrated), 'sql' (SQL Login), 'entra-service-principal' (alias 'entra-sp') or 'entra-managed-identity' (alias 'entra-msi'). Azure SQL Database and Azure SQL Managed Instance require a 'sql' or 'entra-*' method. 'entra-interactive' (alias 'entra-mfa') cannot be used here because this server has no browser.")] string? authMethod = null,
+        [Description("STEP 3b: The identity for the chosen method — SQL login name for 'sql', application (client) ID for 'entra-service-principal', optional user-assigned client ID for 'entra-managed-identity'. Passwords and secrets are NEVER passed here; they are read at runtime from session environment variables and must NEVER be typed in chat.")] string? sqlUser = null,
+        [Description("Microsoft Entra client id — the application (client) ID when authMethod='entra-service-principal', or the user-assigned managed identity client id when authMethod='entra-managed-identity' (omit for the system-assigned identity). Equivalent to passing it as 'sqlUser'. The secret is NOT passed here; it is read from SQLAUDITOR_ENTRA_CLIENT_SECRET (or SQLAUDITOR_CLIENT_SECRET).")] string? clientId = null,
         [Description("STEP 4: The checklist items to evaluate. Accepts a single ID ('1.2.1'), a comma-separated list ('1.2.1,3.1.2'), an inclusive range in checklist order ('1.1.1 - 2.1.4') or 'all'. Pass what the user typed verbatim; this tool resolves it. If the user already named items earlier, reuse them here.")] string? items = null,
         [Description("STEP 4b: Which user databases the database-scoped checks run against — a comma-separated list of database names ('Sales,Warehouse') or 'all' for every accessible user database. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the list of databases on the instance to present to the user.")] string? databases = null,
+        [Description("STEP 4c: Evidence for documentation and process checklist items — comma-separated local folder paths, individual file paths, and/or one https Git CLONE url (not a browser page url). Pass 'none' when the user has no evidence to attach. This MUST come from the user, exactly as the desktop app asks. Call with it empty to get the question to put to them.")] string? evidence = null,
+        [Description("STEP 4c (optional): Branch or tag to clone when 'evidence' contains a Git clone url. Omitted means the repository's default branch.")] string? evidenceRef = null,
+        [Description("Optional Entra tenant ID. Recorded with the run for the audit trail; the server itself resolves the tenant.")] string? tenantId = null,
         CancellationToken cancellationToken = default)
-        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databases,
+        => EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, clientId, items, databases, evidence, evidenceRef, tenantId,
                              reuseActiveRunDirectory: false, targetDatabases: null, cancellationToken);
 
     // Shared core used by both `evaluate` (fresh run) and `rerun_evaluation` (same folder).
@@ -51,8 +55,12 @@ public static class AuditTools
         string? server,
         string? authMethod,
         string? sqlUser,
+        string? clientId,
         string? items,
         string? databaseSpec,
+        string? evidenceSpec,
+        string? evidenceRef,
+        string? tenantId,
         bool reuseActiveRunDirectory,
         string[]? targetDatabases,
         CancellationToken cancellationToken)
@@ -80,6 +88,19 @@ public static class AuditTools
                  + "plus everything else already gathered.";
         }
 
+        // A connection string supplied in the session environment answers STEP 2 and STEP 3 at once.
+        var rawConnection = SqlAuthProfile.ReadConnectionStringFromEnvironment();
+        SqlAuthProfile? envProfile = null;
+        if (rawConnection != null)
+        {
+            if (!SqlAuthProfile.TryParseConnectionString(rawConnection, out var parsed, out var parseError))
+                return $"The {SqlAuthProfile.ConnectionStringVariable} session environment variable is set but unusable: {parseError}\n"
+                     + "Ask the user to correct it in the terminal that launched VS Code and restart the MCP server, "
+                     + "or to unset it and supply 'server' plus 'authMethod' instead.";
+            envProfile = parsed;
+            server = parsed.Server;
+        }
+
         // STEP 2 — SQL Server name (always required, always from the user first).
         if (string.IsNullOrWhiteSpace(server))
             return "STEP 2 of 6 — SQL SERVER NAME REQUIRED.\n"
@@ -87,20 +108,50 @@ public static class AuditTools
                  + "Do not guess or use a default such as localhost. When the user answers, call evaluate again with 'server' set. "
                  + "Retain any checklist IDs the user already mentioned and pass them as 'items' later.";
 
-        // STEP 3 — Authentication method.
-        var method = authMethod?.Trim().ToLowerInvariant();
-        if (method != "windows" && method != "sql")
+        // STEP 3 — Authentication method. A connection string from the environment already answered it.
+        var method = envProfile?.Method ?? SqlAuthMethod.ConnectionString;
+        if (envProfile == null && !SqlAuthProfile.TryParseMethod(authMethod, out method))
             return $"STEP 3 of 6 — AUTHENTICATION METHOD REQUIRED for server '{server}'.\n"
-                 + "Ask the user: \"Which authentication method should I use — 'windows' (Windows Integrated) or 'sql' (SQL Login)?\"\n"
+                 + "Ask the user which authentication method to use:\n"
+                 + "  windows                  — Windows Integrated (the account running VS Code)\n"
+                 + "  sql                      — SQL Login (username here, password from the environment)\n"
+                 + "  entra-service-principal  — Client ID here, client secret from the environment\n"
+                 + "  entra-managed-identity   — Managed identity of the machine running this server\n"
+                 + (SqlAuthProfile.IsAzureSqlEndpoint(server)
+                        ? "This server is an Azure SQL endpoint, so 'windows' will not work — recommend 'sql', 'entra-service-principal' or 'entra-managed-identity'.\n"
+                        : string.Empty)
                  + "Then call evaluate again with 'server' and 'authMethod' set.";
 
-        // STEP 3b — SQL login username (password stays in the session environment, never in chat).
-        if (method == "sql" && string.IsNullOrWhiteSpace(sqlUser))
-            return $"STEP 3b — SQL LOGIN USERNAME REQUIRED for server '{server}'.\n"
-                 + "Ask the user for the SQL login username. For security, the password must NOT be typed in chat: "
-                 + "the user sets it once in their terminal session before launching VS Code "
-                 + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), and the server reads it at runtime.\n"
-                 + "Then call evaluate again with 'server', authMethod='sql', and 'sqlUser' set.";
+        if (method == SqlAuthMethod.EntraInteractive)
+            return $"STEP 3 of 6 — 'entra-interactive' IS NOT AVAILABLE for server '{server}'.\n"
+                 + "This MCP server runs headless, so a browser sign-in prompt would hang the evaluation. "
+                 + "Ask the user to pick one of these instead:\n"
+                 + "  entra-service-principal  — with SQLAUDITOR_ENTRA_CLIENT_SECRET set in the session\n"
+                 + "  entra-managed-identity   — when this machine has a managed identity\n"
+                 + "The WPF desktop app does support interactive browser sign-in if they need MFA.";
+
+        var shell = new SqlAuthProfile { Method = method };
+        var display = SqlAuthProfile.DisplayNameFor(method);
+
+        // One identity field serves every method; 'clientId' is the Entra-friendly spelling.
+        var identity = method is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity
+            ? (!string.IsNullOrWhiteSpace(clientId) ? clientId : sqlUser)
+            : sqlUser;
+
+        // STEP 3b — the identity (secrets stay in the session environment, never in chat).
+        if (envProfile == null && shell.RequiresSecret && string.IsNullOrWhiteSpace(identity))
+        {
+            var secretEnv = method == SqlAuthMethod.EntraServicePrincipal
+                ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                : "SQLAUDITOR_SQL_PASSWORD";
+            var argName = method == SqlAuthMethod.EntraServicePrincipal ? "clientId" : "sqlUser";
+            return $"STEP 3b — {SqlAuthProfile.UserIdLabelFor(method).ToUpperInvariant()} REQUIRED for {display} on server '{server}'.\n"
+                 + $"Ask the user for the {SqlAuthProfile.UserIdLabelFor(method).ToLowerInvariant()}. For security the "
+                 + $"{SqlAuthProfile.SecretLabelFor(method).ToLowerInvariant()} must NOT be typed in chat: the user sets it once "
+                 + $"in the terminal session before launching VS Code (PowerShell: $env:{secretEnv}='<value>'), "
+                 + "and the server reads it at runtime.\n"
+                 + $"Then call evaluate again with 'server', authMethod='{SqlAuthProfile.TokenFor(method)}', and '{argName}' set.";
+        }
 
         // STEP 4 — Checklist items.
         if (string.IsNullOrWhiteSpace(items))
@@ -110,26 +161,48 @@ public static class AuditTools
                  + "If the user already provided items earlier in the conversation, use those instead of asking again.\n"
                  + "Then call evaluate again with 'server', 'authMethod', and 'items' set.";
 
-        // Build the connection string from the chosen method. The SQL Login password
-        // is read only from the environment, never passed through tool arguments.
-        string connectionString;
-        if (method == "sql")
+        // Build the auth profile from the chosen method. Secrets are read only from the
+        // environment, never passed through tool arguments.
+        string? secret = null;
+        if (envProfile == null && shell.RequiresSecret)
         {
-            var pass = Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-            if (string.IsNullOrEmpty(pass))
-                return $"STEP 3b \u2014 SQL PASSWORD NOT AVAILABLE for user '{sqlUser}' on server '{server}'.\n"
-                     + "The SQLAUDITOR_SQL_PASSWORD session environment variable is not set, so no SQL login can be made. "
-                     + "Do NOT ask for the password in chat. Ask the user to set it in the terminal session that launched VS Code "
-                     + "(PowerShell: $env:SQLAUDITOR_SQL_PASSWORD='<password>'), restart the MCP server, then run evaluate again. "
-                     + "Alternatively, they can choose Windows authentication instead.";
-            connectionString = $"Server={server};User Id={sqlUser};Password={pass};TrustServerCertificate=true;";
-        }
-        else
-        {
-            connectionString = $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            var secretEnv = method == SqlAuthMethod.EntraServicePrincipal
+                ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                : "SQLAUDITOR_SQL_PASSWORD";
+            secret = Environment.GetEnvironmentVariable(secretEnv);
+            if (string.IsNullOrEmpty(secret) && method == SqlAuthMethod.EntraServicePrincipal)
+            {
+                // Accepted as an alias so sessions set up for either branch keep working.
+                secret = Environment.GetEnvironmentVariable("SQLAUDITOR_CLIENT_SECRET")
+                      ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+            }
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                var secretLabel = SqlAuthProfile.SecretLabelFor(method).ToUpperInvariant();
+                return $"STEP 3b \u2014 {secretLabel} NOT AVAILABLE for '{identity}' on server '{server}'.\n"
+                     + $"The {secretEnv} session environment variable is not set, so {display} cannot be used. "
+                     + "Do NOT ask for it in chat. Ask the user to set it in the terminal session that launched VS Code "
+                     + $"(PowerShell: $env:{secretEnv}='<value>'), restart the MCP server, then run evaluate again. "
+                     + "Alternatively they can choose windows or entra-managed-identity, which need no secret.";
+            }
         }
 
-        var auditor = new Auditor(connectionString);
+        var authProfile = envProfile ?? new SqlAuthProfile
+        {
+            Method = method,
+            Server = server!,
+            Database = "master",
+            UserId = string.IsNullOrWhiteSpace(identity) ? null : identity.Trim(),
+            Secret = secret,
+            TenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId.Trim(),
+        };
+
+        var authError = authProfile.Validate();
+        if (authError is not null)
+            return $"STEP 3 \u2014 AUTHENTICATION DETAILS INVALID for server '{server}': {authError}";
+
+        var auditor = new Auditor(authProfile);
 
         // STEP 4b — database scope. The desktop app makes the user pick the databases, so the
         // IDE must ask too: auditing every database (including system databases) silently
@@ -211,6 +284,61 @@ public static class AuditTools
                  + (unknown.Length > 0 ? ". Unknown: " + string.Join(", ", unknown) : $": '{spec}' matched no checklist ID.")
                  + " Call load_checklist to look up valid IDs.";
 
+        // STEP 4c — evidence. The desktop app offers this before the run, so the IDE asks too:
+        // without it every documentation and process item is handed back as manual review.
+        if (string.IsNullOrWhiteSpace(evidenceSpec))
+            return "STEP 4c of 6 \u2014 EVIDENCE FOR DOCUMENTATION ITEMS.\n"
+                 + "Many checklist items are documentation or process controls (source control, pipelines, runbooks,\n"
+                 + "architecture documents, environment separation, secrets handling). They cannot be answered from the\n"
+                 + "SQL Server instance, so without evidence they all come back for manual review.\n"
+                 + "Ask the user, and never decide for them:\n"
+                 + "  \"Do you have a Git repository, deployment pipeline or documentation folder I can read as evidence?\n"
+                 + "   Give me a local folder path, a file path, or an https Git clone URL \u2014 or say 'none' to review these manually.\"\n"
+                 + "Then call evaluate again with everything already gathered plus:\n"
+                 + "  evidence='<folder path, file path and/or https clone URL, comma-separated>'  (add evidenceRef='<branch>' for a non-default branch)\n"
+                 + "  evidence='none'                                                             (they declined)\n"
+                 + "A browser page URL (\u2026/tree/\u2026) is NOT a clone URL and will be rejected \u2014 ask for the clone URL and the branch separately.";
+
+        var evidenceDeclined = evidenceSpec.Trim().ToLowerInvariant() is "none" or "no" or "skip" or "n/a" or "-";
+        var evidenceLocalPaths = new List<string>();
+        var evidenceFilePaths = new List<string>();
+        string? evidenceGitUrl = null;
+        if (!evidenceDeclined)
+        {
+            foreach (var entry in SplitList(evidenceSpec))
+            {
+                if (entry.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || entry.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (EvidenceRepositoryUrl.TryParseBrowseUrl(entry) is { } browse)
+                        return "STEP 4c \u2014 EVIDENCE URL INVALID.\n"
+                             + EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                             + $"\n\nCall evaluate again with evidence=\"{browse.CloneUrl}\" and evidenceRef=\"{browse.Branch}\".";
+
+                    evidenceGitUrl = entry;
+                }
+                else if (File.Exists(entry)) evidenceFilePaths.Add(entry);
+                else evidenceLocalPaths.Add(entry);
+            }
+        }
+
+        // Resolved before the audit runs: cloning is quick, but doing it after a long run left it
+        // at the tail of the request, where a cancelled request killed git mid-clone.
+        EvidenceContext? evidenceContext = null;
+        if (!evidenceDeclined && (evidenceLocalPaths.Count > 0 || evidenceFilePaths.Count > 0 || evidenceGitUrl != null))
+        {
+            try
+            {
+                evidenceContext = await EvidenceStore.AttachAsync(
+                    evidenceLocalPaths, evidenceGitUrl, evidenceRef, evidenceFilePaths, cancellationToken, persist: false);
+            }
+            catch (Exception ex)
+            {
+                evidenceContext = null;
+                Console.Error.WriteLine($"Evidence could not be attached: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         // STEP 5 — run automated evaluation (manual-only items resolve to NeedsReview).
         // Manual items with a reusable historical result are copied forward inside the engine
         // when the user chose Option 1, so they never reach the review queue below.
@@ -219,8 +347,11 @@ public static class AuditTools
         auditor.LastRunInputs = new RunInputs
         {
             Fqdn = server,
-            AuthMethod = method == "sql" ? "SQL Login" : "Windows Authentication",
-            SqlUser = method == "sql" ? sqlUser : null,
+            AuthMethod = SqlAuthProfile.DisplayNameFor(authProfile.Method),
+            SqlUser = authProfile.Method == SqlAuthMethod.SqlLogin ? authProfile.UserId : null,
+            ClientId = authProfile.Method is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity
+                ? authProfile.UserId
+                : null,
         };
 
         var results = await auditor.RunChecklistAsync(
@@ -228,6 +359,9 @@ public static class AuditTools
             useHistoricalManualResults.Value,
             generateReports: true, targetDatabases: targetDatabases,
             reuseActiveRunDirectory: reuseActiveRunDirectory);
+
+        // The manifest is written now that the run directory exists.
+        if (evidenceContext != null) EvidenceStore.Save(evidenceContext);
 
         var sb = new StringBuilder();
         if (unknown.Length > 0)
@@ -267,13 +401,6 @@ public static class AuditTools
         sb.AppendLine("result of the audit. Once every item has been enriched and reviewed, call 'show_reports' and report ITS counts,");
         sb.AppendLine("which include the Not Applicable items.");
 
-        // Script items get their verdict deterministically but their wording from Copilot,
-        // since this server makes no LLM calls.
-        sb.AppendLine();
-        sb.Append(Auditor.BuildScriptEnrichmentRequest(
-            results,
-            id => $"enrich_result(id=\"{id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\")"));
-
         // Items not decided by deterministic scripts need review. This server makes no
         // LLM calls, so Copilot Chat is the reviewer: it analyzes each item, guides the
         // user, and records the decision via the resolve_review tool.
@@ -283,11 +410,39 @@ public static class AuditTools
             .OrderBy(r => r.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        var itemLookup = structure.SelectMany(s => s.Items)
+            .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        // Printed before the enrichment request: whichever block comes first is the one that gets done.
+        if (manualPending.Count > 0 && evidenceContext is { HasUsableEvidence: true })
+        {
+            sb.AppendLine();
+            sb.Append(EvidenceAttribution.BuildReviewRequest(
+                manualPending.Select(r => itemLookup.TryGetValue(r.Id, out var item)
+                    ? (r.Id, item.Description, item.Category)
+                    : (r.Id, r.Description ?? string.Empty, string.Empty)),
+                evidenceContext));
+        }
+
+        // Script items get their verdict deterministically but their wording from Copilot,
+        // since this server makes no LLM calls.
+        sb.AppendLine();
+        sb.Append(Auditor.BuildScriptEnrichmentRequest(
+            results,
+            id => $"enrich_result(id=\"{id}\", finding=\"...\", evidence=\"...\", riskImpact=\"...\", recommendation=\"...\")"));
+
         if (manualPending.Count > 0)
         {
-            var itemLookup = structure.SelectMany(s => s.Items)
-                .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            if (evidenceContext is not { HasUsableEvidence: true })
+            {
+                sb.AppendLine();
+                sb.Append(EvidenceAttribution.BuildReviewRequest(
+                    manualPending.Select(r => itemLookup.TryGetValue(r.Id, out var item)
+                        ? (r.Id, item.Description, item.Category)
+                        : (r.Id, r.Description ?? string.Empty, string.Empty)),
+                    evidenceContext));
+            }
 
             sb.AppendLine();
             sb.AppendLine("=== ACTION REQUIRED: REVIEW (do not stop here) ===");
@@ -377,6 +532,8 @@ public static class AuditTools
         [Description("Which run to redo: an index from list_evaluations (e.g. '1') or a run directory path.")] string? run = null,
         [Description("How manual/AI-Manual items are handled: 'last-runs' to copy prior decisions, or 'fresh'. MUST come from the user.")] string? manualResults = null,
         [Description("Optional: override the checklist items (edit). Defaults to the run's stored selection.")] string? items = null,
+        [Description("Evidence for documentation and process items \u2014 comma-separated local folder paths, file paths and/or one https Git CLONE url, or 'none' to skip. Call with it empty to get the question to put to the user.")] string? evidence = null,
+        [Description("Optional: branch or tag to clone when 'evidence' contains a Git clone url.")] string? evidenceRef = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(run))
@@ -390,8 +547,10 @@ public static class AuditTools
         // Server and authentication are always reused from the original run and cannot be changed
         // on rerun/edit; only the checklist items may be overridden.
         var server = meta.Fqdn;
-        var authMethod = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? "sql" : "windows";
+        var storedMode = SqlAuthProfile.FromDisplayName(meta.AuthMethod);
+        var authMethod = SqlAuthProfile.TokenFor(storedMode);
         var sqlUser = meta.SqlUser;
+        var clientId = meta.ClientId;
         if (string.IsNullOrWhiteSpace(items) && meta.SelectedItemIds is { Count: > 0 })
             items = string.Join(",", meta.SelectedItemIds);
 
@@ -412,10 +571,15 @@ public static class AuditTools
             return $"Run '{run}' predates input capture and has no stored server, so it cannot be rerun here. Run a fresh 'evaluate' instead.";
         if (string.IsNullOrWhiteSpace(items))
             return $"Run '{run}' has no stored checklist items. Call rerun_evaluation again with 'items' set (e.g. '1.1.1,2.1.4').";
-        if (string.Equals(authMethod, "sql", StringComparison.OrdinalIgnoreCase)
+        if (storedMode == SqlAuthMethod.SqlLogin
             && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD")))
             return $"Run '{run}' uses SQL Login ('{sqlUser}'), but SQLAUDITOR_SQL_PASSWORD is not set. Ask the user to set it in the "
                  + "session that launched VS Code, restart the server, then call rerun_evaluation again \u2014 or use Windows auth.";
+        if (storedMode == SqlAuthMethod.EntraServicePrincipal
+            && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQLAUDITOR_ENTRA_CLIENT_SECRET"))
+            && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQLAUDITOR_CLIENT_SECRET")))
+            return $"Run '{run}' uses a Microsoft Entra service principal ('{clientId}'), but SQLAUDITOR_ENTRA_CLIENT_SECRET is not set. "
+                 + "Ask the user to set it in the session that launched VS Code, restart the server, then call rerun_evaluation again.";
 
         // Replay the stored scope, minus any system database recorded by an older build.
         var storedDatabases = (meta.Databases ?? Array.Empty<string>())
@@ -426,7 +590,8 @@ public static class AuditTools
         // Reuse the SAME folder so the reports are overwritten in place.
         AuditOutputPaths.ResumeRun(selected.RunDirectory);
 
-        return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, items, databaseSpec: null,
+        return await EvaluateCoreAsync(manualResults, server, authMethod, sqlUser, clientId, items, databaseSpec: null,
+            evidenceSpec: evidence, evidenceRef: evidenceRef, tenantId: null,
             reuseActiveRunDirectory: true, targetDatabases: targetDatabases, cancellationToken);
     }
 
@@ -627,28 +792,50 @@ public static class AuditTools
     }
 
     [McpServerTool(Name = "resolve_review")]
-    [Description("Mark a checklist item that came back as NeedsReview with a human decision of pass, fail, notapplicable (or needsreview). Requires the reviewer's own observation/evidence text for pass, fail and notapplicable decisions. 'notapplicable' records that the control does not exist on this server to be assessed, so the item is excluded from every score and reported as Not Applicable. Updates checklist_results.json and regenerates the five-file report suite in the current run directory. Use after 'evaluate' surfaces manual-review items.")]
+    [Description("Mark a checklist item that came back as NeedsReview with a decision of pass, fail, notapplicable (or needsreview). Requires the reviewer's own observation/evidence text, or - when the verdict was derived from an attached repository, pipeline or document - the cited file paths in 'evidenceFiles'. 'notapplicable' records that the control does not exist here to be assessed, so the item is excluded from every score. Updates checklist_results.json and regenerates the five-file report suite in the current run directory.")]
     public static Task<string> ResolveReviewAsync(
         [Description("The checklist item ID to resolve, e.g. '3.1.1'.")] string id,
-        [Description("The decision: 'pass', 'fail', 'notapplicable', or 'needsreview'. Use 'notapplicable' only when every value the reviewer reports is absent, empty, zero or irrelevant, so there is nothing to assess; a zero that itself proves compliance is a Pass.")] string decision,
-        [Description("The reviewer's observation/evidence in their own words: what they inspected and what they found (document names, settings, values, counts). Required for 'pass', 'fail' and 'notapplicable'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null)
+        [Description("The decision: 'pass', 'fail', 'notapplicable', or 'needsreview'. Use 'notapplicable' only when every value reported is absent, empty, zero or irrelevant, so there is nothing to assess; a zero that itself proves compliance is a Pass.")] string decision,
+        [Description("The observation/evidence in plain words: what was inspected and what was found (file paths, document names, settings, values, counts). Required for 'pass', 'fail' and 'notapplicable'. A bare 'pass'/'fail' is not acceptable evidence.")] string? notes = null,
+        [Description("Set ONLY when the verdict came from attached evidence rather than from the user: the label of the evidence source, as shown by set_evidence_sources.")] string? evidenceSource = null,
+        [Description("Set ONLY when the verdict came from attached evidence: a comma-separated list of the evidence file paths you actually read to reach it, exactly as they appear in the manifest. Required whenever evidenceSource is set.")] string? evidenceFiles = null)
     {
         if (string.IsNullOrWhiteSpace(id))
             return Task.FromResult("Error: 'id' is required.");
         if (string.IsNullOrWhiteSpace(decision))
             return Task.FromResult("Error: 'decision' is required (pass, fail, notapplicable, or needsreview).");
 
+        var isDecision = ManualVerdict.IsDecided(decision);
+        var isEvidenceDerived = !string.IsNullOrWhiteSpace(evidenceSource) || !string.IsNullOrWhiteSpace(evidenceFiles);
+
+        // An evidence-derived verdict has to name the files it was read from, otherwise it is
+        // indistinguishable from a guess when the report is reviewed later.
+        if (isEvidenceDerived && string.IsNullOrWhiteSpace(evidenceFiles))
+            return Task.FromResult(
+                $"Error: 'evidenceFiles' is required for [{id}] when the verdict comes from attached evidence. "
+                + "List the manifest paths of the files you actually read.");
+
+        // Deciding that a control has nothing to assess is a human judgement, so it cannot be
+        // filed from artefacts alone.
+        if (isEvidenceDerived && NotApplicableEvidence.IsNotApplicableOutcome(ManualVerdict.Normalize(decision)))
+            return Task.FromResult(
+                $"Error: 'notapplicable' cannot be recorded from attached evidence for [{id}]. "
+                + "Whether a control has nothing to assess on this platform is the user's call, not yours. "
+                + "Leave the item as NeedsReview, and tell the user what the evidence suggests and why you think it may not apply.");
+
         // The reviewer's own words are the evidence of record, so a decision cannot be
         // filed without them.
-        var isDecision = decision.Trim().ToLowerInvariant() is "pass" or "p" or "yes" or "y" or "fail" or "f" or "no" or "n"
-            or "notapplicable" or "not applicable" or "not-applicable" or "na" or "n/a";
         if (isDecision && !IsUsableEvidence(notes))
             return Task.FromResult(
-                $"Error: 'notes' must contain the reviewer's actual observation for [{id}] — what they checked and what they found. "
-                + "Ask the user for the evidence behind their decision and call resolve_review again with it.");
+                $"Error: 'notes' must contain the actual observation for [{id}] — what was checked and what was found. "
+                + "Ask the user for the evidence behind their decision, or quote what the attached evidence showed, and call resolve_review again with it.");
+
+        var annotatedNotes = isEvidenceDerived
+            ? $"{notes?.Trim()}\n\n{EvidenceAttribution.EvidencePrefix} {EvidenceAttribution.Describe(evidenceSource, evidenceFiles)}"
+            : notes;
 
         var auditor = new Auditor(string.Empty);
-        if (auditor.ResolveReview(id, decision, notes, out var newOutcome))
+        if (auditor.ResolveReview(id, decision, annotatedNotes, out var newOutcome))
         {
             if (NotApplicableEvidence.IsNotApplicableOutcome(newOutcome))
                 return Task.FromResult(
@@ -658,7 +845,7 @@ public static class AuditTools
 
             return Task.FromResult(
                 $"Updated [{id}] -> {newOutcome}. Outputs regenerated in {AuditOutputPaths.CurrentRunDirectory}. "
-                + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the reviewer's evidence above — finding, evidence, riskImpact and recommendation — using only facts the reviewer stated.");
+                + $"NEXT: call enrich_result(id=\"{id}\", ...) with audit wording you derive from the evidence above — finding, evidence, riskImpact and recommendation — using only facts that evidence states.");
         }
 
         return Task.FromResult(
@@ -672,6 +859,117 @@ public static class AuditTools
         var trimmed = notes.Trim().Trim('.', '!', ' ').ToLowerInvariant();
         return trimmed is not ("pass" or "passed" or "fail" or "failed" or "p" or "f"
             or "yes" or "no" or "y" or "n" or "ok" or "okay" or "good" or "bad" or "n/a");
+    }
+
+    private static string BuildEvidenceReviewRequest(IEnumerable<string> pendingItemIds)
+        => EvidenceAttribution.BuildReviewRequest(pendingItemIds, EvidenceStore.Load());
+
+    [McpServerTool(Name = "set_evidence_sources")]
+    [Description("Attach a Git repository, CI/CD pipeline definitions, a documentation folder or individual policy files to the current evaluation run as EVIDENCE, so documentation and process checklist items can be decided from real artefacts instead of being handed to the user as manual review. Resolves and indexes the sources, writes evidence-manifest.json into the run directory, and returns the resolved paths plus a manifest summary. This server makes NO LLM calls: you read the files yourself with your own file tools under the resolved paths, then record each verdict with resolve_review(..., evidenceSource=..., evidenceFiles=...). Private HTTPS repositories authenticate from the SQLAUDITOR_GIT_TOKEN session environment variable; never ask for a token in chat.")]
+    public static async Task<string> SetEvidenceSourcesAsync(
+        [Description("Comma-separated local folder paths to read as evidence, e.g. a cloned repository or a docs folder.")] string? localPaths = null,
+        [Description("An https:// Git URL to clone (shallow) and index. SSH remotes and file:// paths are rejected.")] string? gitUrl = null,
+        [Description("Optional branch or tag to clone when gitUrl is set. Defaults to the repository's default branch.")] string? gitRef = null,
+        [Description("Comma-separated individual file paths to attach, e.g. a policy document or an exported pipeline definition.")] string? files = null,
+        CancellationToken cancellationToken = default)
+    {
+        var paths = SplitList(localPaths);
+        var fileList = SplitList(files);
+
+        if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+            return "EVIDENCE SOURCE REQUIRED.\n"
+                 + "Ask the user: \"Where is the evidence? Give me a local folder path (a cloned repository or a docs folder), "
+                 + "a file path, or an https Git URL.\"\n"
+                 + "Then call set_evidence_sources again with 'localPaths', 'files' or 'gitUrl' set.";
+
+        if (!string.IsNullOrWhiteSpace(gitUrl) && !EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+        {
+            if (EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                return EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                     + $"\n\nCall set_evidence_sources again with gitUrl=\"{browse.CloneUrl}\" and gitRef=\"{browse.Branch}\".";
+
+            return $"Error: '{gitUrl}' is not a supported evidence repository URL. Only https:// Git clone URLs are accepted — "
+                 + "SSH remotes, file:// paths and git transport helpers are rejected. "
+                 + "Ask the user for the https clone URL, or for a local path to an already-cloned copy.";
+        }
+
+        EvidenceContext context;
+        try
+        {
+            context = await EvidenceStore.AttachAsync(paths, gitUrl, gitRef, fileList, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            return $"Failed to attach evidence: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine(EvidenceStore.Describe(context));
+
+        var failed = context.Sources.Where(s => !s.IsResolved).ToList();
+        if (failed.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Tell the user which source(s) could not be resolved and ask for a corrected location before relying on the rest.");
+        }
+
+        if (!context.HasUsableEvidence)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Nothing was indexed, so no item can be decided from evidence. Continue with the manual review.");
+            return sb.ToString();
+        }
+
+        var pending = LoadPendingReviewIds();
+        sb.AppendLine();
+        sb.AppendLine("NEXT: read the relevant files yourself under the resolved paths above. For every item you can settle, call");
+        sb.AppendLine("  resolve_review(id=\"...\", decision=\"pass|fail|notapplicable\", notes=\"<what the files show>\", evidenceSource=\"<label>\", evidenceFiles=\"<paths you read>\")");
+        sb.AppendLine("then enrich_result for the same item. Cite only files you actually opened.");
+        sb.AppendLine("If the evidence is silent, partial or ambiguous for an item, leave it as NeedsReview and say so — never guess.");
+        if (pending.Count > 0)
+            sb.AppendLine("Items currently awaiting review: " + string.Join(", ", pending));
+        else
+            sb.AppendLine("No item is currently awaiting review in this run. Run 'evaluate' first, or attach evidence before the next run.");
+
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "evidence_manifest")]
+    [Description("Show the evidence currently attached to the active evaluation run: the resolved sources, the indexed file inventory by category, the key files, and the git signals read from any attached repository. Use to recover context in a later turn without re-cloning. Returns nothing useful until set_evidence_sources has been called for this run.")]
+    public static Task<string> EvidenceManifestAsync()
+    {
+        var context = EvidenceStore.Load();
+        if (context == null)
+            return Task.FromResult(
+                $"No evidence is attached to the run in {AuditOutputPaths.CurrentRunDirectory}. "
+                + "Call set_evidence_sources with a local folder path, a file path or an https Git URL first.");
+
+        return Task.FromResult(EvidenceStore.Describe(context));
+    }
+
+    private static List<string> SplitList(string? value)
+        => (value ?? string.Empty)
+            .Split(new[] { ',', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(v => v.Trim().Trim('"'))
+            .Where(v => v.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static List<string> LoadPendingReviewIds()
+    {
+        try
+        {
+            var path = Path.Combine(AuditOutputPaths.CurrentRunDirectory, "checklist_results.json");
+            if (!File.Exists(path)) return new List<string>();
+
+            var results = JsonSerializer.Deserialize<List<ChecklistResult>>(File.ReadAllText(path));
+            return results?
+                .Where(r => string.Equals(r.Outcome, ManualVerdict.NeedsReview, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r.Id)
+                .OrderBy(i => i, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+        }
+        catch { return new List<string>(); }
     }
 
     [McpServerTool(Name = "export_manual_csv")]

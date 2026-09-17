@@ -355,14 +355,50 @@
                                         <TextBox x:Name="FqdnText" />
 
                                         <TextBlock Text="Authentication" FontWeight="SemiBold" Margin="0,14,0,6" />
-                                        <ComboBox x:Name="AuthMethodCombo" Width="220" HorizontalAlignment="Left">
-                                            <ComboBoxItem IsSelected="True">Windows Authentication</ComboBoxItem>
-                                            <ComboBoxItem>SQL Login</ComboBoxItem>
-                                        </ComboBox>
-                                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                            <TextBox x:Name="SqlUserBox" Width="170" Visibility="Collapsed" />
-                                            <PasswordBox x:Name="SqlPassBox" Width="170" Margin="12,0,0,0" Visibility="Collapsed" />
+                                        <ComboBox x:Name="AuthMethodCombo" Width="260" HorizontalAlignment="Left" />
+
+                                        <StackPanel x:Name="AuthUserPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock x:Name="AuthUserLabel" Text="Username" Margin="0,0,0,4" />
+                                            <TextBox x:Name="SqlUserBox" />
                                         </StackPanel>
+                                        <StackPanel x:Name="AuthSecretPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock x:Name="AuthSecretLabel" Text="Password" Margin="0,0,0,4" />
+                                            <PasswordBox x:Name="SqlPassBox" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="AuthTenantPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                                            <TextBlock Text="Tenant ID (optional)" Margin="0,0,0,4" />
+                                            <TextBox x:Name="TenantIdBox" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="ConnectionStringPanel" Visibility="Collapsed" Margin="0,10,0,0">
+                                            <TextBlock Text="Connection String" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <Grid Width="352" HorizontalAlignment="Left">
+                                                <TextBox x:Name="ConnectionStringBox"
+                                                         TextWrapping="Wrap" AcceptsReturn="False" MaxLines="4" />
+                                                <!-- Watermark: shows the expected shape until the user types. -->
+                                                <TextBlock IsHitTestVisible="False" FontSize="11" Margin="8,6,8,0"
+                                                           VerticalAlignment="Top" TextTrimming="CharacterEllipsis"
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           Text="Server=myserver.database.windows.net;Database=Sales;User ID=auditor;Password=...">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Text, ElementName=ConnectionStringBox}" Value="">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </Grid>
+                                        </StackPanel>
+
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <CheckBox x:Name="EncryptCheck" Content="Encrypt" IsChecked="True" />
+                                            <CheckBox x:Name="TrustServerCertCheck" Content="Trust server certificate" Margin="18,0,0,0" IsChecked="True" />
+                                        </StackPanel>
+
+                                        <TextBlock x:Name="AuthHintText" Margin="0,10,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
 
                                         <TextBlock x:Name="AccessStatus" Text="" Margin="0,14,0,0" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                                         <StackPanel x:Name="DatabaseSelectorPanel" Visibility="Collapsed" Margin="0,14,0,0">
@@ -401,7 +437,37 @@
                                                 </Popup>
                                             </Grid>
                                         </StackPanel>
+
                                         <Button x:Name="VerifyBtn" Content="Verify Access" Style="{StaticResource ModernButton}" Width="170" Margin="0,18,0,0" HorizontalAlignment="Left" Click="VerifyBtn_Click" />
+
+                                        <!-- Evidence stays collapsed behind one button so the login card is not crowded. -->
+                                        <Button x:Name="ToggleEvidenceBtn" Content="Attach Evidence (optional)" Style="{StaticResource SecondaryButton}" Width="220" Margin="0,12,0,0" HorizontalAlignment="Left" Click="ToggleEvidenceBtn_Click"
+                                                ToolTip="Attach a repository, pipeline definitions or documentation so documentation and process checklist items are decided from artefacts instead of being queued for manual review." />
+
+                                        <Border x:Name="EvidencePanel" Visibility="Collapsed" Margin="0,12,0,0" Padding="16"
+                                                Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="12">
+                                            <StackPanel>
+                                                <TextBlock Text="Folders and files" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                                <UniformGrid Columns="3" Margin="0,0,0,14">
+                                                    <Button x:Name="AddEvidenceFolderBtn" Content="Add Folder" Style="{StaticResource SecondaryButton}" Height="38" Margin="0,0,6,0" Click="AddEvidenceFolderBtn_Click" />
+                                                    <Button x:Name="AddEvidenceFileBtn" Content="Add File(s)" Style="{StaticResource SecondaryButton}" Height="38" Margin="3,0,3,0" Click="AddEvidenceFileBtn_Click" />
+                                                    <Button x:Name="ClearEvidenceBtn" Content="Clear" Style="{StaticResource SecondaryButton}" Height="38" Margin="6,0,0,0" Click="ClearEvidenceBtn_Click" />
+                                                </UniformGrid>
+
+                                                <TextBlock Text="Git repository URL" FontWeight="SemiBold" Margin="0,0,0,2" />
+                                                <TextBlock Text="The clone URL, for example https://github.com/contoso/data-warehouse.git — https only, not the page URL from your browser. Private repositories authenticate from SQLAUDITOR_GIT_TOKEN; never paste a token here."
+                                                           TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6" />
+                                                <TextBox x:Name="EvidenceGitUrlBox" Height="34" TextChanged="EvidenceInput_Changed" />
+
+                                                <TextBlock Text="Branch or tag" FontWeight="SemiBold" Margin="0,12,0,2" />
+                                                <TextBlock Text="Example: main. Leave empty to use the repository default branch."
+                                                           TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6" />
+                                                <TextBox x:Name="EvidenceGitRefBox" Height="34" TextChanged="EvidenceInput_Changed" />
+
+                                                <Button x:Name="IndexEvidenceBtn" Content="Validate / Index Evidence" Style="{StaticResource ModernButton}" Height="38" Margin="0,16,0,0" HorizontalAlignment="Stretch" Click="IndexEvidenceBtn_Click" />
+                                                <TextBlock x:Name="EvidenceSummaryText" Text="No evidence attached." TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" />
+                                            </StackPanel>
+                                        </Border>
 
                                         <Border Background="#FFF2F7FC" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
                                                 CornerRadius="10" Padding="14,12" Margin="0,18,0,0">
@@ -801,6 +867,8 @@
 
                                         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Text="Action" FontWeight="Bold" FontSize="16" Margin="0,16,0,10" />
                                         <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button x:Name="OverrideEvidenceBtn" Content="Override" Style="{StaticResource SecondaryButton}" Width="120" Margin="0,0,10,0" Visibility="Collapsed" Click="OverrideEvidenceBtn_Click"
+                                                    ToolTip="Discard the AI verdict for this item and review it yourself." />
                                             <Button x:Name="SubmitBtn" Content="Submit" Style="{StaticResource ModernButton}" Width="120" Click="SubmitBtn_Click" />
                                         </StackPanel>
                                     </Grid>

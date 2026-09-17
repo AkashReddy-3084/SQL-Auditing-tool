@@ -38,6 +38,12 @@ namespace SQLAuditor.Wpf
             public string? SelectedOutcome { get; set; }
             public bool IsSubmitted { get; set; }
 
+            // Set when the verdict came from attached evidence rather than from the reviewer. The
+            // item stays in the queue so it can be inspected and overridden.
+            public string? EvidenceSummary { get; set; }
+
+            public bool IsEvidenceResolved => !string.IsNullOrWhiteSpace(EvidenceSummary);
+
             // The enriched result for the submitted outcome+remarks, so re-persisting after
             // the engine's placeholder write never repeats the LLM call.
             public SQLAuditor.Lib.ChecklistResult? EnrichedResult { get; set; }
@@ -89,6 +95,10 @@ namespace SQLAuditor.Wpf
         private readonly System.Collections.Generic.List<System.Windows.Controls.CheckBox> _databaseOptionCheckBoxes = new();
         private System.Windows.Controls.CheckBox? _allDatabasesCheckBox;
         private bool _suppressDatabaseSelectionSync = false;
+        // Evidence artefacts the user attached: folders/files chosen here, and the indexed context.
+        private readonly System.Collections.Generic.List<string> _evidenceFolders = new();
+        private readonly System.Collections.Generic.List<string> _evidenceFiles = new();
+        private SQLAuditor.Lib.EvidenceContext? _evidenceContext;
         private int _sqlConnectionInputsVersion = 0;
         private bool _isVerifyingSql = false;
         // True while the Summary page is showing a reused run rather than one evaluated in this session.
@@ -137,24 +147,30 @@ namespace SQLAuditor.Wpf
             _servers.CollectionChanged += (s, e) => UpdateServerListSummary();
             UpdateServerListSummary();
             // wire auth selection UI
+            foreach (var method in SqlAuthProfile.AllMethods)
+            {
+                AuthMethodCombo.Items.Add(new System.Windows.Controls.ComboBoxItem
+                {
+                    Content = SqlAuthProfile.DisplayNameFor(method),
+                    Tag = method,
+                });
+            }
+            AuthMethodCombo.SelectedIndex = 0;
             AuthMethodCombo.SelectionChanged += (s, e) =>
             {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                if (sel == "SQL Login")
-                {
-                    SqlUserBox.Visibility = Visibility.Visible;
-                    SqlPassBox.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    SqlUserBox.Visibility = Visibility.Collapsed;
-                    SqlPassBox.Visibility = Visibility.Collapsed;
-                }
+                ApplyAuthMode();
                 InvalidateSqlVerification();
             };
+            ApplyAuthMode();
             FqdnText.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
+            TenantIdBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            ConnectionStringBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            EncryptCheck.Checked += (s, e) => InvalidateSqlVerification();
+            EncryptCheck.Unchecked += (s, e) => InvalidateSqlVerification();
+            TrustServerCertCheck.Checked += (s, e) => InvalidateSqlVerification();
+            TrustServerCertCheck.Unchecked += (s, e) => InvalidateSqlVerification();
             Log("Ready — enter SQL FQDN and click Verify Access.");
             // Start UI on Login tab (main window). Navigation via tab headers is disabled; use buttons to progress.
             MainTabs.SelectedIndex = 0;
@@ -581,13 +597,20 @@ namespace SQLAuditor.Wpf
                 label = $"{fqdn} #{copy++}";
             }
 
-            var isSqlLogin = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var isSqlLogin = SelectedAuthMethod == SqlAuthMethod.SqlLogin;
 
-            if (isSqlLogin && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            if (!TryValidateAuthInputs(out var authError))
             {
-                MessageBox.Show(this, "SQL Login needs both a username and a password.", "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, authError, "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (!isSqlLogin && SelectedAuthMethod != SqlAuthMethod.WindowsIntegrated)
+            {
+                MessageBox.Show(this,
+                    "Multi-server runs support Windows Authentication and SQL Login only. "
+                    + "Audit Microsoft Entra targets one at a time.",
+                    "Authentication Not Supported", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
@@ -1229,6 +1252,8 @@ namespace SQLAuditor.Wpf
                 var idsForRun = selected.Count == 0 ? null : selected;
                 var useHistorical = UseHistoricalManualResults;
                 _auditor!.LastRunInputs = BuildRunInputs();
+                SQLAuditor.Lib.Auditor.ClearProviderFault();
+                await EnsureEvidenceIndexedAsync();
                 if (useHistorical)
                 {
                     Log($"Reusing manual results from last runs for {_copiedManualIds.Count} selected item(s); manual review is skipped for them.");
@@ -1239,13 +1264,18 @@ namespace SQLAuditor.Wpf
                 // then left the shared connection broken and every remaining script item came
                 // back as a SQL error, which the outcome mapper scores as Fail.
                 var results = await Task.Run(
-                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases, reuseActiveRunDirectory: reuseFolder),
+                    () => _auditor!.RunChecklistAsync(progress, RequestUserInput, idsForRun, token, useHistorical, generateReports: true, targetDatabases: targetDatabases, reuseActiveRunDirectory: reuseFolder, evidenceContext: _evidenceContext),
                     token);
+
+                // Saved here because the evidence is indexed before this run's directory exists.
+                if (_evidenceContext != null) SQLAuditor.Lib.EvidenceStore.Save(_evidenceContext);
+                ReportProviderFault();
                 // The engine's final write persists manual items as "Evaluating" placeholders,
                 // which can overwrite Pass/Fail decisions made while evaluation was still running.
                 // Re-apply submitted manual outcomes, then refresh the report/summary from the merged file.
                 await ReapplySubmittedManualResultsAsync();
                 RegenerateReportFromPersisted();
+                RegisterEvidenceResolvedItems(results);
                 UpdateEvaluationProgressDisplay();
                 LogPlatformSummary();
                 Log($"Evaluation complete. {results.Length} items evaluated. Results in results/ folder.");
@@ -1325,7 +1355,13 @@ namespace SQLAuditor.Wpf
                     MessageBox.Show("Select at least one database before evaluation.", "Database Selection Required", MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
-                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases);
+                SQLAuditor.Lib.Auditor.ClearProviderFault();
+                await EnsureEvidenceIndexedAsync();
+                var results = await _auditor!.RunChecklistAsync(progress, RequestUserInput, null, _evaluationCts.Token, useHistoricalManualResults: false, generateReports: true, targetDatabases: targetDatabases, evidenceContext: _evidenceContext);
+                // Saved here because the evidence is indexed before this run's directory exists.
+                if (_evidenceContext != null) SQLAuditor.Lib.EvidenceStore.Save(_evidenceContext);
+                ReportProviderFault();
+                RegisterEvidenceResolvedItems(results);
                 UpdateEvaluationProgressDisplay();
                 LogPlatformSummary();
                 Log($"Completed evaluation of {results.Length} checklist items. Results in results/ folder.");
@@ -1389,7 +1425,7 @@ namespace SQLAuditor.Wpf
 
             if (_evalStatusMap != null)
             {
-                _evalStatusMap[item.Id] = (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed", "AI-Manual");
+                _evalStatusMap[item.Id] = (NormalizeUiStatus(state.SelectedOutcome ?? string.Empty, "AI-Manual"), "AI-Manual");
             }
 
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
@@ -1397,32 +1433,10 @@ namespace SQLAuditor.Wpf
             Log($"Submitted manual evaluation for {item.Id} as {state.SelectedOutcome}.");
         }
 
-        // Reads the leading Pass/Fail verdict from the reviewer's evidence text; falls back to an
-        // unambiguous verdict word elsewhere in the text.
+        // Reads the verdict the reviewer led their evidence with. Scanning the whole sentence is
+        // deliberately not done: "no failover test evidence" must not resolve to Fail.
         private static string? ParseManualDecision(string? text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return null;
-
-            var leading = System.Text.RegularExpressions.Regex.Match(
-                text,
-                @"^\s*(?<decision>pass(?:ed)?|fail(?:ed)?)\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (leading.Success)
-            {
-                return leading.Groups["decision"].Value.StartsWith("p", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
-            }
-
-            var hasPass = System.Text.RegularExpressions.Regex.IsMatch(
-                text, @"\bpass(?:ed)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            var hasFail = System.Text.RegularExpressions.Regex.IsMatch(
-                text, @"\bfail(?:ed|ure)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (hasPass ^ hasFail)
-            {
-                return hasPass ? "Pass" : "Fail";
-            }
-
-            return null;
-        }
+            => SQLAuditor.Lib.ManualVerdict.TryParse(text);
 
         private void PrevManualBtn_Click(object sender, RoutedEventArgs e)
         {
@@ -1456,14 +1470,121 @@ namespace SQLAuditor.Wpf
             }
             var it = _manualQueue[_manualIndex];
             var state = EnsureManualState(it.Id);
-            ManualTitle.Text = _serverUiStates.Count > 1 && _selectedServerKey != null
-                ? $"Manual evaluation for {it.Id}  —  {_selectedServerKey}"
-                : $"Manual evaluation for {it.Id}";
-            ManualStepsText.Text = ToPlainText(state.Instructions);
+            // In a fleet run the same item id appears once per server, so the title has to name it.
+            var serverSuffix = _serverUiStates.Count > 1 && _selectedServerKey != null
+                ? $"  —  {_selectedServerKey}"
+                : string.Empty;
+            ManualTitle.Text = state.IsEvidenceResolved
+                ? $"AI-resolved from evidence — {it.Id}{serverSuffix}"
+                : $"Manual evaluation for {it.Id}{serverSuffix}";
+            ManualStepsText.Text = state.IsEvidenceResolved
+                ? ToPlainText(state.EvidenceSummary)
+                : ToPlainText(state.Instructions);
             _isHydratingManualUi = true;
             ManualOutputBox.Text = state.Remarks;
             _isHydratingManualUi = false;
             UpdateManualActionButtonStates(state.SelectedOutcome, state.IsSubmitted);
+        }
+
+        // Items the evidence analyzer decided never pass through requestUserInput, so they are added
+        // to the queue after the run - visible, attributed, and overridable rather than silently gone.
+        private void RegisterEvidenceResolvedItems(System.Collections.Generic.IEnumerable<SQLAuditor.Lib.ChecklistResult> results)
+        {
+            if (_evalItemMap == null) return;
+
+            var registered = 0;
+            foreach (var result in results)
+            {
+                if (!SQLAuditor.Lib.EvidenceAttribution.IsEvidenceDerived(result.Evidence)) continue;
+                if (!_evalItemMap.TryGetValue(result.Id, out var entry)) continue;
+
+                InsertManualQueueItem(entry.Item);
+                var state = EnsureManualState(result.Id);
+                state.EvidenceSummary = BuildEvidenceSummary(result);
+                state.SelectedOutcome = result.Outcome;
+                state.IsSubmitted = true;
+                state.Remarks = string.Empty;
+                registered++;
+            }
+
+            if (registered == 0) return;
+
+            if (_manualIndex < 0) _manualIndex = 0;
+            Log($"{registered} item(s) were resolved from the attached evidence. They are listed under Manual steps with their cited files - use Override to replace any verdict with your own.");
+            ShowManualAtIndex();
+        }
+
+        private static string BuildEvidenceSummary(SQLAuditor.Lib.ChecklistResult result)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("Checklist: ").Append(result.Id).Append(" - ").AppendLine(result.Description);
+            sb.Append("Verdict recorded from evidence: ").AppendLine(result.Outcome);
+            sb.AppendLine();
+            sb.AppendLine("This item was NOT reviewed by a person. It was decided by reading the artefacts you attached.");
+            sb.AppendLine("Check the cited files below. If you disagree, click Override and record your own verdict.");
+            sb.AppendLine();
+            if (!string.IsNullOrWhiteSpace(result.Finding))
+            {
+                sb.AppendLine("## Finding");
+                sb.AppendLine(result.Finding.Trim());
+                sb.AppendLine();
+            }
+            if (!string.IsNullOrWhiteSpace(result.Evidence))
+            {
+                sb.AppendLine("## Evidence and cited files");
+                sb.AppendLine(result.Evidence.Trim());
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        private async void OverrideEvidenceBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var item = GetCurrentManualItem();
+            if (item == null) return;
+
+            var state = EnsureManualState(item.Id);
+            if (!state.IsEvidenceResolved) return;
+
+            if (MessageBox.Show(
+                    $"Discard the AI verdict for {item.Id} and review it yourself?",
+                    "Override AI Verdict",
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+
+            // The reviewer needs the real verification steps, which were never generated for an
+            // item the evidence settled.
+            if (string.IsNullOrWhiteSpace(state.Instructions) && _auditor != null)
+            {
+                OverrideEvidenceBtn.IsEnabled = false;
+                try
+                {
+                    state.Instructions = await _auditor.GenerateManualInstructionsAsync(item);
+                    if (_manualInstructions != null) _manualInstructions[item.Id] = state.Instructions;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Could not generate manual steps for {item.Id}: {ex.Message}");
+                }
+                finally
+                {
+                    OverrideEvidenceBtn.IsEnabled = true;
+                }
+            }
+
+            state.EvidenceSummary = null;
+            state.IsSubmitted = false;
+            state.SelectedOutcome = null;
+            state.Remarks = string.Empty;
+            state.EnrichedResult = null;
+            state.EnrichedKey = null;
+
+            if (_evalStatusMap != null)
+                _evalStatusMap[item.Id] = ("Pending Manual Evaluation", "AI-Manual");
+
+            ShowManualAtIndex();
+            RenderEvaluationTree();
+            Log($"AI verdict for {item.Id} discarded. Enter your own decision and submit.");
         }
 
         // ManualStepsText is a TextBlock, so Markdown from the model would otherwise render as literal characters.
@@ -1997,14 +2118,8 @@ namespace SQLAuditor.Wpf
         }
 
         private string EvaluateManualOutcome(string response)
-        {
-            if (string.IsNullOrWhiteSpace(response)) return "NeedsReview";
-            if (string.Equals(response, "PASS", StringComparison.OrdinalIgnoreCase)) return "Pass";
-            if (string.Equals(response, "FAIL", StringComparison.OrdinalIgnoreCase)) return "Fail";
-            if (response.IndexOf("pass", StringComparison.OrdinalIgnoreCase) >= 0) return "Pass";
-            if (response.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0) return "Fail";
-            return "NeedsReview";
-        }
+            => SQLAuditor.Lib.ManualVerdict.Normalize(response)
+               ?? SQLAuditor.Lib.ManualVerdict.Parse(response);
 
         private async Task ApplyDeferredManualDecisionAsync(string response)
         {
@@ -2023,7 +2138,7 @@ namespace SQLAuditor.Wpf
                 state.SelectedOutcome = outcome;
                 state.IsSubmitted = true;
 
-                var status = string.Equals(outcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Passed" : "Failed";
+                var status = NormalizeUiStatus(outcome, "AI-Manual");
                 if (_evalStatusMap != null)
                 {
                     _evalStatusMap[item.Id] = (status, "AI-Manual");
@@ -2134,7 +2249,11 @@ namespace SQLAuditor.Wpf
             ManualEvaluationState state,
             bool forceWrite = false)
         {
-            var outcome = string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase) ? "Pass" : "Fail";
+            // The reviewer's verdict is authoritative. Collapsing it to Pass/Fail here is what
+            // silently filed Not Applicable decisions as control gaps.
+            var outcome = SQLAuditor.Lib.ManualVerdict.Normalize(state.SelectedOutcome)
+                ?? SQLAuditor.Lib.ManualVerdict.NeedsReview;
+            var isNotApplicable = SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(outcome);
             var key = outcome + "\u0001" + state.Remarks;
 
             await _manualPersistLock.WaitAsync();
@@ -2147,16 +2266,22 @@ namespace SQLAuditor.Wpf
                 }
                 else
                 {
-                    if (_auditor != null)
+                    // A Not Applicable item is outside the scored population, so no AI wording is
+                    // authored for it - the reviewer's justification is the evidence of record.
+                    if (_auditor != null && !isNotApplicable)
                     {
                         Log($"Reviewing manual evidence for {item.Id}...");
                         updated = await _auditor.BuildManualResultAsync(item, outcome, state.Instructions, state.Remarks);
                     }
                     else
                     {
-                        var evidence = $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
-                        updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(
-                            new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual"));
+                        var evidence = isNotApplicable
+                            ? $"{SQLAuditor.Lib.NotApplicableEvidence.Marker}. {state.Remarks}"
+                            : $"Manual Steps:\n{state.Instructions}\n\nOperator Remarks:\n{state.Remarks}\n\nSelected Outcome:\n{outcome}";
+                        var seed = new SQLAuditor.Lib.ChecklistResult(item.Id, item.Description, item.Verification, outcome, evidence, item.ScriptFile, "AI-Manual");
+                        if (isNotApplicable)
+                            seed = seed with { NotApplicable = true, NotApplicableJustification = state.Remarks };
+                        updated = SQLAuditor.Lib.ChecklistResultEnricher.Enrich(seed);
                     }
 
                     state.EnrichedResult = updated;
@@ -2206,8 +2331,10 @@ namespace SQLAuditor.Wpf
             {
                 if (_manualStateMap.TryGetValue(item.Id, out var state)
                     && state.IsSubmitted
-                    && (string.Equals(state.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
-                     || string.Equals(state.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase)))
+                    // An evidence-derived result already carries its attribution; rebuilding it
+                    // here would overwrite the cited files with reviewer-shaped wording.
+                    && !state.IsEvidenceResolved
+                    && SQLAuditor.Lib.ManualVerdict.IsDecided(state.SelectedOutcome))
                 {
                     await PersistManualResultAsync(item, state, forceWrite: true);
                 }
@@ -2270,13 +2397,22 @@ namespace SQLAuditor.Wpf
                 return;
             }
 
-            var isEnabled = IsCurrentManualReadyForInput();
+            var item = GetCurrentManualItem();
+            var state = item == null ? null : EnsureManualState(item.Id);
+            var isEvidenceResolved = state?.IsEvidenceResolved == true;
+
+            if (OverrideEvidenceBtn != null)
+                OverrideEvidenceBtn.Visibility = isEvidenceResolved ? Visibility.Visible : Visibility.Collapsed;
+
+            // While the AI verdict stands there is nothing for the reviewer to submit; Override
+            // is the way back into the normal manual flow.
+            var isEnabled = IsCurrentManualReadyForInput() && !isEvidenceResolved;
             SubmitBtn.IsEnabled = isEnabled;
             ManualOutputBox.IsEnabled = isEnabled;
 
             SubmitBtn.Opacity = isSubmitted ? 1.0 : 0.85;
             SubmitBtn.BorderThickness = isSubmitted ? new Thickness(3) : new Thickness(1);
-            SubmitBtn.Content = isSubmitted ? "Submitted" : "Submit";
+            SubmitBtn.Content = isEvidenceResolved ? "AI-resolved" : (isSubmitted ? "Submitted" : "Submit");
         }
 
         private bool IsCurrentManualReadyForInput()
@@ -2338,7 +2474,8 @@ namespace SQLAuditor.Wpf
                 }
 
                 var isDecided = string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase);
+                    || string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "Not Applicable", StringComparison.OrdinalIgnoreCase);
 
                 if (string.Equals(technique, "AI-Manual", StringComparison.OrdinalIgnoreCase)
                     && !_copiedManualIds.Contains(item.Id)
@@ -2353,10 +2490,9 @@ namespace SQLAuditor.Wpf
                         continue;
                     }
 
-                    if (!string.Equals(manualState.SelectedOutcome, "Pass", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(manualState.SelectedOutcome, "Fail", StringComparison.OrdinalIgnoreCase))
+                    if (!SQLAuditor.Lib.ManualVerdict.IsDecided(manualState.SelectedOutcome))
                     {
-                        messages.Add($"{item.Id}: enter Pass or Fail with the reason and submit.");
+                        messages.Add($"{item.Id}: enter Pass, Fail or Not Applicable with the reason and submit.");
                         continue;
                     }
 
@@ -2366,8 +2502,7 @@ namespace SQLAuditor.Wpf
                         continue;
                     }
 
-                    if (!string.Equals(status, "Passed", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+                    if (!isDecided)
                     {
                         messages.Add($"{item.Id}: current status is '{status}'.");
                     }
@@ -2541,12 +2676,13 @@ namespace SQLAuditor.Wpf
             _resumeDatabases = meta.Databases?.ToList();
             _resumeSelectedItemIds = meta.SelectedItemIds?.ToList();
 
-            var isSqlAuth = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(meta.AuthMethod, "SQL", StringComparison.OrdinalIgnoreCase);
+            var storedMode = SqlAuthProfile.FromDisplayName(meta.AuthMethod);
 
             if (!string.IsNullOrWhiteSpace(meta.Fqdn)) FqdnText.Text = meta.Fqdn;
-            SelectAuthMethod(isSqlAuth);
-            SqlUserBox.Text = isSqlAuth ? (meta.SqlUser ?? string.Empty) : string.Empty;
+            SelectAuthMethod(storedMode);
+            SqlUserBox.Text = storedMode == SqlAuthMethod.SqlLogin
+                ? (meta.SqlUser ?? string.Empty)
+                : (meta.ClientId ?? string.Empty);
             SqlPassBox.Password = string.Empty;
             if (!string.IsNullOrWhiteSpace(meta.LlmBaseUrl)) LlmBaseUrlText.Text = meta.LlmBaseUrl;
             if (!string.IsNullOrWhiteSpace(meta.LlmModel)) LlmModelText.Text = meta.LlmModel;
@@ -2573,7 +2709,52 @@ namespace SQLAuditor.Wpf
                 MessageBoxImage.Information);
         }
 
-        private void SelectAuthMethod(bool sqlLogin) => AuthMethodCombo.SelectedIndex = sqlLogin ? 1 : 0;
+        // Validates that every credential the selected method needs has been supplied.
+        private bool TryValidateAuthInputs(out string error)
+        {
+            error = string.Empty;
+            var mode = SelectedAuthMethod;
+
+            if (mode == SqlAuthMethod.ConnectionString)
+            {
+                if (!SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out _, out var parseError))
+                {
+                    error = parseError;
+                    return false;
+                }
+                return true;
+            }
+
+            if (mode == SqlAuthMethod.SqlLogin
+                && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            {
+                error = "SQL Login needs both a username and a password.";
+                return false;
+            }
+
+            if (mode == SqlAuthMethod.EntraServicePrincipal)
+            {
+                if (string.IsNullOrWhiteSpace(SqlUserBox.Text))
+                {
+                    error = "Microsoft Entra Service Principal needs an application (client) ID.";
+                    return false;
+                }
+                if (string.IsNullOrEmpty(SqlPassBox.Password))
+                {
+                    error = "Microsoft Entra Service Principal needs a client secret in the password box.";
+                    return false;
+                }
+            }
+
+            if (mode == SqlAuthMethod.WindowsIntegrated && SqlAuthProfile.IsAzureSqlEndpoint(FqdnText.Text))
+            {
+                error = "Windows Authentication cannot be used against an Azure SQL endpoint. "
+                      + "Choose SQL Login or one of the Microsoft Entra methods.";
+                return false;
+            }
+
+            return true;
+        }
 
         // The SQL password stays editable (it is never stored and must be re-entered for SQL auth).
         private void SetServerInputsLocked(bool locked)
@@ -2600,14 +2781,14 @@ namespace SQLAuditor.Wpf
         // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
         private SQLAuditor.Lib.RunInputs BuildRunInputs()
         {
-            var isSqlAuth = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var mode = SelectedAuthMethod;
+            var identity = string.IsNullOrWhiteSpace(SqlUserBox.Text) ? null : SqlUserBox.Text.Trim();
             return new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = string.IsNullOrWhiteSpace(FqdnText.Text) ? null : FqdnText.Text.Trim(),
-                AuthMethod = isSqlAuth ? "SQL Login" : "Windows Authentication",
-                SqlUser = isSqlAuth && !string.IsNullOrWhiteSpace(SqlUserBox.Text) ? SqlUserBox.Text.Trim() : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(mode),
+                SqlUser = mode == SqlAuthMethod.SqlLogin ? identity : null,
+                ClientId = mode is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity ? identity : null,
                 LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrlText.Text) ? null : LlmBaseUrlText.Text.Trim(),
                 LlmModel = string.IsNullOrWhiteSpace(LlmModelText.Text) ? null : LlmModelText.Text.Trim(),
             };
@@ -2691,33 +2872,105 @@ namespace SQLAuditor.Wpf
             HandleExitNavigation();
         }
 
+        private SqlAuthMethod SelectedAuthMethod =>
+            (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag is SqlAuthMethod m
+                ? m
+                : SqlAuthMethod.WindowsIntegrated;
+
+        // Selects by Tag rather than index, so the combo order is free to change.
+        private void SelectAuthMethod(SqlAuthMethod method)
+        {
+            foreach (var item in AuthMethodCombo.Items)
+            {
+                if (item is System.Windows.Controls.ComboBoxItem combo && combo.Tag is SqlAuthMethod m && m == method)
+                {
+                    AuthMethodCombo.SelectedItem = combo;
+                    return;
+                }
+            }
+        }
+
+        // Shows only the credential fields the selected method actually uses.
+        private void ApplyAuthMode()
+        {
+            var method = SelectedAuthMethod;
+            var isEntra = SqlAuthProfile.IsEntraMethod(method);
+            var isConnectionString = method == SqlAuthMethod.ConnectionString;
+
+            var showUser = method is not (SqlAuthMethod.WindowsIntegrated or SqlAuthMethod.ConnectionString);
+            var showSecret = method is SqlAuthMethod.SqlLogin or SqlAuthMethod.EntraServicePrincipal;
+
+            AuthUserPanel.Visibility = showUser ? Visibility.Visible : Visibility.Collapsed;
+            AuthSecretPanel.Visibility = showSecret ? Visibility.Visible : Visibility.Collapsed;
+            AuthTenantPanel.Visibility = isEntra ? Visibility.Visible : Visibility.Collapsed;
+            ConnectionStringPanel.Visibility = isConnectionString ? Visibility.Visible : Visibility.Collapsed;
+
+            // The server name comes out of the connection string itself.
+            FqdnText.IsEnabled = !isConnectionString;
+
+            AuthUserLabel.Text = SqlAuthProfile.UserIdLabelFor(method);
+            AuthSecretLabel.Text = SqlAuthProfile.SecretLabelFor(method);
+
+            if (!showUser) SqlUserBox.Text = string.Empty;
+            if (!showSecret) SqlPassBox.Password = string.Empty;
+            if (!isEntra) TenantIdBox.Text = string.Empty;
+            if (!isConnectionString) ConnectionStringBox.Text = string.Empty;
+
+            // A supplied connection string carries its own transport settings, so the tool
+            // must not appear to override them.
+            EncryptCheck.IsEnabled = !isConnectionString;
+            TrustServerCertCheck.IsEnabled = !isConnectionString;
+
+            // Handing an Entra token to an unverified server defeats the point of the token.
+            EncryptCheck.IsChecked = true;
+            TrustServerCertCheck.IsChecked = !isEntra && !SqlAuthProfile.IsAzureSqlEndpoint(FqdnText.Text);
+
+            var hint = method switch
+            {
+                SqlAuthMethod.EntraInteractive => "A browser window will open for sign-in, including MFA.",
+                SqlAuthMethod.EntraManagedIdentity => "Uses the managed identity of the machine this app runs on.",
+                SqlAuthMethod.EntraServicePrincipal => "Enter the app's client ID above, and its client secret in the password box.",
+                SqlAuthMethod.ConnectionString => "Paste the full connection string for your server \u2014 the same one an application would use. "
+                                               + "Your own settings are kept as typed. Leave out Database to start from master. "
+                                               + "It is used for this run only and is never saved.",
+                SqlAuthMethod.WindowsIntegrated => "Uses your current Windows account. This does not work with Azure SQL \u2014 pick SQL Login or a Microsoft Entra option for those.",
+                _ => string.Empty,
+            };
+            AuthHintText.Text = hint;
+            AuthHintText.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private SqlAuthProfile BuildAuthProfile(string fqdn)
+        {
+            if (SelectedAuthMethod == SqlAuthMethod.ConnectionString
+                && SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out var parsed, out _))
+            {
+                return parsed;
+            }
+
+            return new SqlAuthProfile
+            {
+                Method = SelectedAuthMethod,
+                Server = fqdn,
+                Database = "master",
+                UserId = AuthUserPanel.Visibility == Visibility.Visible ? SqlUserBox.Text?.Trim() : null,
+                Secret = AuthSecretPanel.Visibility == Visibility.Visible ? SqlPassBox.Password : null,
+                TenantId = AuthTenantPanel.Visibility == Visibility.Visible ? TenantIdBox.Text?.Trim() : null,
+                Encrypt = EncryptCheck.IsChecked == true,
+                TrustServerCertificate = TrustServerCertCheck.IsChecked == true,
+            };
+        }
+
         private async Task EnsureAuditor(string fqdn)
         {
             if (_auditor != null) return;
 
-            // Build connection string according to auth selection
-            string cs;
-            try
-            {
-                var sel = (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Windows Authentication";
-                sel = sel.Trim();
-                if (string.Equals(sel, "SQL Login", StringComparison.OrdinalIgnoreCase))
-                {
-                    var user = SqlUserBox.Text ?? "";
-                    var pass = SqlPassBox.Password ?? "";
-                    cs = $"Server={fqdn};Database=master;User Id={user};Password={pass};TrustServerCertificate=true;";
-                }
-                else
-                {
-                    // default to Windows Authentication
-                    cs = $"Server={fqdn};Database=master;Integrated Security=true;TrustServerCertificate=true;";
-                }
-            }
-            catch
-            {
-                cs = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
-            }
-            _auditor = new Auditor(cs);
+            var profile = BuildAuthProfile(fqdn);
+            var validationError = profile.Validate();
+            if (validationError != null) throw new InvalidOperationException(validationError);
+
+            _auditor = new Auditor(profile);
+            Log($"Connecting to {fqdn} using {profile.Describe()}.");
             // Attempt to normalize the connection (try common server variants) so UI verification and later runs use a working connection string
             try
             {
@@ -2904,6 +3157,216 @@ namespace SQLAuditor.Wpf
                 .ToArray();
         }
 
+        // ---- Evidence sources: repositories, pipelines and documents attached to the run ----
+
+        private void AddEvidenceFolderBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "Select an evidence folder (a cloned repository, or a documentation folder)",
+                Multiselect = true,
+            };
+            if (dialog.ShowDialog(this) != true) return;
+
+            foreach (var folder in dialog.FolderNames)
+            {
+                if (!_evidenceFolders.Contains(folder, StringComparer.OrdinalIgnoreCase))
+                    _evidenceFolders.Add(folder);
+            }
+            _evidenceContext = null;
+            UpdateEvidenceSummary();
+        }
+
+        private void AddEvidenceFileBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select evidence file(s) (a pipeline definition, a runbook, a policy document)",
+                Multiselect = true,
+            };
+            if (dialog.ShowDialog(this) != true) return;
+
+            foreach (var file in dialog.FileNames)
+            {
+                if (!_evidenceFiles.Contains(file, StringComparer.OrdinalIgnoreCase))
+                    _evidenceFiles.Add(file);
+            }
+            _evidenceContext = null;
+            UpdateEvidenceSummary();
+        }
+
+        private void ClearEvidenceBtn_Click(object sender, RoutedEventArgs e)
+        {
+            _evidenceFolders.Clear();
+            _evidenceFiles.Clear();
+            _evidenceContext = null;
+            EvidenceGitUrlBox.Text = string.Empty;
+            EvidenceGitRefBox.Text = string.Empty;
+            UpdateEvidenceSummary();
+        }
+
+        private void ToggleEvidenceBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var show = EvidencePanel.Visibility != Visibility.Visible;
+            EvidencePanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            ToggleEvidenceBtn.Content = show ? "Hide Evidence" : "Attach Evidence (optional)";
+            if (show) UpdateEvidenceSummary();
+        }
+
+        private void EvidenceInput_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            // A changed URL invalidates the previously indexed workspace.
+            _evidenceContext = null;
+            UpdateEvidenceSummary();
+        }
+
+        private async void IndexEvidenceBtn_Click(object sender, RoutedEventArgs e)
+        {
+            var gitUrl = (EvidenceGitUrlBox.Text ?? string.Empty).Trim();
+            if (_evidenceFolders.Count == 0 && _evidenceFiles.Count == 0 && gitUrl.Length == 0)
+            {
+                MessageBox.Show(this, "Add a folder, a file or a Git repository URL before indexing.", "Evidence", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            await IndexEvidenceAsync(showSummaryDialog: true);
+        }
+
+        /// <summary>
+        /// A permanent provider fault (expired key, wrong model) silently disables every AI-backed
+        /// step, so it has to be said out loud rather than left in the diagnostics log.
+        /// </summary>
+        private void ReportProviderFault()
+        {
+            var fault = SQLAuditor.Lib.Auditor.ProviderFault;
+            if (string.IsNullOrWhiteSpace(fault)) return;
+
+            Log("AI provider unavailable for this run: " + fault);
+            MessageBox.Show(this,
+                "The AI provider rejected this run, so evidence review and AI wording were disabled and "
+                + "every documentation item was left for manual review.\n\n"
+                + fault
+                + "\n\nFix the provider configuration (commonly an expired or invalid API key) and run the evaluation again.",
+                "AI provider unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        /// <summary>
+        /// Indexes evidence the user supplied but never indexed by hand. Without this, typing a Git
+        /// URL and pressing Evaluate silently ran the audit with no evidence at all.
+        /// </summary>
+        private async Task EnsureEvidenceIndexedAsync()
+        {
+            if (_evidenceContext != null) return;
+
+            var gitUrl = (EvidenceGitUrlBox.Text ?? string.Empty).Trim();
+            if (_evidenceFolders.Count == 0 && _evidenceFiles.Count == 0 && gitUrl.Length == 0) return;
+
+            Log("Evidence was supplied but not indexed; indexing it now before the evaluation starts.");
+            await IndexEvidenceAsync(showSummaryDialog: false);
+
+            if (_evidenceContext is not { HasUsableEvidence: true })
+            {
+                MessageBox.Show(this,
+                    "The evidence you supplied could not be read, so the documentation items will be left for manual review.\n\n"
+                    + "Check the Evidence panel for the reason, fix it, and re-run if you want those items decided from the evidence.",
+                    "Evidence", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private async Task IndexEvidenceAsync(bool showSummaryDialog)
+        {
+            var gitUrl = (EvidenceGitUrlBox.Text ?? string.Empty).Trim();
+
+            if (gitUrl.Length > 0)
+            {
+                // Pasting the branch page from a browser is the common mistake; name the clone URL
+                // and the branch to enter rather than letting git fail later.
+                if (SQLAuditor.Lib.EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                {
+                    MessageBox.Show(this,
+                        SQLAuditor.Lib.EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse),
+                        "Evidence", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                if (!SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+                {
+                    MessageBox.Show(this,
+                        "Only https:// Git clone URLs are supported. SSH remotes and file:// paths are rejected.\n\n"
+                        + "For a private repository, set SQLAUDITOR_GIT_TOKEN in the environment before launching this app — never paste a token into the URL.",
+                        "Evidence", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+
+            IndexEvidenceBtn.IsEnabled = false;
+            EvidenceSummaryText.Text = "Resolving and indexing evidence...";
+            try
+            {
+                _evidenceContext = await SQLAuditor.Lib.EvidenceStore.AttachAsync(
+                    _evidenceFolders, gitUrl.Length == 0 ? null : gitUrl,
+                    (EvidenceGitRefBox.Text ?? string.Empty).Trim(), _evidenceFiles,
+                    persist: false);
+
+                UpdateEvidenceSummary();
+                Log($"Evidence indexed: {_evidenceContext.Manifest.Files.Count} file(s) across {_evidenceContext.Sources.Count(s => s.IsResolved)} source(s).");
+                foreach (var failed in _evidenceContext.Sources.Where(s => !s.IsResolved))
+                    Log($"Evidence source could not be read: {failed.Location} — {failed.Error}");
+
+                if (showSummaryDialog) ShowEvidenceSummaryDialog(_evidenceContext);
+            }
+            catch (Exception ex)
+            {
+                _evidenceContext = null;
+                EvidenceSummaryText.Text = "Indexing failed.";
+                Log("Failed to index evidence: " + ex.Message);
+                MessageBox.Show(this, "Could not index the evidence:\n\n" + ex.Message, "Evidence", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                IndexEvidenceBtn.IsEnabled = true;
+            }
+        }
+
+        private void ShowEvidenceSummaryDialog(SQLAuditor.Lib.EvidenceContext context)
+        {
+            var resolved = context.Sources.Count(s => s.IsResolved);
+            var failed = context.Sources.Count(s => !s.IsResolved);
+
+            var headline = context.HasUsableEvidence
+                ? $"{context.Manifest.Files.Count} file(s) indexed from {resolved} source(s)"
+                : "No evidence was indexed";
+            var subhead = context.HasUsableEvidence
+                ? "Documentation and process checklist items will be decided from these artefacts. Anything they cannot settle is still queued for manual review."
+                : "Nothing could be read, so every documentation item will be queued for manual review.";
+            if (failed > 0)
+                subhead += $" {failed} source(s) could not be resolved — see the detail below.";
+
+            new EvidenceSummaryWindow(headline, subhead, SQLAuditor.Lib.EvidenceStore.Describe(context)) { Owner = this }
+                .ShowDialog();
+        }
+
+        // The card only carries a one-line status; the full manifest lives in the modal above.
+        private void UpdateEvidenceSummary()
+        {
+            if (EvidenceSummaryText == null) return;
+
+            if (_evidenceContext != null)
+            {
+                var resolved = _evidenceContext.Sources.Count(s => s.IsResolved);
+                EvidenceSummaryText.Text = _evidenceContext.HasUsableEvidence
+                    ? $"Indexed: {_evidenceContext.Manifest.Files.Count} file(s) from {resolved} source(s)."
+                    : "Indexed, but no readable files were found.";
+                return;
+            }
+
+            var pending = _evidenceFolders.Count + _evidenceFiles.Count
+                + ((EvidenceGitUrlBox?.Text ?? string.Empty).Trim().Length > 0 ? 1 : 0);
+            EvidenceSummaryText.Text = pending == 0
+                ? "No evidence attached."
+                : $"{pending} source(s) selected — click Validate / Index Evidence.";
+        }
+
         private void UpdateDatabaseSelectionSummary()
         {
             var selected = GetSelectedDatabaseNames();
@@ -2923,13 +3386,22 @@ namespace SQLAuditor.Wpf
         private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
         {
             var fqdn = FqdnText.Text.Trim();
+            if (!TryValidateAuthInputs(out var authError)) { AccessStatus.Text = authError; return; }
+            if (SelectedAuthMethod == SqlAuthMethod.ConnectionString
+                && SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out var csProfile, out _))
+            {
+                fqdn = csProfile.Server;
+                FqdnText.Text = fqdn;
+            }
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
             _isVerified = false;
             _auditor = null;
             ResetDatabaseSelection();
             var verificationVersion = _sqlConnectionInputsVersion;
             _isVerifyingSql = true;
-            AccessStatus.Text = "Testing connection...";
+            AccessStatus.Text = SelectedAuthMethod == SqlAuthMethod.EntraInteractive
+                ? "Testing connection... complete the sign-in in the browser window."
+                : "Testing connection...";
             VerifyBtn.IsEnabled = false;
             try
             {
@@ -2969,6 +3441,12 @@ namespace SQLAuditor.Wpf
                     AccessStatus.Text = "Failed to connect.";
                     Log($"Failed to connect to {fqdn}.");
                 }
+            }
+            catch (InvalidOperationException ex)
+            {
+                _isVerified = false;
+                AccessStatus.Text = ex.Message;
+                Log("Verify error: " + ex.Message);
             }
             catch (Exception ex)
             {

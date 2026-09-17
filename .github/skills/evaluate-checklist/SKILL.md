@@ -50,6 +50,8 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 | `export_manual_csv` | Exports every manual item, with its verification steps, to a CSV the user fills in. `generateReport=true` also marks undecided manual items Skipped and regenerates the report now |
 | `import_manual_csv` | Applies the Pass/Fail decisions from the filled CSV to the run |
 | `resolve_review` | Records a single Pass/Fail/Not Applicable decision — corrections only, not the main manual flow |
+| `set_evidence_sources` | Attaches a Git repo, pipeline definitions, docs folder or policy files to the run as evidence |
+| `evidence_manifest` | Shows the evidence already attached to the active run |
 | `generate_report` | Refreshes the historical manual results and writes the report + workbook |
 | `show_reports` | The final report and the authoritative outcome counts |
 | `load_checklist` | Look up valid IDs when the user's input cannot be resolved |
@@ -75,8 +77,20 @@ IDs, comma-separated lists, ranges and `all` itself. Do not pre-expand or reform
 evaluate(items="<user input verbatim>")
 ```
 
-It walks six steps and returns the **exact next question** whenever an input is missing. Ask
+It walks the steps and returns the **exact next question** whenever an input is missing. Ask
 that question, then call `evaluate` again with the answer plus everything gathered so far.
+
+> **Start with `items` only.** The manual-results choice, the server name, the authentication
+> method, the database scope and the evidence are the **user's** answers, not yours. The tool can
+> only ask when the argument is empty — if you pass a value it assumes the user gave it to you, so
+> passing a remembered or inferred value silently skips the question.
+>
+> **Never fill these in from earlier in the conversation, from a terminal command you ran, from a
+> previous run, from run metadata, or from the workspace.** Even if you are confident you know the
+> answer, leave the argument empty so the tool asks, and put the question to the user. If you
+> believe you already have the answer, you may propose it — but only as a question they confirm
+> ("Use `(localdb)\MSSQLLocalDB` again?"), never as a value you pass unasked. `items` is the one
+> exception: if the user already named the checklist items earlier, reuse those.
 
 - **The first question is always the manual-results choice.** Present both options verbatim and
   wait for the user's answer, then pass `manualResults="last-runs"` or `manualResults="fresh"`.
@@ -85,8 +99,19 @@ that question, then call `evaluate` again with the answer plus everything gather
   - *Option 2 — Fresh Evaluation:* "Do you want to evaluate the checklist items fresh (do not copy
     manual results from previous runs)?"
 - **Never guess the server name** or use a default such as `localhost`.
-- **Never ask for a password in chat.** For SQL Login the tool needs only the username; the
-  password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched VS Code.
+- **Never ask for a password or secret in chat.** `authMethod` accepts `windows`, `sql`,
+  `entra-service-principal` (alias `entra-sp`) and `entra-managed-identity` (alias `entra-msi`).
+  The tool needs only the identity (`sqlUser`, or `clientId` for the Entra methods); secrets are
+  read from `SQLAUDITOR_SQL_PASSWORD`, or `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service
+  principal, in the session that launched VS Code. `windows` and `entra-managed-identity` need
+  no secret at all.
+- **Pick an authentication method that works for the target.** Azure SQL endpoints
+  (`*.database.windows.net`) cannot use `windows` — offer `sql`, `entra-service-principal` or
+  `entra-managed-identity`.
+- **`entra-interactive` (alias `entra-mfa`) is not available here** — this server is headless, so a
+  browser sign-in would hang the call. When the user needs MFA, point them at the desktop app.
+- **A full connection string wins.** When `SQLAUDITOR_CONNECTION_STRING` is set in the session, it
+  supplies the server and the credentials verbatim, and `server`/`authMethod` are ignored.
 - **Never choose the databases.** Once the connection details are known, `evaluate` returns a
   `STEP 4b of 6 — DATABASE SELECTION REQUIRED` block listing the user databases on the instance.
   Show that list, let the user pick one, several or all of them, then call `evaluate` again with
@@ -123,7 +148,67 @@ proves compliance ("0 unauthorised logins" on a Pass) is real evidence, not "Not
 Call `enrich_result` per item and keep going. Work through the list in batches rather than
 pausing after each one, and do not write a summary until every listed item is recorded.
 
-### 3. Review the items the scripts could not decide — via the manual CSV
+### 3. Evidence review — settle what artefacts can answer, before asking the user
+
+Many review items are **documentation or process controls** (source control, pipelines, runbooks,
+architecture docs, environment separation, secrets handling, compliance records). They cannot be
+answered from the SQL Server instance at all, and interviewing the user about them one at a time is
+slow and imprecise. Look for the `=== ACTION REQUIRED: EVIDENCE REVIEW ===` /
+`=== EVIDENCE REVIEW AVAILABLE ===` block.
+
+> **When evidence is attached, this step runs BEFORE the `enrich_result` pass in step 2.** The
+> evidence block is printed first for that reason. Do not start enriching script items, and do not
+> begin the step 4 manual CSV flow, until every item listed under "Items eligible for evidence review" has
+> either a `resolve_review` call or a stated reason the evidence could not settle it. Skipping this
+> leaves items sitting in NeedsReview that the attached files already answer.
+
+When evidence is attached the block prints a **CANDIDATE FILES PER ITEM** list — a ranked shortlist
+of the evidence paths most likely to answer each item. Open those files first rather than browsing
+the whole manifest.
+
+1. **If no evidence is attached yet, ask once:** "Do you have a Git repository, deployment pipeline
+   or documentation folder I can read as evidence? Give me a local folder path, a file path, or an
+   https Git URL — or say 'no' to review these manually."
+   - If they provide one, call
+     `set_evidence_sources(localPaths="...", gitUrl="...", gitRef="...", files="...")`.
+   - Private repositories authenticate from the `SQLAUDITOR_GIT_TOKEN` session environment
+     variable. **Never ask for a token in chat** and never accept one inside the URL.
+   - If they decline, skip straight to step 4.
+   - If the block says `=== EVIDENCE COULD NOT BE READ ===`, relay the error to the user verbatim
+     before doing anything else — their repository or folder failed to resolve.
+2. **Read the files yourself** with your own file tools, under the resolved paths the tool printed.
+   The server makes no LLM calls — you are the analyst. For each item, first identify **the artefact
+   the control requires**, then check whether that artefact is actually in the attached evidence.
+3. **Record each verdict you can justify:**
+   `resolve_review(id="...", decision="pass|fail", notes="<what the files actually show, quoting the
+   values and sections you relied on>", evidenceSource="<source label>",
+   evidenceFiles="<the manifest paths you read>")`, then `enrich_result` for the same item.
+
+**Rules you must not break:**
+- **If the required artefact is not in the attached evidence, leave the item as NeedsReview.** The
+  evidence set is a partial view of the organisation — an artefact you were not given may still
+  exist. Its absence here is not proof the control is missing and is **not** grounds for `fail`.
+- Cite only files you **actually opened**. Never cite a path you inferred from the manifest listing.
+- `pass` requires the artefact to be present **and** to show the control in place.
+- `fail` requires you to **hold** the artefact and for it to evidence a gap — an unapproved draft, an
+  unowned document, one stating outright that the control does not exist, or one that does not cover
+  the environment being audited.
+- **Once you hold a relevant artefact, decide.** If the attached evidence addresses the control,
+  record `pass` or `fail`. NeedsReview is only for a control the evidence does not address at all —
+  it is not a way to avoid a difficult judgement on evidence you were actually given.
+- **Never record `notapplicable` from evidence.** Whether a control has nothing to assess on this
+  platform is the user's judgement, not yours. `resolve_review` rejects it when `evidenceSource` or
+  `evidenceFiles` is set. Leave the item as NeedsReview and tell the user what the evidence suggests
+  and why you think it may not apply, so they can make the call in step 4.
+- If the evidence is **silent, partial or ambiguous, do not decide.** Leave the item for step 4 and
+  tell the user which items the evidence could not settle. A wrong Pass or Fail is far worse than
+  an item that stays for human review.
+- Items needing an interview, a live instance setting, or proof that an event actually happened
+  (a failover test was run, an approval was given) are almost never answerable from a repository.
+
+After the pass, report which items you resolved from evidence and which still need the user.
+
+### 4. Review the items neither the scripts nor the evidence could decide — via the manual CSV
 
 Manual items are decided through a **CSV export/import**, the same workflow the desktop app uses.
 Do **not** ask for these decisions one item at a time, and do **not** paste the verification steps
@@ -156,7 +241,7 @@ into the chat — the CSV already carries them.
 4. Call `enrich_result` for every applied item with wording **you** derive from their evidence.
    Their raw words must never be left as the report Finding.
 
-### 4. Report
+### 5. Report
 
 `evaluate` generates the full report suite automatically in the run directory, but it does **not**
 refresh `results/historical_last_run.json`.
@@ -180,8 +265,9 @@ e.g. "All items are complete. Shall I generate the final report now?" Never gene
 | Path | Content |
 |------|---------|
 | `results/checklist_results.json` | Per-item outcome, score, severity and your wording |
+| `results/evidence-manifest.json` | The evidence sources attached to the run and the indexed file inventory |
 | `results/historical_last_run.json` | Manual/AI-Manual results keyed by checklist ID, reusable by later runs (refreshed only by `generate_report`) |
-| `Audit Report.md` | Scored Markdown audit report |
+| `Audit Report.md` | Scored Markdown audit report, including an "Evidence-Derived Verdicts" section |
 | `Audit Checklist.md` | Per-item checklist rendering |
 | `Risk Register.md` | Risk register derived from the failed items |
 | `OT Server SQL Assessment Readout 3.html` | HTML readout |

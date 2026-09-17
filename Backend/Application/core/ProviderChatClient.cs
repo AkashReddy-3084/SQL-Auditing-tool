@@ -40,6 +40,16 @@ internal sealed class ProviderChatClient
             System.Net.HttpStatusCode.Forbidden or
             System.Net.HttpStatusCode.NotFound;
 
+    /// <summary>
+    /// Set the first time a permanent fault is seen, so a caller can tell the operator why every
+    /// AI-backed step went quiet instead of leaving them to find it in the diagnostics log.
+    /// </summary>
+    public static string? PermanentFaultMessage { get; private set; }
+
+    public static void RecordPermanentFault(string message) => PermanentFaultMessage ??= message;
+
+    public static void ClearPermanentFault() => PermanentFaultMessage = null;
+
     public async Task<string> CompleteAsync(string systemPrompt, string prompt, CancellationToken cancellationToken)
     {
         // qwen-3.6-27b and other Qwen3 reasoning models emit a long chain-of-thought before

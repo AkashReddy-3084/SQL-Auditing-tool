@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using SQLAuditor.Lib;
 
 namespace SQLAuditor
 {
@@ -20,6 +21,13 @@ namespace SQLAuditor
                 return await RunEvaluateCommandAsync(args);
             }
 
+            // Offline verification of the connection and platform layers. Touches no SQL Server
+            // and no network, so the Azure behaviour can be checked without an Azure subscription.
+            if (args.Length > 0 && string.Equals(args[0], "selftest", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunSelfTestCommandAsync(args);
+            }
+
             // List the most recent evaluation runs across all servers.
             if (args.Length > 0 && string.Equals(args[0], "history", StringComparison.OrdinalIgnoreCase))
             {
@@ -36,6 +44,12 @@ namespace SQLAuditor
             if (args.Length > 0 && string.Equals(args[0], "resolve_review", StringComparison.OrdinalIgnoreCase))
             {
                 return RunResolveReviewCommand(args);
+            }
+
+            // Attach or show the Git repository / pipeline / documentation evidence for the run.
+            if (args.Length > 0 && string.Equals(args[0], "evidence", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RunEvidenceCommandAsync(args);
             }
 
             // Export every manual checklist item, with its verification steps, to the shared CSV
@@ -80,7 +94,7 @@ namespace SQLAuditor
                 return RunGenerateReportCommand(args);
             }
 
-            Console.WriteLine("SQL Auditor — lightweight console interface");
+            Console.WriteLine("SQL Auditor â€” lightweight console interface");
 
             // special debug flag: dump parsed checklist structure and exit
             if (args.Contains("--dump-checklist"))
@@ -103,23 +117,35 @@ namespace SQLAuditor
                 return 0;
             }
 
-            string fqdn = args.Length > 0 ? args[0] : Prompt("Enter SQL Server FQDN (host[,port]):");
-            Console.WriteLine($"Target: {fqdn}");
-
-            string authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-            string connectionString;
-            if (authChoice.Trim() == "2")
+            var menuRawConnection = SQLAuditor.Lib.SqlAuthProfile.ReadConnectionStringFromEnvironment();
+            string fqdn;
+            if (menuRawConnection != null)
             {
-                string user = Prompt("SQL username:");
-                string pass = PromptSecret("SQL password:");
-                connectionString = $"Server={fqdn};User Id={user};Password={pass};TrustServerCertificate=true;";
+                if (!SQLAuditor.Lib.SqlAuthProfile.TryParseConnectionString(menuRawConnection, out var menuRawProfile, out var menuRawError))
+                {
+                    Console.Error.WriteLine($"Error: {menuRawError}");
+                    return 2;
+                }
+                fqdn = menuRawProfile.Server;
             }
             else
             {
-                connectionString = $"Server={fqdn};Integrated Security=true;TrustServerCertificate=true;";
+                fqdn = args.Length > 0 ? args[0] : Prompt("Enter SQL Server FQDN (host[,port]):");
             }
+            Console.WriteLine($"Target: {fqdn}");
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var (interactiveProfile, interactiveAuthError) = ResolveAuthProfile(
+                new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                fqdn,
+                nonInteractive: false);
+            if (interactiveProfile is null)
+            {
+                Console.Error.WriteLine(interactiveAuthError);
+                return 2;
+            }
+            Console.WriteLine($"Authentication: {interactiveProfile.Describe()}");
+
+            var auditor = new SQLAuditor.Lib.Auditor(interactiveProfile);
 
             while (true)
             {
@@ -292,21 +318,47 @@ namespace SQLAuditor
                 return 2;
             }
 
-            string? user = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase) ? meta.SqlUser : null;
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-            if (!string.IsNullOrWhiteSpace(user) && string.IsNullOrWhiteSpace(pass))
+            // Replay the authentication method recorded with the original run.
+            if (!SqlAuthProfile.TryParseMethod(meta.AuthMethod, out var rerunMethod))
+                rerunMethod = SqlAuthMethod.WindowsIntegrated;
+            string? user = rerunMethod is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity
+                ? (meta.ClientId ?? meta.SqlUser)
+                : meta.SqlUser;
+            var rerunShell = new SqlAuthProfile { Method = rerunMethod };
+            string? pass = null;
+            if (rerunShell.RequiresSecret)
             {
-                if (copilotMode)
+                var secretEnv = rerunMethod == SqlAuthMethod.EntraServicePrincipal
+                    ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                    : "SQLAUDITOR_SQL_PASSWORD";
+                pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable(secretEnv);
+                if (string.IsNullOrWhiteSpace(pass))
                 {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' requires a password. Set SQLAUDITOR_SQL_PASSWORD in your session.");
-                    return 2;
+                    var secretLabel = SqlAuthProfile.SecretLabelFor(rerunMethod);
+                    if (copilotMode)
+                    {
+                        Console.Error.WriteLine($"Error: {SqlAuthProfile.DisplayNameFor(rerunMethod)} identity '{user}' requires a {secretLabel.ToLowerInvariant()}. Set {secretEnv} in your session.");
+                        return 2;
+                    }
+                    pass = PromptSecret($"{secretLabel} for '{user}':");
                 }
-                pass = PromptSecret($"SQL password for '{user}':");
             }
 
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            var rerunProfile = new SqlAuthProfile
+            {
+                Method = rerunMethod,
+                Server = server!,
+                Database = "master",
+                UserId = string.IsNullOrWhiteSpace(user) ? null : user.Trim(),
+                Secret = pass,
+            };
+
+            var rerunAuthError = rerunProfile.Validate();
+            if (rerunAuthError is not null)
+            {
+                Console.Error.WriteLine($"Error: stored authentication for this run is unusable: {rerunAuthError}");
+                return 2;
+            }
 
             // Items: override with --items, else reuse the stored selection.
             var itemsCsv = GetOption(opts, "items");
@@ -315,7 +367,7 @@ namespace SQLAuditor
                 : (meta.SelectedItemIds ?? Array.Empty<string>()).ToArray();
             if (ids.Length == 0) { Console.Error.WriteLine("Error: this run has no stored checklist items; pass --items."); return 2; }
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var auditor = new SQLAuditor.Lib.Auditor(rerunProfile);
             var structure = await auditor.GetChecklistStructureAsync();
             var knownIds = new System.Collections.Generic.HashSet<string>(
                 structure.SelectMany(s => s.Items).Select(i => i.Id), StringComparer.OrdinalIgnoreCase);
@@ -344,8 +396,11 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(rerunMethod),
+                SqlUser = rerunMethod == SqlAuthMethod.SqlLogin ? rerunProfile.UserId : null,
+                ClientId = rerunMethod is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity
+                    ? rerunProfile.UserId
+                    : null,
             };
 
             using var cts = new System.Threading.CancellationTokenSource();
@@ -498,6 +553,20 @@ namespace SQLAuditor
 
             // --- Step 1: SQL Server ---
             string? server = GetOption(opts, "server") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SERVER");
+
+            // A supplied connection string already names the server, so neither is prompted for.
+            var rawConnectionString = SQLAuditor.Lib.SqlAuthProfile.ReadConnectionStringFromEnvironment();
+            if (rawConnectionString != null)
+            {
+                if (!SQLAuditor.Lib.SqlAuthProfile.TryParseConnectionString(rawConnectionString, out var rawProfile, out var rawError))
+                {
+                    Console.Error.WriteLine($"Error: {rawError}");
+                    return 2;
+                }
+                server = rawProfile.Server;
+                Console.WriteLine($"Using the connection string from {SQLAuditor.Lib.SqlAuthProfile.ConnectionStringVariable} (server: {server}).");
+            }
+
             if (string.IsNullOrWhiteSpace(server))
                 server = PromptRequired("Enter SQL Server FQDN (host[,port]):", "A SQL Server is required.");
             if (string.IsNullOrWhiteSpace(server))
@@ -507,38 +576,14 @@ namespace SQLAuditor
             }
 
             // --- Step 2: Authentication / login details ---
-            string? user = GetOption(opts, "user") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
-            string? pass = GetOption(opts, "password") ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
-
-            if (string.IsNullOrWhiteSpace(user))
+            var (authProfile, authError) = ResolveAuthProfile(opts, server!, copilotMode);
+            if (authProfile is null)
             {
-                // No username supplied. In Copilot mode we never prompt: default to
-                // Windows Integrated auth (pass --user for SQL Login instead).
-                if (!copilotMode)
-                {
-                    var authChoice = Prompt("Auth method? (1=Windows Integrated, 2=SQL Login) [1/2]:");
-                    if (authChoice.Trim() == "2")
-                    {
-                        user = Prompt("SQL username:");
-                        pass = PromptSecret("SQL password:");
-                    }
-                }
+                Console.Error.WriteLine(authError);
+                return 2;
             }
-            else if (string.IsNullOrWhiteSpace(pass))
-            {
-                // Username provided up front but no password. In Copilot mode the password
-                // must come from the SQLAUDITOR_SQL_PASSWORD session env var (never chat).
-                if (copilotMode)
-                {
-                    Console.Error.WriteLine($"Error: SQL Login user '{user}' supplied but no password. Set SQLAUDITOR_SQL_PASSWORD in your session, or omit --user for Windows auth.");
-                    return 2;
-                }
-                pass = PromptSecret($"SQL password for '{user}':");
-            }
-
-            string connectionString = !string.IsNullOrWhiteSpace(user)
-                ? $"Server={server};User Id={user};Password={pass};TrustServerCertificate=true;"
-                : $"Server={server};Integrated Security=true;TrustServerCertificate=true;";
+            if (authProfile.Method == SqlAuthMethod.ConnectionString) server = authProfile.Server;
+            Console.WriteLine($"Authentication: {authProfile.Describe()}");
 
             // --- Step 3: Checklist IDs to evaluate ---
             if (!opts.TryGetValue("items", out var itemsCsv) || string.IsNullOrWhiteSpace(itemsCsv))
@@ -554,7 +599,7 @@ namespace SQLAuditor
                 return 2;
             }
 
-            var auditor = new SQLAuditor.Lib.Auditor(connectionString);
+            var auditor = new SQLAuditor.Lib.Auditor(authProfile);
 
             // --- Step 4: Databases to audit ---
             // The desktop app makes the user pick the databases, so the CLI must ask too:
@@ -615,6 +660,19 @@ namespace SQLAuditor
                 .GroupBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
+            // Evidence. The desktop app offers this before the run, so the CLI asks too: without
+            // it every documentation and process item comes back as manual review.
+            var evidenceSpec = ResolveEvidenceSpec(opts);
+            if (evidenceSpec == null)
+            {
+                if (copilotMode)
+                {
+                    PrintEvidenceQuestion();
+                    return 2;
+                }
+                evidenceSpec = PromptEvidenceSpec();
+            }
+
             Console.WriteLine($"Evaluating {validIds.Length} checklist item(s): {string.Join(", ", validIds)}");
             Console.WriteLine($"Target server: {server}");
             Console.WriteLine($"Target databases ({targetDatabases.Length}): {string.Join(", ", targetDatabases)}");
@@ -629,7 +687,7 @@ namespace SQLAuditor
                 if (!cts.IsCancellationRequested)
                 {
                     Console.WriteLine();
-                    Console.WriteLine("Cancellation requested — stopping after the current item...");
+                    Console.WriteLine("Cancellation requested â€” stopping after the current item...");
                     cts.Cancel();
                 }
             };
@@ -660,8 +718,11 @@ namespace SQLAuditor
             auditor.LastRunInputs = new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = server,
-                AuthMethod = !string.IsNullOrWhiteSpace(user) ? "SQL Login" : "Windows Authentication",
-                SqlUser = !string.IsNullOrWhiteSpace(user) ? user : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(authProfile.Method),
+                SqlUser = authProfile.Method == SqlAuthMethod.SqlLogin ? authProfile.UserId : null,
+                ClientId = authProfile.Method is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity
+                    ? authProfile.UserId
+                    : null,
             };
 
             SQLAuditor.Lib.ChecklistResult[] results;
@@ -716,6 +777,14 @@ namespace SQLAuditor
                 }
             }
 
+            // Attached after the run so the manifest lands in this run's directory.
+            var evidenceContext = await AttachEvaluateEvidenceAsync(opts, evidenceSpec);
+            if (evidenceContext is { } attached && attached.Sources.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(attached));
+            }
+
             // In Copilot mode, surface the NeedsReview items in a clearly delimited block
             // so the Copilot CLI skill can act as the reviewer (tailor guidance + decide),
             // and the script-evaluated items so it can author their audit wording.
@@ -728,6 +797,15 @@ namespace SQLAuditor
                 Console.Write(SQLAuditor.Lib.Auditor.BuildScriptEnrichmentRequest(
                     results,
                     id => $"sql-auditor enrich_result --id {id} --finding \"<finding>\" --evidence-file \"<file holding the evidence>\" --risk \"<riskImpact>\" --recommendation \"<recommendation>\""));
+
+                if (manualReviewItems.Count > 0)
+                {
+                    Console.WriteLine();
+                    Console.Write(SQLAuditor.Lib.EvidenceAttribution.BuildReviewRequest(
+                        manualReviewItems.Select(r => r.Id), evidenceContext));
+                    Console.WriteLine();
+                    Console.WriteLine("Attach more evidence with: sql-auditor evidence add --path <folder> | --git <https clone url> | --file <path>");
+                }
 
                 PrintNeedsReviewForCopilot(results, validIds, itemLookup);
             }
@@ -808,6 +886,142 @@ namespace SQLAuditor
             return anyFail ? 1 : 0;
         }
 
+        // ---------------------------------------------------------------------
+        // Authentication. Flags and environment variables win; anything still
+        // missing is prompted for. Secrets come only from the environment or a
+        // masked prompt, never from an echoed argument in non-interactive mode.
+        // ---------------------------------------------------------------------
+        static (SqlAuthProfile? Profile, string? Error) ResolveAuthProfile(
+            System.Collections.Generic.Dictionary<string, string> opts,
+            string server,
+            bool nonInteractive)
+        {
+            // An operator-supplied connection string answers server and auth at once.
+            var rawFromEnvironment = GetOption(opts, "connection-string")
+                ?? SqlAuthProfile.ReadConnectionStringFromEnvironment();
+            if (!string.IsNullOrWhiteSpace(rawFromEnvironment))
+            {
+                if (!SqlAuthProfile.TryParseConnectionString(rawFromEnvironment, out var rawProfile, out var rawError))
+                    return (null, $"Error: {rawError}");
+                return (rawProfile, null);
+            }
+
+            var token = GetOption(opts, "auth")
+                ?? GetOption(opts, "auth-method")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_AUTH_METHOD");
+
+            var user = GetOption(opts, "user")
+                ?? GetOption(opts, "client-id")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_USER");
+
+            SqlAuthMethod method;
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                if (!SqlAuthProfile.TryParseMethod(token, out method))
+                    return (null, $"Error: unknown --auth value '{token}'. Supported: {SqlAuthProfile.SupportedTokens}.");
+            }
+            else if (!string.IsNullOrWhiteSpace(user))
+            {
+                // Back-compat: a username with no --auth has always meant SQL Login.
+                method = SqlAuthMethod.SqlLogin;
+            }
+            else if (nonInteractive)
+            {
+                method = SqlAuthMethod.WindowsIntegrated;
+            }
+            else
+            {
+                method = PromptAuthMethod();
+            }
+
+            var shell = new SqlAuthProfile { Method = method };
+            var display = SqlAuthProfile.DisplayNameFor(method);
+            var userLabel = SqlAuthProfile.UserIdLabelFor(method);
+
+            if (method == SqlAuthMethod.WindowsIntegrated)
+            {
+                user = null;
+            }
+            else if (string.IsNullOrWhiteSpace(user) && shell.RequiresSecret)
+            {
+                if (nonInteractive)
+                    return (null, $"Error: {display} requires {userLabel}. Pass --user (or --client-id), or set SQLAUDITOR_SQL_USER.");
+                user = PromptRequired($"{userLabel}:", $"{userLabel} is required.");
+            }
+            else if (string.IsNullOrWhiteSpace(user) && !nonInteractive && method != SqlAuthMethod.EntraInteractive)
+            {
+                user = Prompt($"{userLabel} (press Enter to skip):");
+            }
+
+            string? secret = null;
+            if (shell.RequiresSecret)
+            {
+                if (method == SqlAuthMethod.EntraServicePrincipal)
+                {
+                    secret = Environment.GetEnvironmentVariable("SQLAUDITOR_ENTRA_CLIENT_SECRET")
+                        ?? Environment.GetEnvironmentVariable("SQLAUDITOR_CLIENT_SECRET");
+                }
+                secret ??= GetOption(opts, "password")
+                    ?? Environment.GetEnvironmentVariable("SQLAUDITOR_SQL_PASSWORD");
+
+                if (string.IsNullOrEmpty(secret))
+                {
+                    var secretLabel = SqlAuthProfile.SecretLabelFor(method);
+                    if (nonInteractive)
+                    {
+                        var envName = method == SqlAuthMethod.EntraServicePrincipal
+                            ? "SQLAUDITOR_ENTRA_CLIENT_SECRET"
+                            : "SQLAUDITOR_SQL_PASSWORD";
+                        return (null, $"Error: {display} for '{user}' has no {secretLabel.ToLowerInvariant()}. Set {envName} in your session.");
+                    }
+                    secret = PromptSecret($"{secretLabel} for '{user}':");
+                }
+            }
+
+            var tenantId = GetOption(opts, "tenant-id")
+                ?? GetOption(opts, "tenant")
+                ?? Environment.GetEnvironmentVariable("SQLAUDITOR_TENANT_ID");
+
+            var profile = new SqlAuthProfile
+            {
+                Method = method,
+                Server = server,
+                Database = "master",
+                UserId = string.IsNullOrWhiteSpace(user) ? null : user.Trim(),
+                Secret = string.IsNullOrEmpty(secret) ? null : secret,
+                TenantId = SqlAuthProfile.IsEntraMethod(method) && !string.IsNullOrWhiteSpace(tenantId) ? tenantId.Trim() : null,
+                Encrypt = ParseBoolOption(opts, "encrypt"),
+                TrustServerCertificate = ParseBoolOption(opts, "trust-server-certificate")
+                    ?? ParseBoolOption(opts, "trust"),
+            };
+
+            var error = profile.Validate();
+            return error is null ? (profile, null) : (null, "Error: " + error);
+        }
+
+        static SqlAuthMethod PromptAuthMethod()
+        {
+            Console.WriteLine("Authentication method:");
+            for (var i = 0; i < SqlAuthProfile.AllMethods.Count; i++)
+                Console.WriteLine($"  {i + 1}) {SqlAuthProfile.DisplayNameFor(SqlAuthProfile.AllMethods[i])}");
+
+            while (true)
+            {
+                var answer = Prompt($"Choose [1-{SqlAuthProfile.AllMethods.Count}]:");
+                if (string.IsNullOrWhiteSpace(answer)) return SqlAuthMethod.WindowsIntegrated;
+                if (SqlAuthProfile.TryParseMethod(answer, out var parsed)) return parsed;
+                Console.WriteLine("  Unrecognised choice. Please try again.");
+            }
+        }
+
+        static bool? ParseBoolOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
+        {
+            var raw = GetOption(opts, key);
+            if (raw is null) return null;
+            if (string.IsNullOrWhiteSpace(raw)) return true;
+            return raw.Trim().ToLowerInvariant() is "1" or "true" or "yes" or "y" or "on";
+        }
+
         static void PrintEvaluateUsage()
         {
             Console.WriteLine();
@@ -822,13 +1036,50 @@ namespace SQLAuditor
             Console.WriteLine("                      recorded in the latest run's historical_last_run.json, or evaluate");
             Console.WriteLine("                      them fresh. Aliases: --use-last-runs / --fresh.");
             Console.WriteLine("  --items <ids>       Comma-separated checklist IDs to evaluate.");
-            Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port]. Or set SQLAUDITOR_SERVER.");
+            Console.WriteLine("  --server <host>     SQL Server FQDN/host[,port], or an Azure SQL endpoint.");
+            Console.WriteLine("                      Or set SQLAUDITOR_SERVER.");
             Console.WriteLine("  --databases <names> Comma-separated user databases the database-scoped checks");
             Console.WriteLine("                      run against, or 'all'. System databases are never audited.");
-            Console.WriteLine("  --user <name>       SQL login username. Or set SQLAUDITOR_SQL_USER.");
-            Console.WriteLine("                      Omit for Windows Integrated authentication.");
+            Console.WriteLine("  --auth <method>     Authentication method. Or set SQLAUDITOR_AUTH_METHOD. One of:");
+            Console.WriteLine("                        windows                  Windows Integrated (default)");
+            Console.WriteLine("                        sql                      SQL Login");
+            Console.WriteLine("                        entra-interactive        Entra browser sign-in (MFA)");
+            Console.WriteLine("                        entra-service-principal  Client ID + client secret");
+            Console.WriteLine("                        entra-managed-identity   Managed identity of this host");
+            Console.WriteLine("  --user <name>       SQL login name, Entra UPN, or client ID (alias: --client-id).");
+            Console.WriteLine("                      Or set SQLAUDITOR_SQL_USER. Omitting it with no --auth means");
+            Console.WriteLine("                      Windows Integrated authentication.");
             Console.WriteLine("  --password <pw>     SQL login password. Or set SQLAUDITOR_SQL_PASSWORD.");
+            Console.WriteLine("                      Service principal secrets: set SQLAUDITOR_ENTRA_CLIENT_SECRET.");
+            Console.WriteLine("  --client-id <id>    Alias for --user: the Entra application (client) ID for");
+            Console.WriteLine("                      entra-service-principal, or the user-assigned identity ID for");
+            Console.WriteLine("                      entra-managed-identity (omit for the system-assigned identity).");
+            Console.WriteLine("  --tenant-id <guid>  Entra tenant, recorded in the run metadata. Or set SQLAUDITOR_TENANT_ID.");
+            Console.WriteLine("  --encrypt <bool>    Encrypt the connection. Defaults to true.");
+            Console.WriteLine("  --trust-server-certificate <bool>");
+            Console.WriteLine("                      Defaults to true for on-premises Windows/SQL auth, false for Entra");
+            Console.WriteLine("                      and for Azure SQL endpoints.");
+            Console.WriteLine();
+            Console.WriteLine("  Full connection string: set SQLAUDITOR_CONNECTION_STRING to use a complete");
+            Console.WriteLine("                      connection string. It overrides --server, --auth, --user and");
+            Console.WriteLine("                      --client-id, and is used verbatim: Encrypt, TrustServerCertificate,");
+            Console.WriteLine("                      timeouts, ports and ApplicationIntent are NOT overridden as they");
+            Console.WriteLine("                      are for the other methods. Omitting Database connects to master.");
+            Console.WriteLine("                      Never written to run metadata.");
             Console.WriteLine("  --json <path>       Also copy results JSON to this path.");
+            Console.WriteLine("  --evidence-path <folders>");
+            Console.WriteLine("                      Comma-separated local folders (a cloned repo, a docs folder) to");
+            Console.WriteLine("                      attach as evidence so documentation and process items can be");
+            Console.WriteLine("                      decided from artefacts instead of by interview.");
+            Console.WriteLine("  --evidence-git <url>");
+            Console.WriteLine("                      An https:// Git URL to shallow-clone and index as evidence.");
+            Console.WriteLine("                      Private repos authenticate from SQLAUDITOR_GIT_TOKEN.");
+            Console.WriteLine("  --evidence-ref <branch|tag>");
+            Console.WriteLine("                      Branch or tag to clone when --evidence-git is used.");
+            Console.WriteLine("  --evidence-file <paths>");
+            Console.WriteLine("                      Comma-separated individual files to attach as evidence.");
+            Console.WriteLine("  --no-evidence       The user has no evidence to attach. Without any of the");
+            Console.WriteLine("                      --evidence-* flags or this one, evaluate stops and asks.");
             Console.WriteLine("  --interactive       Force prompting to mark manual-review items pass/fail.");
             Console.WriteLine("                      (Auto-enabled in an interactive terminal.)");
             Console.WriteLine("  --copilot           Non-interactive; emit NeedsReview items for the");
@@ -842,6 +1093,12 @@ namespace SQLAuditor
             Console.WriteLine("Examples:");
             Console.WriteLine("  sqlauditor evaluate                                  (fully interactive)");
             Console.WriteLine("  sqlauditor evaluate --items 1.1.2,3.1.2 --server localhost --databases Sales --fresh");
+            Console.WriteLine("  sqlauditor evaluate --items 11.1.1-11.4.5 --server localhost --databases all --copilot \\");
+            Console.WriteLine("      --fresh --evidence-path C:\\src\\datawarehouse");
+            Console.WriteLine("  sqlauditor evaluate --items all --server myserver.database.windows.net \\");
+            Console.WriteLine("                      --auth entra-sp --client-id <app-id> --databases all --fresh");
+            Console.WriteLine("  $env:SQLAUDITOR_CONNECTION_STRING='Server=...;Database=...;...'");
+            Console.WriteLine("  sqlauditor evaluate --items all --databases all --fresh     (server read from it)");
         }
 
         // ---------------------------------------------------------------------
@@ -881,11 +1138,11 @@ namespace SQLAuditor
 
             Console.WriteLine();
             Console.WriteLine("How should manual checklist items be handled?");
-            Console.WriteLine("  1) Use the Last Runs  — Do you want me to use the last runs results for the manual steps?");
-            Console.WriteLine("  2) Fresh Evaluation   — Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?");
+            Console.WriteLine("  1) Use the Last Runs  â€” Do you want me to use the last runs results for the manual steps?");
+            Console.WriteLine("  2) Fresh Evaluation   â€” Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?");
             Console.WriteLine(available > 0
                 ? $"     ({available} manual result(s) available in results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName})"
-                : $"     (no results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} yet — option 1 falls back to a fresh manual evaluation)");
+                : $"     (no results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} yet â€” option 1 falls back to a fresh manual evaluation)");
 
             if (Console.IsInputRedirected)
             {
@@ -909,10 +1166,10 @@ namespace SQLAuditor
             Console.WriteLine();
             Console.WriteLine("=== MANUAL RESULTS SOURCE REQUIRED ===");
             Console.WriteLine("Before any evaluation starts, the user must choose how manual checklist items are handled.");
-            Console.WriteLine("Ask the user these two options and wait for their answer — never decide this yourself:");
-            Console.WriteLine("  Option 1 — Use the Last Runs:");
+            Console.WriteLine("Ask the user these two options and wait for their answer â€” never decide this yourself:");
+            Console.WriteLine("  Option 1 â€” Use the Last Runs:");
             Console.WriteLine("      \"Do you want me to use the last runs results for the manual steps?\"");
-            Console.WriteLine("  Option 2 — Fresh Evaluation:");
+            Console.WriteLine("  Option 2 â€” Fresh Evaluation:");
             Console.WriteLine("      \"Do you want to evaluate the checklist items fresh (do not copy manual results from previous runs)?\"");
             Console.WriteLine(available > 0
                 ? $"results/{SQLAuditor.Lib.HistoricalManualResultsStore.FileName} currently holds {available} reusable manual result(s)."
@@ -955,7 +1212,7 @@ namespace SQLAuditor
         {
             Console.WriteLine();
             Console.WriteLine("=== DATABASE SELECTION REQUIRED ===");
-            Console.WriteLine($"Ask the user which of these user databases on '{server}' should be audited — never decide this yourself:");
+            Console.WriteLine($"Ask the user which of these user databases on '{server}' should be audited â€” never decide this yourself:");
             foreach (var name in available)
                 Console.WriteLine("  - " + name);
             Console.WriteLine("They may pick one, several, or all of them.");
@@ -1037,8 +1294,8 @@ namespace SQLAuditor
             }
 
             Console.WriteLine($"{pending.Count} item(s) were not decided by the deterministic scripts and need review.");
-            Console.WriteLine("This CLI performs NO AI/LLM calls — YOU (GitHub Copilot CLI) are the reviewer. For EACH item below you MUST:");
-            Console.WriteLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content — exact T-SQL to run, settings/objects to inspect in SSMS):");
+            Console.WriteLine("This CLI performs NO AI/LLM calls â€” YOU (GitHub Copilot CLI) are the reviewer. For EACH item below you MUST:");
+            Console.WriteLine("  1. Present the guidance to the user using EXACTLY this output format (fill each section with specific, item-tailored content â€” exact T-SQL to run, settings/objects to inspect in SSMS):");
             Console.WriteLine("       Checklist: <checklist title>");
             Console.WriteLine("       Objective: <one sentence explaining what is being verified>");
             Console.WriteLine("       ");
@@ -1074,7 +1331,7 @@ namespace SQLAuditor
                 }
                 if (!string.IsNullOrWhiteSpace(r.Evidence))
                 {
-                    Console.WriteLine("Baseline verification steps (use as your source, then render it in the required output format above — do NOT invent a different structure):");
+                    Console.WriteLine("Baseline verification steps (use as your source, then render it in the required output format above â€” do NOT invent a different structure):");
                     Console.WriteLine(r.Evidence.Trim());
                 }
                 else
@@ -1084,6 +1341,218 @@ namespace SQLAuditor
                 Console.WriteLine($"After the user decides, run: sql-auditor resolve_review --id {r.Id} --decision <pass|fail|notapplicable> --notes \"<user's rationale>\"");
             }
             Console.WriteLine("=== END COPILOT REVIEW REQUIRED ===");
+        }
+
+        // ---------------------------------------------------------------------
+        // Non-interactive CLI: `evidence` subcommand. Attaches a Git repository,
+        // pipeline definitions, docs folders or policy files to the active run so
+        // documentation items can be decided from artefacts instead of by interview.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunEvidenceCommandAsync(string[] args)
+        {
+            var opts = ParseOptions(args);
+            var action = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)
+                ? args[1].Trim().ToLowerInvariant()
+                : "show";
+
+            if (opts.ContainsKey("help") || opts.ContainsKey("h"))
+            {
+                PrintEvidenceUsage();
+                return 0;
+            }
+
+            if (string.Equals(action, "show", StringComparison.Ordinal))
+            {
+                var existing = SQLAuditor.Lib.EvidenceStore.Load();
+                if (existing == null)
+                {
+                    Console.WriteLine($"No evidence is attached to the run in {SQLAuditor.Lib.AuditOutputPaths.CurrentRunDirectory}.");
+                    Console.WriteLine("Attach some with: sql-auditor evidence add --path <folder> | --git <https url> | --file <path>");
+                    return 0;
+                }
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(existing));
+                return 0;
+            }
+
+            if (!string.Equals(action, "add", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine($"Error: unknown evidence action '{action}'. Use 'add' or 'show'.");
+                PrintEvidenceUsage();
+                return 2;
+            }
+
+            var paths = SplitEvidenceList(GetOption(opts, "path") ?? GetOption(opts, "paths"));
+            var fileList = SplitEvidenceList(GetOption(opts, "file") ?? GetOption(opts, "files"));
+            var gitUrl = GetOption(opts, "git") ?? GetOption(opts, "git-url");
+            var gitRef = GetOption(opts, "ref") ?? GetOption(opts, "git-ref");
+
+            if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+            {
+                Console.Error.WriteLine("Error: provide at least one of --path, --file or --git.");
+                PrintEvidenceUsage();
+                return 2;
+            }
+
+            if (!string.IsNullOrWhiteSpace(gitUrl) && !SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+            {
+                if (SQLAuditor.Lib.EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                    Console.Error.WriteLine(SQLAuditor.Lib.EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse)
+                        + $"\n  sql-auditor evidence add --git \"{browse.CloneUrl}\" --ref \"{browse.Branch}\"");
+                else
+                    Console.Error.WriteLine($"Error: '{gitUrl}' is not a supported evidence repository URL. Only https:// Git clone URLs are accepted.");
+                return 2;
+            }
+
+            try
+            {
+                var context = await SQLAuditor.Lib.EvidenceStore.AttachAsync(
+                    paths, gitUrl, gitRef, fileList, System.Threading.CancellationToken.None);
+
+                Console.WriteLine(SQLAuditor.Lib.EvidenceStore.Describe(context));
+
+                if (!context.HasUsableEvidence)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Nothing was indexed, so no item can be decided from evidence.");
+                    return 2;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine("NEXT: read the relevant files yourself under the resolved paths above. For every item you can settle, run:");
+                Console.WriteLine("  sql-auditor resolve_review --id <id> --decision <pass|fail|notapplicable> --notes \"<what the files show>\" \\");
+                Console.WriteLine("      --evidence-source \"<label>\" --evidence-files \"<paths you read>\"");
+                Console.WriteLine("then 'enrich_result' for the same item. Cite only files you actually opened.");
+                Console.WriteLine("If the evidence is silent, partial or ambiguous for an item, leave it as NeedsReview and say so - never guess.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to attach evidence: {ex.GetType().Name}: {ex.Message}");
+                return 3;
+            }
+        }
+
+        static void PrintEvidenceUsage()
+        {
+            Console.WriteLine("Usage: sqlauditor evidence add [options]");
+            Console.WriteLine("       sqlauditor evidence show");
+            Console.WriteLine();
+            Console.WriteLine("Attaches Git repositories, CI/CD pipeline definitions, documentation folders and policy");
+            Console.WriteLine("files to the active run so documentation and process checklist items can be decided from");
+            Console.WriteLine("real artefacts. The CLI makes NO AI calls: it resolves and indexes the sources, and Copilot");
+            Console.WriteLine("CLI reads the files and records each verdict with resolve_review.");
+            Console.WriteLine();
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --path <folders>    Comma-separated local folder paths (a cloned repo, a docs folder).");
+            Console.WriteLine("  --file <paths>      Comma-separated individual file paths (a policy doc, a pipeline export).");
+            Console.WriteLine("  --git <url>         An https:// Git URL to shallow-clone and index.");
+            Console.WriteLine("                      Private repos authenticate from SQLAUDITOR_GIT_TOKEN; never pass a token here.");
+            Console.WriteLine("  --ref <branch|tag>  Branch or tag to clone when --git is used.");
+            Console.WriteLine("  --help              Show this help.");
+            Console.WriteLine();
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  sqlauditor evidence add --path C:\\src\\datawarehouse");
+            Console.WriteLine("  sqlauditor evidence add --git https://github.com/contoso/dw --ref main");
+            Console.WriteLine("  sqlauditor evidence show");
+        }
+
+        static System.Collections.Generic.List<string> SplitEvidenceList(string? value)
+            => (value ?? string.Empty)
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(v => v.Trim().Trim('"'))
+                .Where(v => v.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+        // Honours the --evidence-* flags on `evaluate`; falls back to whatever is already
+        // attached to the run so a second call does not re-clone.
+        static async Task<SQLAuditor.Lib.EvidenceContext?> AttachEvaluateEvidenceAsync(
+            System.Collections.Generic.Dictionary<string, string> opts,
+            string? interactiveSpec = null)
+        {
+            var paths = SplitEvidenceList(GetOption(opts, "evidence-path"));
+            var fileList = SplitEvidenceList(GetOption(opts, "evidence-file"));
+            var gitUrl = GetOption(opts, "evidence-git");
+            var gitRef = GetOption(opts, "evidence-ref");
+
+            // A free-text answer to the interactive question is classified here.
+            foreach (var entry in SplitEvidenceList(interactiveSpec))
+            {
+                if (entry.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || entry.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    gitUrl ??= entry;
+                else if (File.Exists(entry)) fileList.Add(entry);
+                else paths.Add(entry);
+            }
+
+            if (paths.Count == 0 && fileList.Count == 0 && string.IsNullOrWhiteSpace(gitUrl))
+                return SQLAuditor.Lib.EvidenceStore.Load();
+
+            if (!string.IsNullOrWhiteSpace(gitUrl) && !SQLAuditor.Lib.EvidenceWorkspace.IsSupportedRemoteUrl(gitUrl))
+            {
+                if (SQLAuditor.Lib.EvidenceRepositoryUrl.TryParseBrowseUrl(gitUrl) is { } browse)
+                    Console.Error.WriteLine("Warning: " + SQLAuditor.Lib.EvidenceRepositoryUrl.DescribeBrowseUrlRejection(browse));
+                else
+                    Console.Error.WriteLine($"Warning: '{gitUrl}' is not a supported evidence repository URL and was ignored. Only https:// Git clone URLs are accepted.");
+                gitUrl = null;
+            }
+
+            try
+            {
+                return await SQLAuditor.Lib.EvidenceStore.AttachAsync(
+                    paths, gitUrl, gitRef, fileList, System.Threading.CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Warning: could not attach evidence ({ex.GetType().Name}: {ex.Message}). Continuing with manual review.");
+                return null;
+            }
+        }
+
+        // Returns the evidence answer, "" when the user declined, or null when it has not been
+        // supplied yet and must be asked for.
+        static string? ResolveEvidenceSpec(System.Collections.Generic.Dictionary<string, string> opts)
+        {
+            if (opts.ContainsKey("no-evidence")) return string.Empty;
+
+            // The granular flags are themselves an answer to the question.
+            var hasGranular = !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-path"))
+                || !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-file"))
+                || !string.IsNullOrWhiteSpace(GetOption(opts, "evidence-git"));
+            return hasGranular ? string.Empty : null;
+        }
+
+        static void PrintEvidenceQuestion()
+        {
+            Console.WriteLine();
+            Console.WriteLine("=== EVIDENCE FOR DOCUMENTATION ITEMS ===");
+            Console.WriteLine("Many checklist items are documentation or process controls (source control, pipelines, runbooks,");
+            Console.WriteLine("architecture documents, environment separation, secrets handling). They cannot be answered from the");
+            Console.WriteLine("SQL Server instance, so without evidence they all come back for manual review.");
+            Console.WriteLine("Ask the user, and never decide for them:");
+            Console.WriteLine("  \"Do you have a Git repository, deployment pipeline or documentation folder I can read as evidence?");
+            Console.WriteLine("   Give me a local folder path, a file path, or an https Git clone URL - or say 'none' to review these manually.\"");
+            Console.WriteLine("Then run evaluate again, adding EXACTLY ONE of:");
+            Console.WriteLine("  --evidence-path <folder>  and/or  --evidence-file <path>  and/or  --evidence-git <https clone url> [--evidence-ref <branch>]");
+            Console.WriteLine("  --no-evidence             (they declined)");
+            Console.WriteLine("A browser page URL (.../tree/...) is NOT a clone URL and will be rejected - ask for the clone URL and branch separately.");
+            Console.WriteLine("=== END EVIDENCE FOR DOCUMENTATION ITEMS ===");
+        }
+
+        static string PromptEvidenceSpec()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Evidence for documentation items (optional).");
+            Console.WriteLine("Documentation and process controls are decided from artefacts - a repository, pipeline definitions,");
+            Console.WriteLine("runbooks or policy documents. Without them those items are queued for manual review.");
+
+            if (Console.IsInputRedirected)
+            {
+                Console.WriteLine("Non-interactive session: skipping evidence. Pass --evidence-path / --evidence-git to attach some.");
+                return string.Empty;
+            }
+
+            return Prompt("Evidence folder path, file path or https Git clone URL (blank to skip):").Trim();
         }
 
         // ---------------------------------------------------------------------
@@ -1098,12 +1567,20 @@ namespace SQLAuditor
             if (opts.ContainsKey("help") || opts.ContainsKey("h"))
             {
                 Console.WriteLine("Usage: sqlauditor resolve_review --id <id> --decision <pass|fail|needsreview|notapplicable> [--notes <text> | --notes-file <path>]");
+                Console.WriteLine("                                [--evidence-source <label>] [--evidence-files <paths>]");
+                Console.WriteLine();
+                Console.WriteLine("  --evidence-source   Set ONLY when the verdict came from attached evidence: the source label");
+                Console.WriteLine("                      shown by 'sql-auditor evidence show'.");
+                Console.WriteLine("  --evidence-files    Comma-separated manifest paths of the files you actually read.");
+                Console.WriteLine("                      Required whenever --evidence-source is set.");
                 return 0;
             }
 
             var id = GetOption(opts, "id");
             var decision = GetOption(opts, "decision");
             var notes = ReadValueOption(opts, "notes");
+            var evidenceSource = GetOption(opts, "evidence-source");
+            var evidenceFiles = ReadValueOption(opts, "evidence-files");
 
             if (string.IsNullOrWhiteSpace(id))
             {
@@ -1114,6 +1591,31 @@ namespace SQLAuditor
             {
                 Console.Error.WriteLine("Error: --decision is required (pass, fail, needsreview, or notapplicable).");
                 return 2;
+            }
+
+            var isEvidenceDerived = !string.IsNullOrWhiteSpace(evidenceSource) || !string.IsNullOrWhiteSpace(evidenceFiles);
+            if (isEvidenceDerived && string.IsNullOrWhiteSpace(evidenceFiles))
+            {
+                Console.Error.WriteLine($"Error: --evidence-files is required for [{id}] when the verdict comes from attached evidence. "
+                    + "List the manifest paths of the files you actually read.");
+                return 2;
+            }
+
+            // Deciding that a control has nothing to assess is a human judgement, so it cannot be
+            // filed from artefacts alone.
+            if (isEvidenceDerived
+                && SQLAuditor.Lib.NotApplicableEvidence.IsNotApplicableOutcome(SQLAuditor.Lib.ManualVerdict.Normalize(decision)))
+            {
+                Console.Error.WriteLine($"Error: 'notapplicable' cannot be recorded from attached evidence for [{id}]. "
+                    + "Whether a control has nothing to assess on this platform is the user's call. Leave the item as "
+                    + "NeedsReview and tell the user what the evidence suggests and why you think it may not apply.");
+                return 2;
+            }
+
+            if (isEvidenceDerived)
+            {
+                notes = $"{notes?.Trim()}\n\n{SQLAuditor.Lib.EvidenceAttribution.EvidencePrefix} "
+                      + SQLAuditor.Lib.EvidenceAttribution.Describe(evidenceSource, evidenceFiles);
             }
 
             var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
@@ -1567,6 +2069,267 @@ namespace SQLAuditor
 
         static string? GetOption(System.Collections.Generic.Dictionary<string, string> opts, string key)
             => opts.TryGetValue(key, out var v) ? v : null;
+
+        // ---------------------------------------------------------------------
+        // selftest: verifies the connection-string builder and the platform
+        // applicability rules entirely offline. No SQL Server, no network, no
+        // Azure subscription - so the Azure paths can be checked for free.
+        // ---------------------------------------------------------------------
+        static async Task<int> RunSelfTestCommandAsync(string[] args)
+        {
+            var failures = 0;
+            var checks = 0;
+
+            void Check(string name, bool passed, string detail)
+            {
+                checks++;
+                if (passed)
+                {
+                    Console.WriteLine($"  PASS  {name}");
+                }
+                else
+                {
+                    failures++;
+                    Console.WriteLine($"  FAIL  {name}");
+                    Console.WriteLine($"        {detail}");
+                }
+            }
+
+            static bool Has(string connectionString, string fragment) =>
+                connectionString.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // SqlConnectionStringBuilder serialises Authentication as the bare enum name
+            // ("ActiveDirectoryInteractive"), while the documented form is spaced.
+            static bool HasAuth(string connectionString, string method) =>
+                connectionString.Replace(" ", string.Empty)
+                    .IndexOf("Authentication=" + method.Replace(" ", string.Empty), StringComparison.OrdinalIgnoreCase) >= 0;
+
+            static string BuildCs(SQLAuditor.Lib.SqlAuthProfile p) =>
+                SQLAuditor.Lib.SqlConnectionStringFactory.Build(p);
+
+            const string AzureHost = "myserver.database.windows.net";
+            const string OnPremHost = @"SQLPROD01\INST1";
+
+            Console.WriteLine();
+            Console.WriteLine("=== 1. Azure endpoint detection ===");
+            Check("Azure SQL DB host detected",
+                SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint(AzureHost), AzureHost);
+            Check("Managed Instance host detected (multi-part DNS zone)",
+                SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint("mymi.abc123def.database.windows.net"),
+                "MI hostnames embed a DNS zone before the suffix");
+            Check("Host with tcp: prefix and port detected",
+                SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint("tcp:myserver.database.windows.net,1433"),
+                "prefix/port must be stripped before matching");
+            Check("Sovereign cloud host detected",
+                SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint("myserver.database.usgovcloudapi.net"),
+                "US Gov suffix");
+            Check("On-premises named instance NOT treated as Azure",
+                !SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint(OnPremHost), OnPremHost);
+            Check("Lookalike host NOT treated as Azure",
+                !SQLAuditor.Lib.SqlAuthProfile.IsAzureSqlEndpoint("database.windows.net.evil.example"),
+                "suffix match must be anchored at the end");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 2. Connection strings per authentication mode ===");
+
+            var windows = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            { Server = OnPremHost, Method = SQLAuditor.Lib.SqlAuthMethod.WindowsIntegrated });
+            Check("Windows Integrated sets Integrated Security",
+                Has(windows, "Integrated Security=True"), windows);
+            Check("On-premises keeps TrustServerCertificate=True (no regression)",
+                Has(windows, "Trust Server Certificate=True"), windows);
+
+            var sqlLogin = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            {
+                Server = AzureHost,
+                Method = SQLAuditor.Lib.SqlAuthMethod.SqlLogin,
+                UserId = "auditor",
+                Secret = "p@ss",
+            });
+            Check("SQL Login sets User ID and Password",
+                Has(sqlLogin, "User ID=auditor") && Has(sqlLogin, "Password=p@ss"), sqlLogin);
+            Check("Azure endpoint enforces Encrypt=True",
+                Has(sqlLogin, "Encrypt=True"), sqlLogin);
+            Check("Azure endpoint enforces certificate validation",
+                Has(sqlLogin, "Trust Server Certificate=False"), sqlLogin);
+            Check("Azure endpoint sets connect retry",
+                Has(sqlLogin, "Connect Retry Count=3"), sqlLogin);
+
+            var mfa = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            { Server = AzureHost, Method = SQLAuditor.Lib.SqlAuthMethod.EntraInteractive });
+            Check("Entra Interactive maps to ActiveDirectoryInteractive",
+                HasAuth(mfa, "Active Directory Interactive"), mfa);
+
+            var msiSystem = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            { Server = AzureHost, Method = SQLAuditor.Lib.SqlAuthMethod.EntraManagedIdentity });
+            Check("Managed Identity maps to ActiveDirectoryManagedIdentity",
+                HasAuth(msiSystem, "Active Directory Managed Identity"), msiSystem);
+            Check("System-assigned identity sends no User ID",
+                !Has(msiSystem, "User ID="), msiSystem);
+
+            var msiUser = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            {
+                Server = AzureHost,
+                Method = SQLAuditor.Lib.SqlAuthMethod.EntraManagedIdentity,
+                UserId = "11111111-1111-1111-1111-111111111111",
+            });
+            Check("User-assigned identity puts the client id in User ID",
+                Has(msiUser, "User ID=11111111-1111-1111-1111-111111111111"), msiUser);
+
+            var servicePrincipal = BuildCs(new SQLAuditor.Lib.SqlAuthProfile
+            {
+                Server = AzureHost,
+                Method = SQLAuditor.Lib.SqlAuthMethod.EntraServicePrincipal,
+                UserId = "22222222-2222-2222-2222-222222222222",
+                Secret = "client-secret",
+            });
+            Check("Service Principal maps to ActiveDirectoryServicePrincipal",
+                HasAuth(servicePrincipal, "Active Directory Service Principal"), servicePrincipal);
+            Check("Service Principal puts client id in User ID, secret in Password",
+                Has(servicePrincipal, "User ID=22222222-2222-2222-2222-222222222222")
+                && Has(servicePrincipal, "Password=client-secret"), servicePrincipal);
+
+            Check("Windows Authentication is rejected against an Azure endpoint",
+                new SQLAuditor.Lib.SqlAuthProfile
+                { Server = AzureHost, Method = SQLAuditor.Lib.SqlAuthMethod.WindowsIntegrated }.Validate() != null,
+                "Azure SQL cannot accept Windows Integrated auth");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 3. Supplied connection string is not rewritten ===");
+            const string raw = "Server=tcp:myserver.database.windows.net,1433;Database=Sales;"
+                             + "Integrated Security=true;Encrypt=false;TrustServerCertificate=true;"
+                             + "Connect Timeout=90;ApplicationIntent=ReadOnly";
+            if (!SQLAuditor.Lib.SqlAuthProfile.TryParseConnectionString(raw, out var rawProfile, out var rawError))
+            {
+                Check("Connection string parses", false, rawError);
+            }
+            else
+            {
+                Check("Connection string returned verbatim",
+                    BuildCs(rawProfile) == raw, BuildCs(rawProfile));
+                Check("Server is read out of the connection string",
+                    rawProfile.Server == "tcp:myserver.database.windows.net,1433", rawProfile.Server);
+                Check("Database is read out of the connection string",
+                    rawProfile.Database == "Sales", rawProfile.Database ?? "(null)");
+                Check("Encrypt=false is NOT overridden on an Azure host",
+                    Has(BuildCs(rawProfile), "Encrypt=false"),
+                    "the operator's own transport settings must win");
+            }
+
+            Check("Malformed connection string is rejected",
+                !SQLAuditor.Lib.SqlAuthProfile.TryParseConnectionString("=;;not valid==x", out _, out _),
+                "expected a parse failure");
+            Check("Connection string without a server is rejected",
+                !SQLAuditor.Lib.SqlAuthProfile.TryParseConnectionString("Database=foo;", out _, out _),
+                "expected a missing Data Source failure");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 4. Auth token parsing ===");
+            foreach (var (token, expected) in new[]
+            {
+                ("windows", SQLAuditor.Lib.SqlAuthMethod.WindowsIntegrated),
+                ("sql", SQLAuditor.Lib.SqlAuthMethod.SqlLogin),
+                ("entra-mfa", SQLAuditor.Lib.SqlAuthMethod.EntraInteractive),
+                ("entra-interactive", SQLAuditor.Lib.SqlAuthMethod.EntraInteractive),
+                ("entra-msi", SQLAuditor.Lib.SqlAuthMethod.EntraManagedIdentity),
+                ("entra-managed-identity", SQLAuditor.Lib.SqlAuthMethod.EntraManagedIdentity),
+                ("entra-sp", SQLAuditor.Lib.SqlAuthMethod.EntraServicePrincipal),
+                ("entra-service-principal", SQLAuditor.Lib.SqlAuthMethod.EntraServicePrincipal),
+                ("connection-string", SQLAuditor.Lib.SqlAuthMethod.ConnectionString),
+            })
+            {
+                var ok = SQLAuditor.Lib.SqlAuthProfile.TryParseMethod(token, out var parsed)
+                         && parsed == expected;
+                Check($"'{token}' parses as {expected}", ok, "token mapping");
+            }
+            Check("Unknown token is rejected",
+                !SQLAuditor.Lib.SqlAuthProfile.TryParseMethod("nonsense", out _), "expected rejection");
+            Check("Display name round-trips through metadata",
+                SQLAuditor.Lib.SqlAuthProfile.FromDisplayName(
+                    SQLAuditor.Lib.SqlAuthProfile.DisplayNameFor(SQLAuditor.Lib.SqlAuthMethod.EntraServicePrincipal))
+                == SQLAuditor.Lib.SqlAuthMethod.EntraServicePrincipal, "rerun replays the stored AuthMethod");
+            Check("Legacy 'Microsoft Entra Interactive' metadata still maps to interactive sign-in",
+                SQLAuditor.Lib.SqlAuthProfile.FromDisplayName("Microsoft Entra Interactive")
+                == SQLAuditor.Lib.SqlAuthMethod.EntraInteractive, "runs recorded before the rename must still rerun");
+
+            Console.WriteLine();
+            Console.WriteLine("=== 5. Platform applicability matrix (simulated EngineEditions) ===");
+            var report = await BuildPlatformMatrixAsync(Check);
+
+            Console.WriteLine();
+            Console.WriteLine(report);
+            Console.WriteLine($"{checks - failures}/{checks} checks passed.");
+            if (failures > 0)
+            {
+                Console.WriteLine($"{failures} FAILED.");
+                return 1;
+            }
+            Console.WriteLine("All offline checks passed. No SQL Server or Azure subscription was used.");
+            return 0;
+        }
+
+        // Runs the real applicability rules against simulated platform profiles so the Azure
+        // Not-Applicable behaviour can be inspected without an Azure instance.
+        static async Task<string> BuildPlatformMatrixAsync(Action<string, bool, string> check)
+        {
+            var auditor = new SQLAuditor.Lib.Auditor(string.Empty);
+            var structure = await auditor.GetChecklistStructureAsync();
+            var allIds = structure.SelectMany(s => s.Items).Select(i => i.Id).ToArray();
+
+            var repoRoot = Directory.GetCurrentDirectory();
+            var probe = new DirectoryInfo(repoRoot);
+            while (probe != null && !File.Exists(Path.Combine(probe.FullName, "Backend", "checklists", "platform-applicability.json")))
+                probe = probe.Parent;
+            var applicability = SQLAuditor.Lib.PlatformApplicability.Load(probe?.FullName);
+
+            check("platform-applicability.json loaded", applicability.RuleCount > 0,
+                  "no rules found - the matrix below would be meaningless");
+            check("checklist items loaded", allIds.Length > 0, "no checklist items found");
+
+            var platforms = new[]
+            {
+                ("SQL Server 2022 Enterprise", SQLAuditor.Lib.PlatformApplicability.BuildProfile(3, "Enterprise Edition", "16")),
+                ("SQL Server 2022 Express",    SQLAuditor.Lib.PlatformApplicability.BuildProfile(4, "Express Edition", "16")),
+                ("Azure SQL Database",         SQLAuditor.Lib.PlatformApplicability.BuildProfile(5, "GeneralPurpose", null, "GP_Gen5_2")),
+                ("Azure SQL Managed Instance", SQLAuditor.Lib.PlatformApplicability.BuildProfile(8, "GeneralPurpose", null, "GP_Gen5_4")),
+            };
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Platform                       Evaluated   Not Applicable");
+            sb.AppendLine("---------------------------------------------------------");
+
+            var azureDbExcluded = new System.Collections.Generic.List<string>();
+            foreach (var (label, profile) in platforms)
+            {
+                var na = 0;
+                foreach (var id in allIds)
+                {
+                    if (!applicability.IsApplicable(id, profile, out _))
+                    {
+                        na++;
+                        if (profile.EngineEdition == 5) azureDbExcluded.Add(id);
+                    }
+                }
+                sb.AppendLine($"{label,-30} {allIds.Length - na,9}   {na,14}");
+            }
+
+            var enterprise = SQLAuditor.Lib.PlatformApplicability.BuildProfile(3, "Enterprise Edition", "16");
+            var azureDb = SQLAuditor.Lib.PlatformApplicability.BuildProfile(5, "GeneralPurpose", null, "GP_Gen5_2");
+
+            check("Azure SQL DB excludes at least one item Enterprise evaluates",
+                allIds.Any(id => applicability.IsApplicable(id, enterprise, out _)
+                              && !applicability.IsApplicable(id, azureDb, out _)),
+                "expected SQL Server-only controls to be excluded on Azure SQL Database");
+            check("Azure SQL DB evaluates at least one item that does not apply on-premises",
+                allIds.Any(id => !applicability.IsApplicable(id, enterprise, out _)
+                              && applicability.IsApplicable(id, azureDb, out _)),
+                "expected Azure-only controls (service tier, public network access) to become applicable");
+            check("Every Azure exclusion carries a justification",
+                azureDbExcluded.All(id => { applicability.IsApplicable(id, azureDb, out var j); return !string.IsNullOrWhiteSpace(j); }),
+                "an excluded item with no reason would show a blank Not Applicable in the report");
+
+            return sb.ToString();
+        }
 
         // Wording that quotes script values is passed by file so no shell can mangle it.
         static string? ReadValueOption(System.Collections.Generic.Dictionary<string, string> opts, string key)

@@ -81,7 +81,7 @@ internal sealed class ScriptResultAiEnricher
                 ? "provider call failed (permanent — enrichment disabled for run): "
                 : "provider call failed (transient — this item skipped, next item still attempted): ") + ex.Message);
 
-            if (permanent) _providerUnavailable = true;
+            if (permanent) { _providerUnavailable = true; ProviderChatClient.RecordPermanentFault(ex.Message); }
             return null;
         }
 

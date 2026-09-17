@@ -362,7 +362,46 @@ public static class AuditWorkbookDocuments
             }
         }
 
+        AppendEvidenceDerivedSection(sb, model);
+
         return sb.ToString();
+    }
+
+    // Items decided from attached repositories, pipelines or documents rather than from a SQL
+    // script or a reviewer, listed together so the cited artefacts can be spot-checked.
+    private static void AppendEvidenceDerivedSection(StringBuilder sb, AuditWorkbookModel model)
+    {
+        var derived = model.Items
+            .Where(i => SQLAuditor.Lib.EvidenceAttribution.IsEvidenceDerived(i.Evidence))
+            .OrderBy(i => i.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (derived.Count == 0) return;
+
+        sb.AppendLine();
+        sb.AppendLine("## 5. Evidence-Derived Verdicts");
+        sb.AppendLine();
+        sb.AppendLine($"{derived.Count} item(s) were decided from attached artefacts (repository, pipeline definition or document) "
+            + "rather than from a SQL script or a reviewer interview. The cited files are the evidence of record for each.");
+        sb.AppendLine();
+        sb.AppendLine("| Ref | Outcome | Source & cited files | Finding |");
+        sb.AppendLine("|-----|---------|----------------------|---------|");
+        foreach (var item in derived)
+        {
+            sb.AppendLine(
+                $"| {Md(item.Id)} | {AuditWorkbookModel.Status(item)} | " +
+                $"{Md(ExtractEvidenceSource(item.Evidence))} | {Md(AuditWorkbookBuilder.Text(item.Finding))} |");
+        }
+    }
+
+    private static string ExtractEvidenceSource(string? evidence)
+    {
+        if (string.IsNullOrWhiteSpace(evidence)) return string.Empty;
+
+        var index = evidence.IndexOf(SQLAuditor.Lib.EvidenceAttribution.EvidencePrefix, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return string.Empty;
+
+        var block = evidence[(index + SQLAuditor.Lib.EvidenceAttribution.EvidencePrefix.Length)..].Trim();
+        return block.Replace("\r\n", " — ").Replace("\n", " — ").Trim();
     }
 
     // -- Risk Register.md ----------------------------------------------------
