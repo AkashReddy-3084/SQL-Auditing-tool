@@ -369,6 +369,29 @@
                                             <TextBlock Text="Tenant ID (optional)" Margin="0,0,0,4" />
                                             <TextBox x:Name="TenantIdBox" />
                                         </StackPanel>
+                                        <StackPanel x:Name="ConnectionStringPanel" Visibility="Collapsed" Margin="0,10,0,0">
+                                            <TextBlock Text="Connection String" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <Grid Width="352" HorizontalAlignment="Left">
+                                                <TextBox x:Name="ConnectionStringBox"
+                                                         TextWrapping="Wrap" AcceptsReturn="False" MaxLines="4" />
+                                                <!-- Watermark: shows the expected shape until the user types. -->
+                                                <TextBlock IsHitTestVisible="False" FontSize="11" Margin="8,6,8,0"
+                                                           VerticalAlignment="Top" TextTrimming="CharacterEllipsis"
+                                                           Foreground="{StaticResource MutedBrush}"
+                                                           Text="Server=myserver.database.windows.net;Database=Sales;User ID=auditor;Password=...">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Text, ElementName=ConnectionStringBox}" Value="">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </Grid>
+                                        </StackPanel>
 
                                         <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                             <CheckBox x:Name="EncryptCheck" Content="Encrypt" IsChecked="True" />

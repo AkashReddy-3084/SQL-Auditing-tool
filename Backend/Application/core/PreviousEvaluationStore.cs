@@ -25,6 +25,7 @@ public sealed record EvaluationRunMetadata
     public string? Fqdn { get; init; }
     public string? AuthMethod { get; init; }
     public string? SqlUser { get; init; }
+    public string? ClientId { get; init; }
     public IReadOnlyList<string>? Databases { get; init; }
     public IReadOnlyList<string>? SelectedItemIds { get; init; }
     public string? LlmBaseUrl { get; init; }
@@ -33,6 +34,13 @@ public sealed record EvaluationRunMetadata
 
     /// <summary>Evidence artefacts attached to the run. Never carries a Git token.</summary>
     public IReadOnlyList<EvidenceSourceRecord>? EvidenceSources { get; init; }
+
+    // Identity of the audited instance, detected once per run by PlatformApplicability.
+    public string? Platform { get; init; }
+    public string? PlatformDisplay { get; init; }
+    public int? EngineEdition { get; init; }
+    public string? EditionName { get; init; }
+    public int? VersionYear { get; init; }
 
     [JsonIgnore]
     public TimeSpan? Duration =>
@@ -48,12 +56,18 @@ public sealed record RunInputs
     public string? Fqdn { get; init; }
     public string? AuthMethod { get; init; }
     public string? SqlUser { get; init; }
+    public string? ClientId { get; init; }
     public IReadOnlyList<string>? Databases { get; init; }
     public IReadOnlyList<string>? SelectedItemIds { get; init; }
     public string? LlmBaseUrl { get; init; }
     public string? LlmModel { get; init; }
     public string? ManualCsvFileName { get; init; }
     public IReadOnlyList<EvidenceSourceRecord>? EvidenceSources { get; init; }
+    public string? Platform { get; init; }
+    public string? PlatformDisplay { get; init; }
+    public int? EngineEdition { get; init; }
+    public string? EditionName { get; init; }
+    public int? VersionYear { get; init; }
 }
 
 /// <summary>A previous run offered back to the user, together with the directory that holds it.</summary>
@@ -124,12 +138,18 @@ public static class PreviousEvaluationStore
             Fqdn = inputs?.Fqdn ?? existing?.Fqdn,
             AuthMethod = inputs?.AuthMethod ?? existing?.AuthMethod,
             SqlUser = inputs?.SqlUser ?? existing?.SqlUser,
+            ClientId = inputs?.ClientId ?? existing?.ClientId,
             Databases = inputs?.Databases ?? existing?.Databases,
             SelectedItemIds = inputs?.SelectedItemIds ?? existing?.SelectedItemIds,
             LlmBaseUrl = inputs?.LlmBaseUrl ?? existing?.LlmBaseUrl,
             LlmModel = inputs?.LlmModel ?? existing?.LlmModel,
             ManualCsvFileName = inputs?.ManualCsvFileName ?? existing?.ManualCsvFileName,
             EvidenceSources = inputs?.EvidenceSources ?? existing?.EvidenceSources,
+            Platform = inputs?.Platform ?? existing?.Platform,
+            PlatformDisplay = inputs?.PlatformDisplay ?? existing?.PlatformDisplay,
+            EngineEdition = inputs?.EngineEdition ?? existing?.EngineEdition,
+            EditionName = inputs?.EditionName ?? existing?.EditionName,
+            VersionYear = inputs?.VersionYear ?? existing?.VersionYear,
         };
 
         Write(runDirectory, metadata);
@@ -303,7 +323,8 @@ public static class PreviousEvaluationStore
         return (items.Count, pending == 0 ? CompletedStatus : PartialStatus, score);
     }
 
-    private static EvaluationRunMetadata? Read(string runDirectory)
+    /// <summary>Reads the metadata for a run, or null when it is absent or unreadable.</summary>
+    public static EvaluationRunMetadata? Read(string runDirectory)
     {
         var path = Path.Combine(runDirectory, FileName);
         if (!File.Exists(path)) return null;

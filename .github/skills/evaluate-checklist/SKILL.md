@@ -100,12 +100,18 @@ that question, then call `evaluate` again with the answer plus everything gather
     manual results from previous runs)?"
 - **Never guess the server name** or use a default such as `localhost`.
 - **Never ask for a password or secret in chat.** `authMethod` accepts `windows`, `sql`,
-  `entra-service-principal` and `entra-managed-identity`. The tool needs only the identity
-  (`sqlUser`: SQL login name or client ID); secrets are read from `SQLAUDITOR_SQL_PASSWORD`,
-  or `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal, in the session that launched
-  VS Code. `windows` and `entra-managed-identity` need no secret at all.
-- **`entra-interactive` is not available here** — this server is headless, so a browser
-  sign-in would hang the call. When the user needs MFA, point them at the desktop app.
+  `entra-service-principal` (alias `entra-sp`) and `entra-managed-identity` (alias `entra-msi`).
+  The tool needs only the identity (`sqlUser`, or `clientId` for the Entra methods); secrets are
+  read from `SQLAUDITOR_SQL_PASSWORD`, or `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service
+  principal, in the session that launched VS Code. `windows` and `entra-managed-identity` need
+  no secret at all.
+- **Pick an authentication method that works for the target.** Azure SQL endpoints
+  (`*.database.windows.net`) cannot use `windows` — offer `sql`, `entra-service-principal` or
+  `entra-managed-identity`.
+- **`entra-interactive` (alias `entra-mfa`) is not available here** — this server is headless, so a
+  browser sign-in would hang the call. When the user needs MFA, point them at the desktop app.
+- **A full connection string wins.** When `SQLAUDITOR_CONNECTION_STRING` is set in the session, it
+  supplies the server and the credentials verbatim, and `server`/`authMethod` are ignored.
 - **Never choose the databases.** Once the connection details are known, `evaluate` returns a
   `STEP 4b of 6 — DATABASE SELECTION REQUIRED` block listing the user databases on the instance.
   Show that list, let the user pick one, several or all of them, then call `evaluate` again with

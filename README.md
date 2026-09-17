@@ -74,7 +74,20 @@ dotnet run --project Frontend/MainWindow/SQLAuditor.Wpf.csproj
 
 ## Using the application
 
-1. **Login** — enter the SQL Server FQDN, choose an authentication method, and click *Verify Access*. Windows Authentication, SQL Login and three Microsoft Entra ID modes are supported: Entra Interactive (browser sign-in, satisfies MFA), Entra Service Principal and Entra Managed Identity. The form shows only the fields the chosen method needs. Named instances such as `localhost\SQLEXPRESS` are supported. After verification, choose one or more accessible user databases from the database dropdown, or choose *All Databases*. Nothing is selected by default.
+1. **Login** — enter the SQL Server FQDN, choose an authentication method, and click *Verify Access*. The form shows only the fields the chosen method needs. Named instances such as `localhost\SQLEXPRESS` are supported, as are Azure SQL endpoints such as `myserver.database.windows.net`. After verification, choose one or more accessible user databases from the database dropdown, or choose *All Databases*. Nothing is selected by default.
+
+   | Authentication | Use for | Credentials |
+   | --- | --- | --- |
+   | Windows Authentication | On-premises SQL Server / SQL Server on an Azure VM | None (uses the signed-in Windows account) |
+   | SQL Login | Any platform | Username + password |
+   | Entra Interactive (MFA) | Azure SQL DB / MI | Interactive browser sign-in, including the multi-factor challenge |
+   | Entra Managed Identity | Azure SQL DB / MI | None; optionally a user-assigned client ID |
+   | Entra Service Principal | Azure SQL DB / MI | Application (client) ID + client secret |
+   | Connection String | Anything the SQL client can reach | A full connection string, used verbatim |
+
+   Windows Authentication cannot reach an Azure SQL endpoint and is rejected before the connection is attempted. Connections to `*.database.windows.net` are always encrypted with certificate validation enabled; on-premises connections keep the existing behaviour.
+
+   Choose **Connection String** when the structured fields cannot express what you need — a custom port with specific TLS settings, `ApplicationIntent=ReadOnly` to target a readable secondary, a failover partner, or a longer `Connect Timeout`. Your options are kept: unlike the other methods, the tool does not override `Encrypt`, `TrustServerCertificate`, timeouts or retry settings. Two things are still applied — if you omit `Database` the audit connects to `master` (and, on Azure, falls back to the login's default database when `master` is unreachable), and the string is normalised by the SQL client, so `Server=` reads back as `Data Source=`. The server name is read out of it to label the run folder, and the string itself is never written to run metadata or any report.
 2. **LLM access** — enter the Base URL, API Key and Model for your OpenAI-compatible endpoint and click *Verify LLM access*.
 3. **Checklist** — select the controls to evaluate.
 4. **Evaluate** — script and AI checks run in parallel. Controls needing human judgement appear with generated verification steps for you to mark Pass or Fail.
@@ -128,13 +141,14 @@ checklist IDs).
 | Option | Description |
 | --- | --- |
 | `--items <ids>` | Comma-separated checklist IDs to evaluate, e.g. `1.1.2,3.1.2` |
-| `--server <host>` | SQL Server FQDN / `host[,port]`. Or set `SQLAUDITOR_SERVER` |
-| `--auth <method>` | `windows`, `sql`, `entra-interactive`, `entra-service-principal` or `entra-managed-identity`. Or set `SQLAUDITOR_AUTH_METHOD`. Defaults to `sql` when `--user` is given, otherwise `windows` |
+| `--server <host>` | SQL Server FQDN / `host[,port]`, or an Azure SQL endpoint. Or set `SQLAUDITOR_SERVER` |
+| `--auth <method>` | `windows`, `sql`, `entra-interactive`, `entra-service-principal` or `entra-managed-identity` (short aliases `entra-mfa`, `entra-sp`, `entra-msi`). Or set `SQLAUDITOR_AUTH_METHOD`. Defaults to `sql` when `--user` is given, otherwise `windows` |
 | `--user <name>` | SQL login name, Entra UPN, or application (client) ID. Alias `--client-id`. Or set `SQLAUDITOR_SQL_USER` |
 | `--password <pw>` | SQL login password. Or set `SQLAUDITOR_SQL_PASSWORD`. Service principal secrets come from `SQLAUDITOR_ENTRA_CLIENT_SECRET` |
 | `--tenant-id <guid>` | Entra tenant, recorded in the run log. Or set `SQLAUDITOR_TENANT_ID` |
 | `--encrypt <bool>` | Encrypt the connection. Defaults to `true` |
-| `--trust-server-certificate <bool>` | Defaults to `true` for Windows/SQL auth and `false` for Entra |
+| `--trust-server-certificate <bool>` | Defaults to `true` for on-premises Windows/SQL auth, `false` for Entra and Azure SQL endpoints |
+| *(env only)* `SQLAUDITOR_CONNECTION_STRING` | A full connection string, used verbatim. Overrides `--server`, `--auth`, `--user` and `--client-id`. Never written to run metadata |
 | `--json <path>` | Also copy the results JSON to this path |
 | `--interactive` | Force prompting to mark manual-review items Pass/Fail (auto-enabled in an interactive terminal) |
 | `--copilot` | Non-interactive; emit `Needs Review` items in a `COPILOT REVIEW REQUIRED` block for the GitHub Copilot CLI skill to review and decide via `resolve_review` |
@@ -147,6 +161,20 @@ records the audit wording for a script-evaluated item (its Outcome, Score, Sever
 Databases Verified stay script-derived); `configure_checklist` adds a new custom checklist item
 and generates its script (see below); `show_reports [--kind json]`
 prints the latest report; `--dump-checklist` lists the checklist structure.
+
+### Offline self-test
+
+```powershell
+Backend\CLI\bin\Debug\net8.0\SQLAuditor.exe selftest
+```
+
+Verifies the connection and platform layers **without connecting to anything** — no SQL Server,
+no network, no Azure subscription. It checks Azure endpoint detection, the connection string
+produced for each authentication method, that a supplied connection string is not rewritten,
+auth-token parsing, and the platform applicability matrix. The matrix runs the real
+`platform-applicability.json` rules against simulated EngineEditions, so you can see exactly which
+controls are evaluated and which are Not Applicable on Azure SQL Database and Managed Instance
+before you have an Azure instance to point at. Exits non-zero if any check fails.
 
 Examples:
 
@@ -224,9 +252,13 @@ Workflow:
 1. `/login` to GitHub Copilot CLI, then invoke the `sql-auditor` skill's `evaluate` command
    (it runs `SQLAuditor.exe evaluate --copilot`).
 2. The CLI asks for the **SQL Server** and **authentication** (`--auth`, defaulting to Windows
-   Integrated). Secrets are never typed in chat: the SQL login password comes from the
-   `SQLAUDITOR_SQL_PASSWORD` session environment variable, service principal secrets from
-   `SQLAUDITOR_ENTRA_CLIENT_SECRET`. It then evaluates the requested checklist items.
+   Integrated). SQL Login and the Microsoft Entra methods for Azure SQL are available:
+   `--auth entra-managed-identity` and `--auth entra-service-principal` with `--client-id`.
+   Secrets are never typed in chat or passed as command-line arguments: the SQL login password
+   comes from the `SQLAUDITOR_SQL_PASSWORD` session environment variable, service principal
+   secrets from `SQLAUDITOR_ENTRA_CLIENT_SECRET`. `--auth entra-interactive` needs a browser
+   prompt and is rejected in this non-interactive mode. The CLI then evaluates the requested
+   checklist items.
 3. Script-based controls are decided deterministically. **Needs Review** items are emitted in
    a `COPILOT REVIEW REQUIRED` block.
 4. For each item, **Copilot CLI generates the item-specific manual verification guidance**,

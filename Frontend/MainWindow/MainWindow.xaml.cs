@@ -166,6 +166,7 @@ namespace SQLAuditor.Wpf
             SqlUserBox.TextChanged += (s, e) => InvalidateSqlVerification();
             SqlPassBox.PasswordChanged += (s, e) => InvalidateSqlVerification();
             TenantIdBox.TextChanged += (s, e) => InvalidateSqlVerification();
+            ConnectionStringBox.TextChanged += (s, e) => InvalidateSqlVerification();
             EncryptCheck.Checked += (s, e) => InvalidateSqlVerification();
             EncryptCheck.Unchecked += (s, e) => InvalidateSqlVerification();
             TrustServerCertCheck.Checked += (s, e) => InvalidateSqlVerification();
@@ -596,13 +597,20 @@ namespace SQLAuditor.Wpf
                 label = $"{fqdn} #{copy++}";
             }
 
-            var isSqlLogin = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var isSqlLogin = SelectedAuthMethod == SqlAuthMethod.SqlLogin;
 
-            if (isSqlLogin && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            if (!TryValidateAuthInputs(out var authError))
             {
-                MessageBox.Show(this, "SQL Login needs both a username and a password.", "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, authError, "Credentials Required", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (!isSqlLogin && SelectedAuthMethod != SqlAuthMethod.WindowsIntegrated)
+            {
+                MessageBox.Show(this,
+                    "Multi-server runs support Windows Authentication and SQL Login only. "
+                    + "Audit Microsoft Entra targets one at a time.",
+                    "Authentication Not Supported", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
@@ -2668,12 +2676,13 @@ namespace SQLAuditor.Wpf
             _resumeDatabases = meta.Databases?.ToList();
             _resumeSelectedItemIds = meta.SelectedItemIds?.ToList();
 
-            var isSqlAuth = string.Equals(meta.AuthMethod, "SQL Login", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(meta.AuthMethod, "SQL", StringComparison.OrdinalIgnoreCase);
+            var storedMode = SqlAuthProfile.FromDisplayName(meta.AuthMethod);
 
             if (!string.IsNullOrWhiteSpace(meta.Fqdn)) FqdnText.Text = meta.Fqdn;
-            SelectAuthMethod(isSqlAuth);
-            SqlUserBox.Text = isSqlAuth ? (meta.SqlUser ?? string.Empty) : string.Empty;
+            SelectAuthMethod(storedMode);
+            SqlUserBox.Text = storedMode == SqlAuthMethod.SqlLogin
+                ? (meta.SqlUser ?? string.Empty)
+                : (meta.ClientId ?? string.Empty);
             SqlPassBox.Password = string.Empty;
             if (!string.IsNullOrWhiteSpace(meta.LlmBaseUrl)) LlmBaseUrlText.Text = meta.LlmBaseUrl;
             if (!string.IsNullOrWhiteSpace(meta.LlmModel)) LlmModelText.Text = meta.LlmModel;
@@ -2700,7 +2709,52 @@ namespace SQLAuditor.Wpf
                 MessageBoxImage.Information);
         }
 
-        private void SelectAuthMethod(bool sqlLogin) => AuthMethodCombo.SelectedIndex = sqlLogin ? 1 : 0;
+        // Validates that every credential the selected method needs has been supplied.
+        private bool TryValidateAuthInputs(out string error)
+        {
+            error = string.Empty;
+            var mode = SelectedAuthMethod;
+
+            if (mode == SqlAuthMethod.ConnectionString)
+            {
+                if (!SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out _, out var parseError))
+                {
+                    error = parseError;
+                    return false;
+                }
+                return true;
+            }
+
+            if (mode == SqlAuthMethod.SqlLogin
+                && (string.IsNullOrWhiteSpace(SqlUserBox.Text) || string.IsNullOrEmpty(SqlPassBox.Password)))
+            {
+                error = "SQL Login needs both a username and a password.";
+                return false;
+            }
+
+            if (mode == SqlAuthMethod.EntraServicePrincipal)
+            {
+                if (string.IsNullOrWhiteSpace(SqlUserBox.Text))
+                {
+                    error = "Microsoft Entra Service Principal needs an application (client) ID.";
+                    return false;
+                }
+                if (string.IsNullOrEmpty(SqlPassBox.Password))
+                {
+                    error = "Microsoft Entra Service Principal needs a client secret in the password box.";
+                    return false;
+                }
+            }
+
+            if (mode == SqlAuthMethod.WindowsIntegrated && SqlAuthProfile.IsAzureSqlEndpoint(FqdnText.Text))
+            {
+                error = "Windows Authentication cannot be used against an Azure SQL endpoint. "
+                      + "Choose SQL Login or one of the Microsoft Entra methods.";
+                return false;
+            }
+
+            return true;
+        }
 
         // The SQL password stays editable (it is never stored and must be re-entered for SQL auth).
         private void SetServerInputsLocked(bool locked)
@@ -2727,14 +2781,14 @@ namespace SQLAuditor.Wpf
         // Captures the UI-supplied inputs recorded with a run so it can be rerun or edited later.
         private SQLAuditor.Lib.RunInputs BuildRunInputs()
         {
-            var isSqlAuth = string.Equals(
-                (AuthMethodCombo.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString(),
-                "SQL Login", StringComparison.OrdinalIgnoreCase);
+            var mode = SelectedAuthMethod;
+            var identity = string.IsNullOrWhiteSpace(SqlUserBox.Text) ? null : SqlUserBox.Text.Trim();
             return new SQLAuditor.Lib.RunInputs
             {
                 Fqdn = string.IsNullOrWhiteSpace(FqdnText.Text) ? null : FqdnText.Text.Trim(),
-                AuthMethod = isSqlAuth ? "SQL Login" : "Windows Authentication",
-                SqlUser = isSqlAuth && !string.IsNullOrWhiteSpace(SqlUserBox.Text) ? SqlUserBox.Text.Trim() : null,
+                AuthMethod = SqlAuthProfile.DisplayNameFor(mode),
+                SqlUser = mode == SqlAuthMethod.SqlLogin ? identity : null,
+                ClientId = mode is SqlAuthMethod.EntraServicePrincipal or SqlAuthMethod.EntraManagedIdentity ? identity : null,
                 LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrlText.Text) ? null : LlmBaseUrlText.Text.Trim(),
                 LlmModel = string.IsNullOrWhiteSpace(LlmModelText.Text) ? null : LlmModelText.Text.Trim(),
             };
@@ -2823,18 +2877,36 @@ namespace SQLAuditor.Wpf
                 ? m
                 : SqlAuthMethod.WindowsIntegrated;
 
+        // Selects by Tag rather than index, so the combo order is free to change.
+        private void SelectAuthMethod(SqlAuthMethod method)
+        {
+            foreach (var item in AuthMethodCombo.Items)
+            {
+                if (item is System.Windows.Controls.ComboBoxItem combo && combo.Tag is SqlAuthMethod m && m == method)
+                {
+                    AuthMethodCombo.SelectedItem = combo;
+                    return;
+                }
+            }
+        }
+
         // Shows only the credential fields the selected method actually uses.
         private void ApplyAuthMode()
         {
             var method = SelectedAuthMethod;
             var isEntra = SqlAuthProfile.IsEntraMethod(method);
+            var isConnectionString = method == SqlAuthMethod.ConnectionString;
 
-            var showUser = method != SqlAuthMethod.WindowsIntegrated;
+            var showUser = method is not (SqlAuthMethod.WindowsIntegrated or SqlAuthMethod.ConnectionString);
             var showSecret = method is SqlAuthMethod.SqlLogin or SqlAuthMethod.EntraServicePrincipal;
 
             AuthUserPanel.Visibility = showUser ? Visibility.Visible : Visibility.Collapsed;
             AuthSecretPanel.Visibility = showSecret ? Visibility.Visible : Visibility.Collapsed;
             AuthTenantPanel.Visibility = isEntra ? Visibility.Visible : Visibility.Collapsed;
+            ConnectionStringPanel.Visibility = isConnectionString ? Visibility.Visible : Visibility.Collapsed;
+
+            // The server name comes out of the connection string itself.
+            FqdnText.IsEnabled = !isConnectionString;
 
             AuthUserLabel.Text = SqlAuthProfile.UserIdLabelFor(method);
             AuthSecretLabel.Text = SqlAuthProfile.SecretLabelFor(method);
@@ -2842,32 +2914,52 @@ namespace SQLAuditor.Wpf
             if (!showUser) SqlUserBox.Text = string.Empty;
             if (!showSecret) SqlPassBox.Password = string.Empty;
             if (!isEntra) TenantIdBox.Text = string.Empty;
+            if (!isConnectionString) ConnectionStringBox.Text = string.Empty;
+
+            // A supplied connection string carries its own transport settings, so the tool
+            // must not appear to override them.
+            EncryptCheck.IsEnabled = !isConnectionString;
+            TrustServerCertCheck.IsEnabled = !isConnectionString;
 
             // Handing an Entra token to an unverified server defeats the point of the token.
             EncryptCheck.IsChecked = true;
-            TrustServerCertCheck.IsChecked = !isEntra;
+            TrustServerCertCheck.IsChecked = !isEntra && !SqlAuthProfile.IsAzureSqlEndpoint(FqdnText.Text);
 
             var hint = method switch
             {
                 SqlAuthMethod.EntraInteractive => "A browser window will open for sign-in, including MFA.",
                 SqlAuthMethod.EntraManagedIdentity => "Uses the managed identity of the machine this app runs on.",
+                SqlAuthMethod.EntraServicePrincipal => "Enter the app's client ID above, and its client secret in the password box.",
+                SqlAuthMethod.ConnectionString => "Paste the full connection string for your server \u2014 the same one an application would use. "
+                                               + "Your own settings are kept as typed. Leave out Database to start from master. "
+                                               + "It is used for this run only and is never saved.",
+                SqlAuthMethod.WindowsIntegrated => "Uses your current Windows account. This does not work with Azure SQL \u2014 pick SQL Login or a Microsoft Entra option for those.",
                 _ => string.Empty,
             };
             AuthHintText.Text = hint;
             AuthHintText.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
         }
 
-        private SqlAuthProfile BuildAuthProfile(string fqdn) => new()
+        private SqlAuthProfile BuildAuthProfile(string fqdn)
         {
-            Method = SelectedAuthMethod,
-            Server = fqdn,
-            Database = "master",
-            UserId = AuthUserPanel.Visibility == Visibility.Visible ? SqlUserBox.Text?.Trim() : null,
-            Secret = AuthSecretPanel.Visibility == Visibility.Visible ? SqlPassBox.Password : null,
-            TenantId = AuthTenantPanel.Visibility == Visibility.Visible ? TenantIdBox.Text?.Trim() : null,
-            Encrypt = EncryptCheck.IsChecked == true,
-            TrustServerCertificate = TrustServerCertCheck.IsChecked == true,
-        };
+            if (SelectedAuthMethod == SqlAuthMethod.ConnectionString
+                && SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out var parsed, out _))
+            {
+                return parsed;
+            }
+
+            return new SqlAuthProfile
+            {
+                Method = SelectedAuthMethod,
+                Server = fqdn,
+                Database = "master",
+                UserId = AuthUserPanel.Visibility == Visibility.Visible ? SqlUserBox.Text?.Trim() : null,
+                Secret = AuthSecretPanel.Visibility == Visibility.Visible ? SqlPassBox.Password : null,
+                TenantId = AuthTenantPanel.Visibility == Visibility.Visible ? TenantIdBox.Text?.Trim() : null,
+                Encrypt = EncryptCheck.IsChecked == true,
+                TrustServerCertificate = TrustServerCertCheck.IsChecked == true,
+            };
+        }
 
         private async Task EnsureAuditor(string fqdn)
         {
@@ -3294,6 +3386,13 @@ namespace SQLAuditor.Wpf
         private async void VerifyBtn_Click(object sender, RoutedEventArgs e)
         {
             var fqdn = FqdnText.Text.Trim();
+            if (!TryValidateAuthInputs(out var authError)) { AccessStatus.Text = authError; return; }
+            if (SelectedAuthMethod == SqlAuthMethod.ConnectionString
+                && SqlAuthProfile.TryParseConnectionString(ConnectionStringBox.Text, out var csProfile, out _))
+            {
+                fqdn = csProfile.Server;
+                FqdnText.Text = fqdn;
+            }
             if (string.IsNullOrEmpty(fqdn)) { AccessStatus.Text = "Enter FQDN first."; return; }
             _isVerified = false;
             _auditor = null;

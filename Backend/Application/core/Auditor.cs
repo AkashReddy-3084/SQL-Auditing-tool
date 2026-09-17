@@ -173,10 +173,11 @@ namespace SQLAuditor.Lib
             }
             else
             {
-                var builder = new SqlConnectionStringBuilder(connectionString)
-                {
-                    InitialCatalog = "master"
-                };
+                var builder = new SqlConnectionStringBuilder(connectionString);
+                // An explicit catalog is honoured: on Azure SQL Database the login is often
+                // scoped to one user database and cannot open master.
+                if (string.IsNullOrWhiteSpace(builder.InitialCatalog))
+                    builder.InitialCatalog = "master";
                 _connectionString = builder.ConnectionString;
             }
             _authProfile = null;
@@ -251,14 +252,69 @@ namespace SQLAuditor.Lib
             catch (Exception ex) { return (false, ex.Message); }
         }
 
+        // Set when master could not be opened on an Azure endpoint and the audit was pinned
+        // to the login's default database instead.
+        private bool _singleDatabaseMode;
+
+        public bool IsSingleDatabaseMode => _singleDatabaseMode;
+
+        // On Azure SQL Database a login is frequently scoped to one user database and cannot open
+        // master. Falling back to the login's default database keeps the audit runnable there.
+        private async Task<SqlConnection> OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken cancellationToken)
+        {
+            try
+            {
+                var connection = CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                return connection;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var builder = new SqlConnectionStringBuilder(_connectionString);
+                if (!SqlAuthProfile.IsAzureSqlEndpoint(builder.DataSource) ||
+                    !string.Equals(builder.InitialCatalog, "master", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw;
+                }
+
+                builder.InitialCatalog = string.Empty;
+                var fallbackConnectionString = builder.ConnectionString;
+                var connection = CreateConnection(fallbackConnectionString);
+                await connection.OpenAsync(cancellationToken);
+
+                _connectionString = fallbackConnectionString;
+                _singleDatabaseMode = true;
+                AppendConnectionLog(
+                    $"master unreachable on Azure endpoint ({ex.Message}); pinned to default database '{connection.Database}'.");
+                return connection;
+            }
+        }
+
+        private static void AppendConnectionLog(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(AuditOutputPaths.CurrentRunDirectory);
+                var log = AuditOutputPaths.GetCurrentFilePath("ui_log.txt");
+                File.AppendAllText(log, $"{DateTime.UtcNow:O} {message}\n");
+            }
+            catch { }
+        }
+
         public async Task<string[]> GetAvailableDatabasesAsync(System.Threading.CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(_connectionString))
                 return Array.Empty<string>();
 
             var databases = new System.Collections.Generic.List<string>();
-            using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken);
+            using var conn = await OpenWithAzureCatalogFallbackAsync(cancellationToken);
+            if (_singleDatabaseMode)
+                return new[] { conn.Database };
+
             using var editionCommand = new SqlCommand(
                 "SELECT CONVERT(int, SERVERPROPERTY('EngineEdition'));",
                 conn)
@@ -1721,6 +1777,11 @@ WHERE d.name = DB_NAME();";
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList(),
                     EvidenceSources = evidenceContext?.Sources.ToList(),
+                    Platform = LastDetectedPlatform?.Platform,
+                    PlatformDisplay = LastDetectedPlatform?.Display,
+                    EngineEdition = LastDetectedPlatform?.EngineEdition,
+                    EditionName = LastDetectedPlatform?.EditionName,
+                    VersionYear = LastDetectedPlatform?.VersionYear,
                 };
                 PreviousEvaluationStore.Record(resultsDir, _connectionString, runStartedAt, DateTime.Now, runInputs);
             }
@@ -2076,6 +2137,23 @@ WHERE d.name = DB_NAME();";
                 var baseBuilder = new SqlConnectionStringBuilder(_connectionString);
                 var server = baseBuilder.DataSource;
                 if (string.IsNullOrWhiteSpace(server)) return false;
+
+                // Azure SQL reaches only over TCP, so probing named-pipe variants cannot succeed
+                // and only multiplies the connect timeout. Retry the catalog instead.
+                if (SqlAuthProfile.IsAzureSqlEndpoint(server))
+                {
+                    try
+                    {
+                        using var azureConnection = await OpenWithAzureCatalogFallbackAsync(System.Threading.CancellationToken.None);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendConnectionLog($"Azure endpoint {server} -> FAIL: {ex.Message}");
+                        return false;
+                    }
+                }
+
                 var unprefixedServer = Regex.Replace(
                     server,
                     @"^(tcp:|np:)",

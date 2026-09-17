@@ -1,6 +1,6 @@
 ---
 name: sql-auditor
-description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Windows/SQL authentication is unchanged. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
+description: Run the repository's SQL Auditor from GitHub Copilot CLI, or from any session where the sql-auditor MCP tools are unavailable. Use for "evaluate checklist 1.1.2", "evaluate checklist 1.1.1 - 1.3.10", "audit this instance", "run the SQL audit" and "add a custom checklist item" whenever the MCP tools cannot be called — everything runs through Backend/CLI/sql-auditor.ps1. Copilot CLI is the AI layer — the CLI runs only the existing evaluation engine (no LLM, no .env/PROVIDER_*), and Copilot tailors manual verification guidance for Needs Review items and collects the decisions through the manual CSV (export_manual_csv / import_manual_csv). Targets on-premises SQL Server, SQL Server on an Azure VM, Azure SQL Database and Azure SQL Managed Instance via --auth windows|sql|entra-msi|entra-sp. Scripts are authored only as part of configure_checklist, for a NEW custom checklist item.
 license: MIT
 allowed-tools: shell
 ---
@@ -128,10 +128,18 @@ All commands run from the repository root (`SQL-Auditing-tool`) via the wrapper 
    historical result still follow the normal review flow.
 2. Run **evaluate** with the checklist `--items` and `--server`. Pass `--auth` to pick the
    authentication method: `windows` (the default), `sql`, `entra-interactive`,
-   `entra-service-principal` or `entra-managed-identity`. Pass the identity with
-   `--user <name>` (SQL login name or client ID). Secrets come from the
-   `SQLAUDITOR_SQL_PASSWORD` session environment variable, or
-   `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal — **never** ask for one in chat.
+   `entra-service-principal` or `entra-managed-identity`. The short forms `entra-mfa`,
+   `entra-sp` and `entra-msi` are accepted as aliases. Pass the identity with
+   `--user <name>` (SQL login name or client ID); `--client-id` is an alias. Secrets come from
+   the `SQLAUDITOR_SQL_PASSWORD` session environment variable, or
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal — **never** ask for one in chat and
+   never pass one as a command-line argument. Azure SQL endpoints (`*.database.windows.net`)
+   cannot use `windows`, and `entra-interactive` is rejected in `--copilot` mode because it needs
+   an interactive browser prompt.
+   If the user needs connection options the flags cannot express (custom port with specific TLS
+   settings, `ApplicationIntent=ReadOnly`, a failover partner, a longer `Connect Timeout`), have
+   them set `SQLAUDITOR_CONNECTION_STRING` in the session instead; it is used verbatim and
+   overrides `--server`, `--auth`, `--user` and `--client-id`.
    The CLI runs the engine only; it never calls an LLM.
 2b. **Ask which databases to audit.** Without `--databases`, `evaluate --copilot` prints a
    `=== DATABASE SELECTION REQUIRED ===` block listing the user databases on the instance and
