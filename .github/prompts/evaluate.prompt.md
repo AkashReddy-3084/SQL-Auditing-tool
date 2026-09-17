@@ -22,9 +22,11 @@ Follow the repository skill `.github/skills/evaluate-checklist/SKILL.md` exactly
    ranges and `all` itself — do not pre-expand them and do not reformat them.
 3. `evaluate` returns the exact next question whenever an input is missing. Ask it, then call
    `evaluate` again with the answer plus everything gathered so far. **Never guess the server
-   name** and **never ask for a password in chat** — for SQL Login the tool needs only the
-   username; the password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched
-   VS Code.
+   name** and **never ask for a password or secret in chat** — the tool needs only the identity
+   (SQL login name or client ID); secrets are read from `SQLAUDITOR_SQL_PASSWORD` or
+   `SQLAUDITOR_ENTRA_CLIENT_SECRET` in the session that launched VS Code. `windows` and
+   `entra-managed-identity` need no secret; `entra-interactive` is not available because this
+   server is headless.
 4. Use the MCP tools, not `Backend/CLI/sql-auditor.ps1` and not file-editing tools.
 5. This server makes **no LLM calls — you are the AI layer.** For every item in the
    `=== COPILOT ENRICHMENT REQUIRED ===` block, author `finding`, `evidence`, `riskImpact` and

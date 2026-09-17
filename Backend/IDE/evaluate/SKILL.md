@@ -17,8 +17,9 @@ CLI `evaluate` command and reuses the same evaluation engine.
 | manualResults | Yes | `last-runs` or `fresh`. Must come from the user; decides whether manual/AI-Manual results in `results/historical_last_run.json` are copied forward. |
 | items   | Yes      | Comma-separated checklist IDs (e.g. `1.1.2,3.1.2`).      |
 | server  | Yes*     | SQL Server host[,port]. From arg/env `SQLAUDITOR_SERVER`.|
-| user    | No       | SQL login user. Omit for Windows Integrated auth.        |
-| password| No       | SQL login password (never logged/echoed).                |
+| authMethod | Yes   | `windows`, `sql`, `entra-service-principal` or `entra-managed-identity`. `entra-interactive` is rejected: this server is headless. |
+| sqlUser | No       | The identity: SQL login name or application (client) ID. Omit for Windows Integrated auth. |
+| tenantId | No      | Entra tenant, recorded in the run log for the audit trail.|
 
 \* May be supplied via environment/VS Code settings rather than per-call.
 
@@ -40,9 +41,9 @@ CLI `evaluate` command and reuses the same evaluation engine.
 - Paths to the generated JSON + report.
 
 ## Configuration (no hardcoded secrets)
-- SQL: `SQLAUDITOR_SERVER`, `SQLAUDITOR_SQL_USER`. The SQL Login password is read at
-  runtime from the `SQLAUDITOR_SQL_PASSWORD` session environment variable only — it is
-  never stored in `mcp.json`, source, logs, result files, or chat.
+- SQL: `SQLAUDITOR_SERVER`, `SQLAUDITOR_SQL_USER`. Passwords and secrets are read at
+  runtime from the `SQLAUDITOR_SQL_PASSWORD` and `SQLAUDITOR_ENTRA_CLIENT_SECRET` session
+  environment variables only — never stored in `mcp.json`, source, logs, result files, or chat.
 - LLM provider: not used by the IDE/MCP flow (Copilot Chat is the AI); `PROVIDER_BASE_URL`,
   `PROVIDER_API_KEY`, and `MODEL` are ignored here.
 

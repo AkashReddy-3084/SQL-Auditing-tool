@@ -64,8 +64,13 @@ that question, then call `evaluate` again with the answer plus everything gather
   - *Option 2 — Fresh Evaluation:* "Do you want to evaluate the checklist items fresh (do not copy
     manual results from previous runs)?"
 - **Never guess the server name** or use a default such as `localhost`.
-- **Never ask for a password in chat.** For SQL Login the tool needs only the username; the
-  password is read from `SQLAUDITOR_SQL_PASSWORD` in the session that launched VS Code.
+- **Never ask for a password or secret in chat.** `authMethod` accepts `windows`, `sql`,
+  `entra-service-principal` and `entra-managed-identity`. The tool needs only the identity
+  (`sqlUser`: SQL login name or client ID); secrets are read from `SQLAUDITOR_SQL_PASSWORD`,
+  or `SQLAUDITOR_ENTRA_CLIENT_SECRET` for a service principal, in the session that launched
+  VS Code. `windows` and `entra-managed-identity` need no secret at all.
+- **`entra-interactive` is not available here** — this server is headless, so a browser
+  sign-in would hang the call. When the user needs MFA, point them at the desktop app.
 
 With Option 1, manual items that already have a result in `results/historical_last_run.json` are
 copied forward and listed as `Copied from last runs (N item(s))`. Those items are **done**: do not
